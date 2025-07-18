@@ -5,6 +5,7 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::hash::{Hash, Hasher};
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
@@ -1505,7 +1506,28 @@ impl MyApp {
         let mut needs_full_refresh = false;
         
         for context_id in context_menu_requests {
-            if context_id > 10000 {
+            if context_id >= 20000 {
+                // ID >= 20000 means query edit operation
+                let hash = context_id - 20000;
+                self.handle_query_edit_request(hash);
+            } else if context_id <= -20000 {
+                // ID <= -20000 means query removal operation  
+                let hash = (-context_id) - 20000;
+                println!("🗑️ Processing query removal with hash: {}", hash);
+                if self.handle_query_remove_request_by_hash(hash) {
+                    // Force refresh of queries tree if removal was successful
+                    println!("🔄 Forcing queries tree refresh after successful removal");
+                    self.load_queries_from_directory();
+                    
+                    // Force immediate UI repaint - this is crucial!
+                    ui.ctx().request_repaint();
+                    
+                    // Set needs_refresh flag to ensure UI updates
+                    self.needs_refresh = true;
+                    
+                    println!("✅ Query tree refreshed after removal - UI should update now");
+                }
+            } else if context_id > 10000 {
                 // ID > 10000 means copy connection (connection_id = context_id - 10000)
                 let connection_id = context_id - 10000;
                 println!("📋 Processing copy request for connection ID: {}", connection_id);
@@ -1796,7 +1818,9 @@ impl MyApp {
                     NodeType::Event => "📅",
                 };
                 
-                if ui.button(format!("{} {}", icon, node.name)).clicked() {
+                let response = ui.button(format!("{} {}", icon, node.name));
+                
+                if response.clicked() {
                     // Handle node selection
                     match node.node_type {
                         NodeType::Table => {
@@ -1826,6 +1850,32 @@ impl MyApp {
                         },
                         _ => {}
                     }
+                }
+                
+                // Add context menu for query nodes
+                if node.node_type == NodeType::Query {
+                    response.context_menu(|ui| {
+                        if ui.button("Edit Query").clicked() {
+                            if let Some(file_path) = &node.file_path {
+                                // Use the file path directly as context identifier
+                                // Format: 20000 + simple index to differentiate from connections
+                                let edit_id = 20000 + (file_path.len() as i64 % 1000); // Simple deterministic ID
+                                context_menu_request = Some(edit_id);
+                                println!("Edit query requested for: {}", file_path);
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Remove Query").clicked() {
+                            if let Some(file_path) = &node.file_path {
+                                // Use the file path directly as context identifier
+                                // Format: -20000 - simple index to differentiate from connections
+                                let remove_id = -20000 - (file_path.len() as i64 % 1000); // Simple deterministic ID
+                                context_menu_request = Some(remove_id);
+                                println!("🗑️ Remove query requested for: {} (hash: {})", file_path, file_path.len() as i64 % 1000);
+                            }
+                            ui.close_menu();
+                        }
+                    });
                 }
             });
         }
@@ -2121,6 +2171,147 @@ impl MyApp {
             println!("✓ Connection copy data operation completed");
         } else {
             println!("❌ Connection with ID {} not found for copying", connection_id);
+        }
+    }
+
+    fn handle_query_edit_request(&mut self, hash: i64) {
+        println!("📝 Processing query edit request for hash: {}", hash);
+        
+        // Find the query file by hash
+        if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
+            println!("Found query file to edit: {}", query_file_path);
+            
+            // Open the query file in a new tab for editing
+            if let Err(err) = self.open_query_file(&query_file_path) {
+                println!("Failed to open query file for editing: {}", err);
+            }
+        } else {
+            println!("Query file not found for hash: {}", hash);
+        }
+    }
+
+    fn handle_query_remove_request_by_hash(&mut self, hash: i64) -> bool {
+        println!("🗑️ Processing query remove request for hash: {}", hash);
+        
+        // Find the query file by hash (using file length as simple hash)
+        let query_dir = Self::get_query_dir();
+        println!("🔍 Scanning query directory: {}", query_dir.display());
+        
+        if let Ok(entries) = std::fs::read_dir(&query_dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        if let Some(filename) = entry.file_name().to_str() {
+                            if filename.ends_with(".sql") {
+                                let file_path = entry.path().to_string_lossy().to_string();
+                                
+                                // Calculate simple hash based on file path length
+                                let file_hash = file_path.len() as i64 % 1000;
+                                
+                                println!("📄 Found file: {} (hash: {} vs requested: {})", filename, file_hash, hash);
+                                
+                                if file_hash == hash {
+                                    println!("✅ Found matching query file to remove: {}", file_path);
+                                    
+                                    // Close any open tabs for this file first
+                                    self.close_tabs_for_file(&file_path);
+                                    
+                                    // Remove the file from filesystem
+                                    match std::fs::remove_file(&file_path) {
+                                        Ok(()) => {
+                                            println!("✅ Successfully removed query file: {}", file_path);
+                                            
+                                            // Set needs_refresh flag for next update cycle
+                                            self.needs_refresh = true;
+                                            
+                                            return true;
+                                        },
+                                        Err(e) => {
+                                            println!("❌ Failed to remove query file: {}", e);
+                                            return false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        println!("❌ Query file not found for hash: {}", hash);
+        false
+    }
+
+    fn handle_query_remove_request(&mut self, hash: i64) -> bool {
+        println!("🗑️ Processing query remove request for hash: {}", hash);
+        
+        // Find the query file by hash
+        if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
+            println!("Found query file to remove: {}", query_file_path);
+            
+            // Close any open tabs for this file first
+            self.close_tabs_for_file(&query_file_path);
+            
+            // Remove the file from filesystem
+            match std::fs::remove_file(&query_file_path) {
+                Ok(()) => {
+                    println!("✓ Successfully removed query file: {}", query_file_path);
+                    true
+                },
+                Err(e) => {
+                    println!("❌ Failed to remove query file: {}", e);
+                    false
+                }
+            }
+        } else {
+            println!("Query file not found for hash: {}", hash);
+            false
+        }
+    }
+
+    fn find_query_file_by_hash(&self, hash: i64) -> Option<String> {
+        let query_dir = Self::get_query_dir();
+        
+        if let Ok(entries) = std::fs::read_dir(&query_dir) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() {
+                        if let Some(filename) = entry.file_name().to_str() {
+                            if filename.ends_with(".sql") {
+                                let file_path = entry.path().to_string_lossy().to_string();
+                                
+                                // Calculate hash of the file path
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                file_path.hash(&mut hasher);
+                                let file_hash = hasher.finish() as i64;
+                                
+                                if (file_hash % 10000) == hash {
+                                    return Some(file_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+
+    fn close_tabs_for_file(&mut self, file_path: &str) {
+        // Find all tabs that have this file open and close them
+        let mut indices_to_close = Vec::new();
+        
+        for (index, tab) in self.query_tabs.iter().enumerate() {
+            if tab.file_path.as_deref() == Some(file_path) {
+                indices_to_close.push(index);
+            }
+        }
+        
+        // Close tabs in reverse order to maintain correct indices
+        for &index in indices_to_close.iter().rev() {
+            self.close_tab(index);
         }
     }
 
@@ -5343,6 +5534,20 @@ impl MyApp {
 
 impl App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // Handle forced refresh flag
+        if self.needs_refresh {
+            println!("🔄 Processing forced refresh request");
+            self.needs_refresh = false;
+            
+            // Force refresh of query tree
+            self.load_queries_from_directory();
+            
+            // Request UI repaint
+            ctx.request_repaint();
+            
+            println!("✅ Forced refresh completed");
+        }
+        
         // Handle deferred theme selector request
         if self.request_theme_selector {
             self.request_theme_selector = false;
