@@ -5,10 +5,12 @@ edition = "2024"
 
 # Cargo.toml
 [package.metadata.bundle]
-name = "tabular"
+name = "Tabular"
 identifier = "com.tabular.data"
 icon = ["assets/AppIcon.icns"]
-
+category = "Development" # Kategori aplikasi (opsional, lihat dokumentasi Apple untuk daftar lengkap)
+copyright = "Copyright © 2025 jayuda" # Informasi hak cipta (opsional)
+info = "Your SQL Editor, Forged with Rust: Fast, Safe, Efficient." # Deskripsi singkat aplikasi (opsional)
 
 [dependencies]
 eframe = "0.31"
