@@ -271,6 +271,15 @@ struct MyApp {
     show_error_message: bool,
     // Advanced Editor Configuration
     advanced_editor: AdvancedEditor,
+    // Command Palette
+    show_command_palette: bool,
+    command_palette_input: String,
+    show_theme_selector: bool,
+    command_palette_items: Vec<String>,
+    command_palette_selected_index: usize,
+    theme_selector_selected_index: usize,
+    // Flag to request theme selector on next frame
+    request_theme_selector: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +388,13 @@ impl MyApp {
             error_message: String::new(),
             show_error_message: false,
             advanced_editor: AdvancedEditor::default(),
+            show_command_palette: false,
+            command_palette_input: String::new(),
+            show_theme_selector: false,
+            command_palette_items: Vec::new(),
+            command_palette_selected_index: 0,
+            theme_selector_selected_index: 0,
+            request_theme_selector: false,
         };
         
         // Clear any old cached pools
@@ -4841,38 +4857,6 @@ impl MyApp {
     }
 
     fn render_advanced_editor(&mut self, ui: &mut egui::Ui) {
-        // Create toolbar for editor controls
-        ui.horizontal(|ui| {
-            // Theme selector
-            egui::ComboBox::from_label("Theme")
-                .selected_text(format!("{:?}", self.advanced_editor.theme))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GITHUB_DARK, "GitHub Dark");
-                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GITHUB_LIGHT, "GitHub Light");
-                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GRUVBOX, "Gruvbox");
-                });
-
-            ui.separator();
-
-            // Font size control
-            ui.label("Font Size:");
-            ui.add(egui::DragValue::new(&mut self.advanced_editor.font_size).range(10.0..=24.0));
-
-            ui.separator();
-
-            // Editor options
-            ui.checkbox(&mut self.advanced_editor.show_line_numbers, "Line Numbers");
-            ui.checkbox(&mut self.advanced_editor.word_wrap, "Word Wrap");
-            ui.checkbox(&mut self.advanced_editor.show_whitespace, "Show Whitespace");
-
-            ui.separator();
-
-            // Find & Replace toggle
-            if ui.button("🔍 Find & Replace").clicked() {
-                self.advanced_editor.show_find_replace = !self.advanced_editor.show_find_replace;
-            }
-        });
-
         // Find & Replace panel
         if self.advanced_editor.show_find_replace {
             ui.horizontal(|ui| {
@@ -4973,10 +4957,379 @@ impl MyApp {
             }
         }
     }
+
+    fn open_command_palette(&mut self) {
+        self.show_command_palette = true;
+        self.command_palette_input.clear();
+        self.show_theme_selector = false;
+        self.command_palette_selected_index = 0;
+        
+        // Initialize command palette items
+        self.command_palette_items = vec![
+            "Preferences: Color Theme".to_string(),
+            "View: Toggle Word Wrap".to_string(),
+            "View: Toggle Line Numbers".to_string(),
+            "View: Toggle Find and Replace".to_string(),
+        ];
+    }
+
+    fn navigate_command_palette(&mut self, direction: i32) {
+        // Filter commands based on current input
+        let filtered_commands: Vec<String> = if self.command_palette_input.is_empty() {
+            self.command_palette_items.clone()
+        } else {
+            self.command_palette_items
+                .iter()
+                .filter(|cmd| cmd.to_lowercase().contains(&self.command_palette_input.to_lowercase()))
+                .cloned()
+                .collect()
+        };
+
+        if filtered_commands.is_empty() {
+            return;
+        }
+
+        // Update selected index with wrapping
+        if direction > 0 {
+            // Down arrow
+            self.command_palette_selected_index = (self.command_palette_selected_index + 1) % filtered_commands.len();
+        } else {
+            // Up arrow
+            if self.command_palette_selected_index == 0 {
+                self.command_palette_selected_index = filtered_commands.len() - 1;
+            } else {
+                self.command_palette_selected_index -= 1;
+            }
+        }
+    }
+
+    fn execute_selected_command(&mut self) {
+        // Filter commands based on current input
+        let filtered_commands: Vec<String> = if self.command_palette_input.is_empty() {
+            self.command_palette_items.clone()
+        } else {
+            self.command_palette_items
+                .iter()
+                .filter(|cmd| cmd.to_lowercase().contains(&self.command_palette_input.to_lowercase()))
+                .cloned()
+                .collect()
+        };
+
+        if self.command_palette_selected_index < filtered_commands.len() {
+            let selected_command = filtered_commands[self.command_palette_selected_index].clone();
+            self.execute_command(&selected_command);
+        }
+    }
+
+    fn navigate_theme_selector(&mut self, direction: i32) {
+        // There are 3 themes available
+        let theme_count = 3;
+
+        // Update selected index with wrapping
+        if direction > 0 {
+            // Down arrow
+            self.theme_selector_selected_index = (self.theme_selector_selected_index + 1) % theme_count;
+        } else {
+            // Up arrow
+            if self.theme_selector_selected_index == 0 {
+                self.theme_selector_selected_index = theme_count - 1;
+            } else {
+                self.theme_selector_selected_index -= 1;
+            }
+        }
+    }
+
+    fn select_current_theme(&mut self) {
+        // Map index to theme
+        let theme = match self.theme_selector_selected_index {
+            0 => ColorTheme::GITHUB_DARK,
+            1 => ColorTheme::GITHUB_LIGHT,
+            2 => ColorTheme::GRUVBOX,
+            _ => ColorTheme::GITHUB_DARK, // fallback
+        };
+
+        self.advanced_editor.theme = theme;
+        self.show_theme_selector = false;
+    }
+
+    fn render_command_palette(&mut self, ctx: &egui::Context) {
+        // Create a centered modal dialog
+        egui::Area::new(egui::Id::new("command_palette"))
+            .fixed_pos(egui::pos2(
+                ctx.screen_rect().center().x - 300.0,
+                ctx.screen_rect().center().y - 200.0,
+            ))
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(ui.style().visuals.window_fill)
+                    .stroke(ui.style().visuals.window_stroke)
+                    .shadow(egui::epaint::Shadow::default())
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(600.0, 400.0));
+                        
+                        ui.vertical(|ui| {
+                            // Title and input field
+                            ui.label(egui::RichText::new("Command Palette").heading());
+                            ui.separator();
+                            
+                            // Search input
+                            let response = ui.add_sized(
+                                [580.0, 25.0],
+                                egui::TextEdit::singleline(&mut self.command_palette_input)
+                                    .hint_text("Type command name...")
+                            );
+                            
+                            // Reset selection when text changes
+                            if response.changed() {
+                                self.command_palette_selected_index = 0;
+                            }
+                            
+                            // Auto-focus the input when palette opens
+                            if self.command_palette_input.is_empty() {
+                                response.request_focus();
+                            }
+                            
+                            ui.separator();
+                            
+                            // Filter commands based on input
+                            let filtered_commands: Vec<String> = if self.command_palette_input.is_empty() {
+                                self.command_palette_items.clone()
+                            } else {
+                                self.command_palette_items
+                                    .iter()
+                                    .filter(|cmd| cmd.to_lowercase().contains(&self.command_palette_input.to_lowercase()))
+                                    .cloned()
+                                    .collect()
+                            };
+
+                            // Ensure selected index is within bounds when filtering
+                            if self.command_palette_selected_index >= filtered_commands.len() && !filtered_commands.is_empty() {
+                                self.command_palette_selected_index = 0;
+                            }
+                            
+                            // Command list
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for (index, command) in filtered_commands.iter().enumerate() {
+                                        let is_selected = index == self.command_palette_selected_index;
+                                        
+                                        // Highlight selected item
+                                        let text = if is_selected {
+                                            egui::RichText::new(command)
+                                                .background_color(ui.style().visuals.selection.bg_fill)
+                                                .color(ui.style().visuals.selection.stroke.color)
+                                        } else {
+                                            egui::RichText::new(command)
+                                        };
+                                        
+                                        if ui.selectable_label(is_selected, text).clicked() {
+                                            self.execute_command(command);
+                                        }
+                                    }
+                                });
+                            
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Use");
+                                ui.code("↑↓");
+                                ui.label("to navigate,");
+                                ui.code("Enter");
+                                ui.label("to select,");
+                                ui.code("Escape");
+                                ui.label("to close");
+                            });
+                        });
+                    });
+            });
+    }
+
+    fn execute_command(&mut self, command: &str) {
+        match command {
+            "Preferences: Color Theme" => {
+                self.show_command_palette = false;
+                // Instead of directly setting show_theme_selector, use a flag
+                self.request_theme_selector = true;
+                self.theme_selector_selected_index = 0; // Reset to first theme
+            }
+            "View: Toggle Word Wrap" => {
+                self.advanced_editor.word_wrap = !self.advanced_editor.word_wrap;
+                self.show_command_palette = false;
+            }
+            "View: Toggle Line Numbers" => {
+                self.advanced_editor.show_line_numbers = !self.advanced_editor.show_line_numbers;
+                self.show_command_palette = false;
+            }
+            "View: Toggle Find and Replace" => {
+                self.advanced_editor.show_find_replace = !self.advanced_editor.show_find_replace;
+                self.show_command_palette = false;
+            }
+            _ => {
+                println!("Unknown command: {}", command);
+                self.show_command_palette = false;
+            }
+        }
+    }
+
+    fn render_theme_selector(&mut self, ctx: &egui::Context) {
+        // Create a centered modal dialog for theme selection
+        egui::Area::new(egui::Id::new("theme_selector"))
+            .fixed_pos(egui::pos2(
+                ctx.screen_rect().center().x - 200.0,
+                ctx.screen_rect().center().y - 150.0,
+            ))
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(ui.style().visuals.window_fill)
+                    .stroke(ui.style().visuals.window_stroke)
+                    .shadow(egui::epaint::Shadow::default())
+                    .inner_margin(egui::Margin::same(15))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(400.0, 300.0));
+                        
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Select Color Theme").heading());
+                            ui.separator();
+                            
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            
+                            // Available themes with descriptions
+                            let themes = vec![
+                                (ColorTheme::GITHUB_DARK, "GitHub Dark", "Dark theme with blue accents"),
+                                (ColorTheme::GITHUB_LIGHT, "GitHub Light", "Light theme with subtle colors"),
+                                (ColorTheme::GRUVBOX, "Gruvbox", "Retro warm theme with earthy colors"),
+                            ];
+                            
+                            for (index, (theme, name, description)) in themes.iter().enumerate() {
+                                let is_current = self.advanced_editor.theme == *theme;
+                                let is_selected = index == self.theme_selector_selected_index;
+                                
+                                // Create horizontal layout for theme item
+                                ui.horizontal(|ui| {
+                                    // Current theme indicator (checkmark)
+                                    if is_current {
+                                        ui.label("✓");
+                                    } else {
+                                        ui.label(" "); // Space for alignment
+                                    }
+                                    
+                                    // Theme name with different styling based on selection
+                                    let text = if is_selected {
+                                        // Highlight the selected item for keyboard navigation
+                                        egui::RichText::new(*name)
+                                            .size(16.0)
+                                            .background_color(ui.style().visuals.selection.bg_fill)
+                                            .color(ui.style().visuals.selection.stroke.color)
+                                    } else if is_current {
+                                        // Bold text for current theme
+                                        egui::RichText::new(*name)
+                                            .size(16.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0, 150, 255)) // Blue for current
+                                    } else {
+                                        // Normal text for other themes
+                                        egui::RichText::new(*name).size(16.0)
+                                    };
+                                    
+                                    let response = ui.label(text);
+                                    
+                                    // Handle click to select theme
+                                    if response.clicked() && !is_current {
+                                        self.advanced_editor.theme = *theme;
+                                        self.show_theme_selector = false;
+                                    }
+                                });
+                                
+                                // Show description with indentation
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0); // Indent description
+                                    ui.label(egui::RichText::new(*description).size(12.0).weak());
+                                });
+                                ui.add_space(5.0);
+                            }
+                            
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Use");
+                                ui.code("↑↓");
+                                ui.label("to navigate,");
+                                ui.code("Enter");
+                                ui.label("to select,");
+                                ui.code("Escape");
+                                ui.label("to close");
+                            });
+                        });
+                    });
+            });
+    }
 }
 
 impl App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // Handle deferred theme selector request
+        if self.request_theme_selector {
+            self.request_theme_selector = false;
+            self.show_theme_selector = true;
+        }
+        
+        // Handle keyboard shortcuts
+        ctx.input(|i| {
+            // CMD+SHIFT+P to open command palette (on macOS)
+            if i.modifiers.mac_cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
+                self.open_command_palette();
+            }
+            
+            // Handle command palette navigation
+            if self.show_command_palette {
+                // Arrow key navigation
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    self.navigate_command_palette(1);
+                } else if i.key_pressed(egui::Key::ArrowUp) {
+                    self.navigate_command_palette(-1);
+                }
+                // Enter to execute selected command
+                else if i.key_pressed(egui::Key::Enter) {
+                    self.execute_selected_command();
+                }
+            }
+            
+            // Handle theme selector navigation
+            if self.show_theme_selector {
+                // Arrow key navigation
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    self.navigate_theme_selector(1);
+                } else if i.key_pressed(egui::Key::ArrowUp) {
+                    self.navigate_theme_selector(-1);
+                }
+                // Enter to select theme
+                else if i.key_pressed(egui::Key::Enter) {
+                    self.select_current_theme();
+                }
+            }
+            
+            // Escape to close command palette or theme selector
+            if i.key_pressed(egui::Key::Escape) {
+                if self.show_theme_selector {
+                    self.show_theme_selector = false;
+                } else if self.show_command_palette {
+                    self.show_command_palette = false;
+                    self.command_palette_input.clear();
+                    self.command_palette_selected_index = 0;
+                }
+            }
+        });
+
+        // Render command palette if open
+        if self.show_command_palette {
+            self.render_command_palette(ctx);
+        }
+
+        // Render theme selector if open
+        if self.show_theme_selector {
+            self.render_theme_selector(ctx);
+        }
+
         // Check for background task results
         if let Some(receiver) = &self.background_receiver {
             while let Ok(result) = receiver.try_recv() {
@@ -5008,8 +5361,8 @@ impl App for MyApp {
         // Disable visual indicators for active/focused elements (but keep text selection visible)
         ctx.style_mut(|style| {
             // Keep text selection visible with a subtle highlight
-            style.visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(100, 150, 255, 80);
-            style.visuals.selection.stroke.color = egui::Color32::from_rgba_premultiplied(100, 150, 255, 120);
+            style.visuals.selection.bg_fill = egui::Color32::from_rgb(255, 120, 0);
+            style.visuals.selection.stroke.color = egui::Color32::from_rgb(0, 0, 0);
             
             // Only disable other widget visual indicators
             style.visuals.widgets.active.bg_fill = egui::Color32::TRANSPARENT;
