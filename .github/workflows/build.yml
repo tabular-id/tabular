@@ -1,0 +1,243 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: Tabular
+
+jobs:
+  # Build for macOS
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Build for ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }}
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tabular-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/tabular
+
+  # Create macOS universal binary and bundle
+  bundle-macos:
+    needs: build-macos
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download x86_64 binary
+      uses: actions/download-artifact@v4
+      with:
+        name: tabular-x86_64-apple-darwin
+        path: target/x86_64-apple-darwin/release/
+    
+    - name: Download aarch64 binary
+      uses: actions/download-artifact@v4
+      with:
+        name: tabular-aarch64-apple-darwin
+        path: target/aarch64-apple-darwin/release/
+    
+    - name: Make binaries executable
+      run: |
+        chmod +x target/x86_64-apple-darwin/release/tabular
+        chmod +x target/aarch64-apple-darwin/release/tabular
+    
+    - name: Install Rust and cargo-bundle
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-apple-darwin
+    
+    - name: Install cargo-bundle
+      run: cargo install cargo-bundle
+    
+    - name: Create universal binary
+      run: |
+        mkdir -p target/universal-apple-darwin/release
+        lipo -create \
+          target/x86_64-apple-darwin/release/tabular \
+          target/aarch64-apple-darwin/release/tabular \
+          -output target/universal-apple-darwin/release/tabular
+    
+    - name: Create .app bundle
+      run: |
+        cargo bundle --release --target aarch64-apple-darwin
+        cp target/universal-apple-darwin/release/tabular target/aarch64-apple-darwin/release/bundle/osx/${{ env.APP_NAME }}.app/Contents/MacOS/tabular
+    
+    - name: Create DMG
+      run: |
+        mkdir -p dist/macos
+        cp -r target/aarch64-apple-darwin/release/bundle/osx/${{ env.APP_NAME }}.app dist/macos/
+        hdiutil create -volname "${{ env.APP_NAME }}" -srcfolder dist/macos/${{ env.APP_NAME }}.app -ov -format UDZO dist/macos/${{ env.APP_NAME }}.dmg
+    
+    - name: Upload macOS artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: tabular-macos-universal
+        path: |
+          dist/macos/${{ env.APP_NAME }}.app
+          dist/macos/${{ env.APP_NAME }}.dmg
+
+  # Build for Linux
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Install cross
+      run: cargo install cross
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Build for ${{ matrix.target }}
+      run: cross build --release --target ${{ matrix.target }}
+    
+    - name: Create tarball
+      run: |
+        mkdir -p dist/linux
+        cp target/${{ matrix.target }}/release/tabular dist/linux/tabular-${{ matrix.target }}
+        cd dist/linux
+        tar -czf tabular-${{ matrix.target }}.tar.gz tabular-${{ matrix.target }}
+    
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tabular-linux-${{ matrix.target }}
+        path: dist/linux/tabular-${{ matrix.target }}.tar.gz
+
+  # Build for Windows
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Build for ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }}
+    
+    - name: Create zip archive
+      run: |
+        mkdir -p dist/windows
+        copy target/${{ matrix.target }}/release/tabular.exe dist/windows/tabular-${{ matrix.target }}.exe
+        cd dist/windows
+        powershell Compress-Archive -Path tabular-${{ matrix.target }}.exe -DestinationPath tabular-${{ matrix.target }}.zip
+    
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tabular-windows-${{ matrix.target }}
+        path: dist/windows/tabular-${{ matrix.target }}.zip
+
+  # Create release on tag push
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [bundle-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist/
+    
+    - name: Display structure
+      run: ls -la dist/
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/tabular-macos-universal/${{ env.APP_NAME }}.dmg
+          dist/tabular-linux-x86_64-unknown-linux-gnu/tabular-x86_64-unknown-linux-gnu.tar.gz
+          dist/tabular-linux-aarch64-unknown-linux-gnu/tabular-aarch64-unknown-linux-gnu.tar.gz
+          dist/tabular-windows-x86_64-pc-windows-msvc/tabular-x86_64-pc-windows-msvc.zip
+          dist/tabular-windows-aarch64-pc-windows-msvc/tabular-aarch64-pc-windows-msvc.zip
+        body: |
+          ## 🎉 Release Notes
+          
+          ### 📦 Downloads
+          
+          **macOS Universal:**
+          - `${{ env.APP_NAME }}.dmg` - Universal binary (Intel + Apple Silicon)
+          
+          **Linux:**
+          - `tabular-x86_64-unknown-linux-gnu.tar.gz` - x86_64
+          - `tabular-aarch64-unknown-linux-gnu.tar.gz` - ARM64
+          
+          **Windows:**
+          - `tabular-x86_64-pc-windows-msvc.zip` - x86_64
+          - `tabular-aarch64-pc-windows-msvc.zip` - ARM64
+          
+          ### 🚀 Installation
+          
+          **macOS:** Download and open the DMG file, then drag Tabular to Applications
+          **Linux:** Extract the tarball and run the binary
+          **Windows:** Extract the zip file and run the executable
+          
+          Built with ❤️ using Rust 🦀
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
