@@ -1,6 +1,7 @@
 use eframe::{egui, App, Frame};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqlitePool, MySqlPool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -16,7 +17,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Tabular",
         options,
-        Box::new(|_cc| Box::new(MyApp::new())),
+        Box::new(|_cc| Ok(Box::new(MyApp::new()))),
     )
 }
 
@@ -183,6 +184,41 @@ enum DatabasePool {
     SQLite(Arc<SqlitePool>),
 }
 
+#[derive(Clone)]
+struct AdvancedEditor {
+    show_line_numbers: bool,
+    theme: egui_code_editor::ColorTheme,
+    font_size: f32,
+    tab_size: usize,
+    auto_indent: bool,
+    show_whitespace: bool,
+    word_wrap: bool,
+    find_text: String,
+    replace_text: String,
+    show_find_replace: bool,
+    case_sensitive: bool,
+    use_regex: bool,
+}
+
+impl Default for AdvancedEditor {
+    fn default() -> Self {
+        Self {
+            show_line_numbers: true,
+            theme: egui_code_editor::ColorTheme::GITHUB_DARK,
+            font_size: 14.0,
+            tab_size: 4,
+            auto_indent: true,
+            show_whitespace: false,
+            word_wrap: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            show_find_replace: false,
+            case_sensitive: false,
+            use_regex: false,
+        }
+    }
+}
+
 struct MyApp {
     editor_text: String,
     selected_menu: String,
@@ -233,6 +269,8 @@ struct MyApp {
     // Error message display
     error_message: String,
     show_error_message: bool,
+    // Advanced Editor Configuration
+    advanced_editor: AdvancedEditor,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +378,7 @@ impl MyApp {
             auto_execute_after_connection: false,
             error_message: String::new(),
             show_error_message: false,
+            advanced_editor: AdvancedEditor::default(),
         };
         
         // Clear any old cached pools
@@ -4800,6 +4839,140 @@ impl MyApp {
             self.history_tree.push(node);
         }
     }
+
+    fn render_advanced_editor(&mut self, ui: &mut egui::Ui) {
+        // Create toolbar for editor controls
+        ui.horizontal(|ui| {
+            // Theme selector
+            egui::ComboBox::from_label("Theme")
+                .selected_text(format!("{:?}", self.advanced_editor.theme))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GITHUB_DARK, "GitHub Dark");
+                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GITHUB_LIGHT, "GitHub Light");
+                    ui.selectable_value(&mut self.advanced_editor.theme, ColorTheme::GRUVBOX, "Gruvbox");
+                });
+
+            ui.separator();
+
+            // Font size control
+            ui.label("Font Size:");
+            ui.add(egui::DragValue::new(&mut self.advanced_editor.font_size).range(10.0..=24.0));
+
+            ui.separator();
+
+            // Editor options
+            ui.checkbox(&mut self.advanced_editor.show_line_numbers, "Line Numbers");
+            ui.checkbox(&mut self.advanced_editor.word_wrap, "Word Wrap");
+            ui.checkbox(&mut self.advanced_editor.show_whitespace, "Show Whitespace");
+
+            ui.separator();
+
+            // Find & Replace toggle
+            if ui.button("🔍 Find & Replace").clicked() {
+                self.advanced_editor.show_find_replace = !self.advanced_editor.show_find_replace;
+            }
+        });
+
+        // Find & Replace panel
+        if self.advanced_editor.show_find_replace {
+            ui.horizontal(|ui| {
+                ui.label("Find:");
+                ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut self.advanced_editor.find_text));
+                
+                ui.label("Replace:");
+                ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut self.advanced_editor.replace_text));
+                
+                ui.checkbox(&mut self.advanced_editor.case_sensitive, "Case Sensitive");
+                ui.checkbox(&mut self.advanced_editor.use_regex, "Regex");
+                
+                if ui.button("Replace All").clicked() {
+                    self.perform_replace_all();
+                }
+                
+                if ui.button("Find Next").clicked() {
+                    self.find_next();
+                }
+                
+                if ui.button("✕").clicked() {
+                    self.advanced_editor.show_find_replace = false;
+                }
+            });
+        }
+
+        // Main code editor using egui_code_editor
+        let mut editor = CodeEditor::default()
+            .id_source("sql_editor")
+            .with_rows(25)
+            .with_fontsize(self.advanced_editor.font_size)
+            .with_theme(self.advanced_editor.theme)
+            .with_syntax(egui_code_editor::Syntax::sql())
+            .with_numlines(self.advanced_editor.show_line_numbers);
+
+        let response = editor.show(ui, &mut self.editor_text);
+        // If you get a type error here, try:
+        // let mut buffer = egui_code_editor::SimpleTextBuffer::from(&self.editor_text);
+        // let response = editor.show(ui, &mut buffer);
+        // self.editor_text = buffer.text().to_string();
+        
+        // Update tab content when editor changes
+        if response.response.changed() {
+            if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+                tab.content = self.editor_text.clone();
+                tab.is_modified = true;
+            }
+        }
+    }
+
+    fn perform_replace_all(&mut self) {
+        if self.advanced_editor.find_text.is_empty() {
+            return;
+        }
+
+        let find_text = &self.advanced_editor.find_text;
+        let replace_text = &self.advanced_editor.replace_text;
+
+        if self.advanced_editor.use_regex {
+            // Use regex replacement
+            if let Ok(re) = regex::Regex::new(find_text) {
+                self.editor_text = re.replace_all(&self.editor_text, replace_text).into_owned();
+            }
+        } else {
+            // Simple string replacement
+            if self.advanced_editor.case_sensitive {
+                self.editor_text = self.editor_text.replace(find_text, replace_text);
+            } else {
+                // Case insensitive replacement
+                let find_lower = find_text.to_lowercase();
+                let mut result = String::new();
+                let mut last_end = 0;
+                
+                for (start, part) in self.editor_text.match_indices(&find_lower) {
+                    result.push_str(&self.editor_text[last_end..start]);
+                    result.push_str(replace_text);
+                    last_end = start + part.len();
+                }
+                result.push_str(&self.editor_text[last_end..]);
+                self.editor_text = result;
+            }
+        }
+
+        // Update current tab content
+        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+            tab.content = self.editor_text.clone();
+            tab.is_modified = true;
+        }
+    }
+
+    fn find_next(&mut self) {
+        // This is a simplified find implementation
+        // In a real implementation, you'd want to track cursor position and highlight matches
+        if !self.advanced_editor.find_text.is_empty() {
+            if let Some(_pos) = self.editor_text.find(&self.advanced_editor.find_text) {
+                // In a full implementation, you would scroll to and highlight the match
+                println!("Found match for: {}", self.advanced_editor.find_text);
+            }
+        }
+    }
 }
 
 impl App for MyApp {
@@ -5099,22 +5272,7 @@ impl App for MyApp {
                                 })
                                 .inner_margin(egui::Margin::ZERO) // No padding for compact design
                                 .show(ui, |ui| {
-                                    // Use custom layouter with syntax highlighting (always enabled)
-                                    let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
-                                        let mut layout_job = Self::highlight_sql_syntax(ui, string);
-                                        layout_job.wrap.max_width = wrap_width;
-                                        ui.fonts(|f| f.layout_job(layout_job))
-                                    };
-                                    
-                                    ui.add_sized(
-                                        ui.available_size(),
-                                        egui::TextEdit::multiline(&mut self.editor_text)
-                                            .font(egui::FontId::monospace(14.0))
-                                            .code_editor()
-                                            .desired_rows(15)
-                                            .hint_text("-- Enter your SQL query here\n-- Example: SELECT * FROM table_name;\n-- Press Ctrl+Enter (Cmd+Enter on Mac) to execute")
-                                            .layouter(&mut layouter),
-                                    );
+                                    self.render_advanced_editor(ui);
                                     
                                     // Check for Ctrl+Enter or Cmd+Enter to execute query
                                     if ui.input(|i| {
