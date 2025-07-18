@@ -253,6 +253,37 @@ enum BackgroundResult {
 }
 
 impl MyApp {
+    fn get_app_data_dir() -> std::path::PathBuf {
+        let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        home_dir.join(".tabular")
+    }
+    
+    fn get_data_dir() -> std::path::PathBuf {
+        Self::get_app_data_dir().join("data")
+    }
+    
+    fn get_query_dir() -> std::path::PathBuf {
+        Self::get_app_data_dir().join("query")
+    }
+    
+    fn ensure_app_directories() -> Result<(), std::io::Error> {
+        let app_dir = Self::get_app_data_dir();
+        let data_dir = Self::get_data_dir();
+        let query_dir = Self::get_query_dir();
+        
+        // Create directories if they don't exist
+        std::fs::create_dir_all(&app_dir)?;
+        std::fs::create_dir_all(&data_dir)?;
+        std::fs::create_dir_all(&query_dir)?;
+        
+        println!("Created app directories:");
+        println!("  App: {}", app_dir.display());
+        println!("  Data: {}", data_dir.display());
+        println!("  Query: {}", query_dir.display());
+        
+        Ok(())
+    }
+
     fn url_encode(input: &str) -> String {
         input
             .replace("%", "%25")  // Must be first
@@ -750,17 +781,25 @@ impl MyApp {
     }
 
     fn initialize_database(&mut self) {
+        // Ensure app directories exist
+        if let Err(e) = Self::ensure_app_directories() {
+            println!("Failed to create app directories: {}", e);
+            return;
+        }
+        
         // Initialize SQLite database
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool_result = rt.block_on(async {
-            // Create data directory if it doesn't exist
-            std::fs::create_dir_all("./data").ok();
+            // Get the data directory path
+            let data_dir = Self::get_data_dir();
+            let db_path = data_dir.join("connections.db");
             
-            // Connect to SQLite database with explicit path
-            let db_path = "./data/connections.db";
-            println!("Attempting to connect to database at: {}", db_path);
+            println!("Attempting to connect to database at: {}", db_path.display());
             
-            let pool = SqlitePool::connect(&format!("sqlite:{}", db_path)).await;
+            // Convert path to string and use file:// prefix for SQLite
+            let db_path_str = db_path.to_string_lossy();
+            let connection_string = format!("sqlite://{}?mode=rwc", db_path_str);
+            let pool = SqlitePool::connect(&connection_string).await;
             
             match pool {
                 Ok(pool) => {
@@ -1047,20 +1086,21 @@ impl MyApp {
 
     fn save_current_tab_with_name(&mut self, filename: String) -> Result<(), String> {
         if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
-            // Create query directory if it doesn't exist
-            std::fs::create_dir_all("./query").map_err(|e| format!("Failed to create query directory: {}", e))?;
+            // Get query directory and ensure it exists
+            let query_dir = Self::get_query_dir();
+            std::fs::create_dir_all(&query_dir).map_err(|e| format!("Failed to create query directory: {}", e))?;
             
             let mut clean_filename = filename.trim().to_string();
             if !clean_filename.ends_with(".sql") {
                 clean_filename.push_str(".sql");
             }
             
-            let file_path = format!("./query/{}", clean_filename);
+            let file_path = query_dir.join(&clean_filename);
             
             std::fs::write(&file_path, &tab.content)
                 .map_err(|e| format!("Failed to save file: {}", e))?;
             
-            tab.file_path = Some(file_path);
+            tab.file_path = Some(file_path.to_string_lossy().to_string());
             tab.title = clean_filename;
             tab.is_saved = true;
             tab.is_modified = false;
@@ -1077,7 +1117,8 @@ impl MyApp {
     fn load_queries_from_directory(&mut self) {
         self.queries_tree.clear();
         
-        if let Ok(entries) = std::fs::read_dir("./query") {
+        let query_dir = Self::get_query_dir();
+        if let Ok(entries) = std::fs::read_dir(&query_dir) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
                     if metadata.is_file() {
