@@ -1,0 +1,1 @@
+SELECT * FROM alert LIMIT 10;
