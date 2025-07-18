@@ -189,8 +189,11 @@ struct AdvancedEditor {
     show_line_numbers: bool,
     theme: egui_code_editor::ColorTheme,
     font_size: f32,
+    #[allow(dead_code)]
     tab_size: usize,
+    #[allow(dead_code)]
     auto_indent: bool,
+    #[allow(dead_code)]
     show_whitespace: bool,
     word_wrap: bool,
     find_text: String,
@@ -1502,7 +1505,21 @@ impl MyApp {
         let mut needs_full_refresh = false;
         
         for context_id in context_menu_requests {
-            if context_id > 1000 {
+            if context_id > 10000 {
+                // ID > 10000 means copy connection (connection_id = context_id - 10000)
+                let connection_id = context_id - 10000;
+                println!("📋 Processing copy request for connection ID: {}", connection_id);
+                self.copy_connection(connection_id);
+                
+                // Force immediate tree refresh and UI update
+                self.items_tree.clear();
+                self.refresh_connections_tree();
+                needs_full_refresh = true;
+                ui.ctx().request_repaint();
+                
+                // Break early to prevent further processing
+                break;
+            } else if context_id > 1000 {
                 // ID > 1000 means refresh connection (connection_id = context_id / 1000)
                 let connection_id = context_id / 1000;
                 if !processed_refreshes.contains(&connection_id) {
@@ -1521,7 +1538,15 @@ impl MyApp {
                     processed_removals.insert(connection_id);
                     println!("🚀 Processing remove request for connection ID: {} (context_id was: {})", connection_id, context_id);
                     self.remove_connection(connection_id);
+                    
+                    // Force immediate tree refresh and UI update
+                    self.items_tree.clear();
+                    self.refresh_connections_tree();
                     needs_full_refresh = true;
+                    ui.ctx().request_repaint();
+                    
+                    // Break early to prevent further processing
+                    break;
                 }
             }
         }
@@ -1535,6 +1560,9 @@ impl MyApp {
             self.needs_refresh = true; // Set flag for next update cycle
             ui.ctx().request_repaint();
             println!("Forced complete UI refresh - items_tree now has {} nodes", self.items_tree.len());
+            
+            // Return early to prevent any further processing of the old tree
+            return Vec::new();
         }
         
         // Return query files that were clicked
@@ -1685,15 +1713,15 @@ impl MyApp {
                 // Add context menu for connection nodes
                 if node.node_type == NodeType::Connection {
                     response.context_menu(|ui| {
-                        if ui.button("Edit Connection").clicked() {
+                        if ui.button("Copy Connection").clicked() {
                             if let Some(conn_id) = node.connection_id {
-                                context_menu_request = Some(conn_id);
+                                context_menu_request = Some(conn_id + 10000); // Use +10000 to indicate copy
                             }
                             ui.close_menu();
                         }
-                        if ui.button("Refresh").clicked() {
+                        if ui.button("Edit Connection").clicked() {
                             if let Some(conn_id) = node.connection_id {
-                                context_menu_request = Some(conn_id * 1000); // Use multiplication to indicate refresh
+                                context_menu_request = Some(conn_id);
                             }
                             ui.close_menu();
                         }
@@ -1701,6 +1729,12 @@ impl MyApp {
                             if let Some(conn_id) = node.connection_id {
                                 println!("🗑️ Context menu remove clicked for connection: {} (ID: {})", node.name, conn_id);
                                 context_menu_request = Some(-conn_id); // Negative ID indicates removal
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("Refresh").clicked() {
+                            if let Some(conn_id) = node.connection_id {
+                                context_menu_request = Some(conn_id * 1000); // Use multiplication to indicate refresh
                             }
                             ui.close_menu();
                         }
@@ -2056,6 +2090,40 @@ impl MyApp {
         }
     }
 
+    fn copy_connection(&mut self, connection_id: i64) {
+        // Find the connection to copy
+        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
+            let mut copied_connection = connection.clone();
+            
+            // Reset ID and modify name to indicate it's a copy
+            copied_connection.id = None;
+            copied_connection.name = format!("{} - Copy", copied_connection.name);
+            
+            println!("📋 Copying connection: {} -> {}", connection.name, copied_connection.name);
+            
+            // Try to save to database first
+            if self.save_connection_to_database(&copied_connection) {
+                // If database save successful, reload from database to get ID
+                self.load_connections();
+                println!("✓ Connection copied successfully to database");
+            } else {
+                // Fallback to in-memory storage
+                let new_id = self.connections.iter()
+                    .filter_map(|c| c.id)
+                    .max()
+                    .unwrap_or(0) + 1;
+                copied_connection.id = Some(new_id);
+                self.connections.push(copied_connection);
+                println!("✓ Connection copied to memory (database save failed)");
+            }
+            
+            // Don't refresh here - let the caller handle it
+            println!("✓ Connection copy data operation completed");
+        } else {
+            println!("❌ Connection with ID {} not found for copying", connection_id);
+        }
+    }
+
     fn test_database_connection(&self, connection: &ConnectionConfig) -> (bool, String) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         
@@ -2263,12 +2331,8 @@ impl MyApp {
         // Remove from connection pool cache
         self.connection_pools.remove(&connection_id);
         
-        // Clear items tree first
-        self.items_tree.clear();
-        println!("Cleared items_tree, now rebuilding...");
-        
-        // Refresh the UI immediately
-        self.refresh_connections_tree();
+        // Don't refresh here - let the caller handle it
+        println!("✓ Connection remove data operation completed");
         
         // Set flag to force refresh on next update
         self.needs_refresh = true;
@@ -3852,8 +3916,17 @@ impl MyApp {
     fn render_tree_for_database_section(&mut self, ui: &mut egui::Ui) {
         // Use slice to avoid borrowing issues
         let mut items_tree = std::mem::take(&mut self.items_tree);
+        
         let _ = self.render_tree(ui, &mut items_tree);
-        self.items_tree = items_tree;
+        
+        // Check if tree was refreshed inside render_tree
+        if self.items_tree.is_empty() {
+            // Tree was not refreshed, restore the modified tree
+            self.items_tree = items_tree;
+        } else {
+            // Tree was refreshed inside render_tree, keep the new tree
+            println!("Tree was refreshed inside render_tree, keeping the new tree");
+        }
     }
 
     fn load_table_data(&mut self, connection_id: i64, table_name: &str) {
@@ -4425,9 +4498,12 @@ impl MyApp {
         table_data
     }
 
+    #[allow(dead_code)]
     fn highlight_sql_syntax(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
-        let mut job = egui::text::LayoutJob::default();
-        job.text = text.to_owned();
+        let mut job = egui::text::LayoutJob {
+            text: text.to_owned(),
+            ..Default::default()
+        };
         
         // If text is empty, return empty job
         if text.is_empty() {
@@ -5519,7 +5595,7 @@ impl App for MyApp {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO)) // Remove all padding
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO)) // Remove all padding
             .show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0; // Remove vertical spacing
@@ -5534,7 +5610,7 @@ impl App for MyApp {
                     .resizable(true)
                     .height_range(available_height * 0.1..=available_height * 0.9)
                     .default_height(editor_height)
-                    .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO)) // Remove panel margin
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO)) // Remove panel margin
                     .show_inside(ui, |ui| {
                         ui.vertical(|ui| {
                             // Tab bar
@@ -5617,7 +5693,7 @@ impl App for MyApp {
                             }
                             
                             // SQL Editor area
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(if ui.visuals().dark_mode { 
                                     egui::Color32::from_rgb(30, 30, 30) // Slightly darker for contrast
                                 } else { 
@@ -5664,7 +5740,7 @@ impl App for MyApp {
                 
                 // Table data in the remaining space
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::none().inner_margin(egui::Margin::ZERO)) // Remove all padding
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO)) // Remove all padding
                     .show_inside(ui, |ui| {
                     self.render_table_data(ui);
                 });
