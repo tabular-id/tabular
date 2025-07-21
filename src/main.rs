@@ -81,6 +81,10 @@ enum NodeType {
     UserFunction,
     Trigger,
     Event,
+    MySQLFolder,       // Folder untuk koneksi MySQL
+    PostgreSQLFolder,  // Folder untuk koneksi PostgreSQL
+    SQLiteFolder,      // Folder untuk koneksi SQLite
+    CustomFolder,      // Folder custom yang bisa dinamai user
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +105,7 @@ struct HistoryItem {
     executed_at: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ConnectionConfig {
     id: Option<i64>,
     name: String,
@@ -111,6 +115,7 @@ struct ConnectionConfig {
     password: String,
     database: String,
     connection_type: DatabaseType,
+    folder: Option<String>, // Custom folder name
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
@@ -131,6 +136,7 @@ impl Default for ConnectionConfig {
             password: String::new(),
             database: String::new(),
             connection_type: DatabaseType::MySQL,
+            folder: None, // No custom folder by default
         }
     }
 }
@@ -327,11 +333,6 @@ impl MyApp {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&query_dir)?;
         
-        println!("Created app directories:");
-        println!("  App: {}", app_dir.display());
-        println!("  Data: {}", data_dir.display());
-        println!("  Query: {}", query_dir.display());
-        
         Ok(())
     }
 
@@ -403,7 +404,6 @@ impl MyApp {
         
         // Clear any old cached pools
         app.connection_pools.clear();
-        println!("Application started with fresh connection pool cache");
         
         // Initialize database and sample data FIRST
         app.initialize_database();
@@ -431,8 +431,6 @@ impl MyApp {
             while let Ok(task) = task_receiver.recv() {
                 match task {
                     BackgroundTask::RefreshConnection { connection_id } => {
-                        println!("Background worker processing refresh for connection_id: {}", connection_id);
-                        
                         let success = Self::refresh_connection_background_with_db(
                             connection_id,
                             &db_pool,
@@ -454,8 +452,6 @@ impl MyApp {
         db_pool: &Option<Arc<SqlitePool>>,
         rt: &tokio::runtime::Runtime,
     ) -> bool {
-        println!("Background refresh started for connection_id: {}", connection_id);
-        
         // Get connection from database
         if let Some(cache_pool_arc) = db_pool {
             let connection_result = rt.block_on(async {
@@ -466,13 +462,6 @@ impl MyApp {
                 .fetch_optional(cache_pool_arc.as_ref())
                 .await
             });
-            
-            println!("Query result for connection_id {}: {:?}", connection_id, connection_result.is_ok());
-            match &connection_result {
-                Ok(Some(data)) => println!("Found connection data: {} - {}", data.0, data.1),
-                Ok(None) => println!("Query succeeded but no connection found with ID: {}", connection_id),
-                Err(e) => println!("Database query error: {}", e),
-            }
             
             if let Ok(Some((id, name, host, port, username, password, database_name, connection_type))) = connection_result {
                 let connection = ConnectionConfig {
@@ -488,13 +477,11 @@ impl MyApp {
                         "PostgreSQL" => DatabaseType::PostgreSQL,
                         _ => DatabaseType::SQLite,
                     },
+                    folder: None, // Will be loaded from database later
                 };
-                
-                println!("Found connection: {}", connection.name);
                 
                 let result = rt.block_on(async {
                     // Clear cache
-                    println!("Clearing cache for connection_id: {}", connection_id);
                     let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
                         .bind(connection_id)
                         .execute(cache_pool_arc.as_ref())
@@ -511,40 +498,31 @@ impl MyApp {
                         .await;
 
                     // Create new connection pool
-                    println!("Creating new pool for connection_id: {}", connection_id);
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30), // 30 second timeout
                         Self::create_database_pool(&connection)
                     ).await {
                         Ok(Some(new_pool)) => {
-                            println!("Created new pool for connection_id: {}", connection_id);
                             Self::fetch_and_cache_all_data(connection_id, &connection, &new_pool, cache_pool_arc.as_ref()).await
                         }
                         Ok(None) => {
-                            println!("Failed to create pool for connection_id: {}", connection_id);
                             false
                         }
                         Err(_) => {
-                            println!("Timeout creating pool for connection_id: {}", connection_id);
                             false
                         }
                     }
                 });
-                println!("Background refresh result for connection_id {}: {}", connection_id, result);
                 result
             } else {
-                println!("Connection not found in database for ID: {}", connection_id);
                 false
             }
         } else {
-            println!("No cache database available for connection_id: {}", connection_id);
             false
         }
     }
 
     async fn create_database_pool(connection: &ConnectionConfig) -> Option<DatabasePool> {
-        println!("Creating database pool for connection: {}", connection.name);
-        
         match connection.connection_type {
             DatabaseType::MySQL => {
                 let encoded_username = Self::url_encode(&connection.username);
@@ -553,8 +531,6 @@ impl MyApp {
                     "mysql://{}:{}@{}:{}/{}",
                     encoded_username, encoded_password, connection.host, connection.port, connection.database
                 );
-                
-                println!("Attempting MySQL connection to: {}:{}@{}", connection.username, connection.host, connection.port);
                 
                 match MySqlPoolOptions::new()
                     .max_connections(3) // Reduced from 5 to 3
@@ -565,11 +541,9 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        println!("Successfully created MySQL pool for connection: {}", connection.name);
                         Some(DatabasePool::MySQL(Arc::new(pool)))
                     }
-                    Err(e) => {
-                        println!("Failed to create MySQL pool for '{}': {}", connection.name, e);
+                    Err(_e) => {
                         None
                     }
                 }
@@ -580,8 +554,6 @@ impl MyApp {
                     connection.username, connection.password, connection.host, connection.port, connection.database
                 );
                 
-                println!("Attempting PostgreSQL connection to: {}:{}@{}", connection.username, connection.host, connection.port);
-                
                 match PgPoolOptions::new()
                     .max_connections(3)
                     .min_connections(1)
@@ -591,11 +563,9 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        println!("Successfully created PostgreSQL pool for connection: {}", connection.name);
                         Some(DatabasePool::PostgreSQL(Arc::new(pool)))
                     }
-                    Err(e) => {
-                        println!("Failed to create PostgreSQL pool for '{}': {}", connection.name, e);
+                    Err(_e) => {
                         None
                     }
                 }
@@ -603,7 +573,6 @@ impl MyApp {
             DatabaseType::SQLite => {
                 let connection_string = format!("sqlite:{}", connection.host);
                 
-                println!("Attempting SQLite connection to: {}", connection.host);
                 
                 match SqlitePoolOptions::new()
                     .max_connections(3)
@@ -614,11 +583,9 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        println!("Successfully created SQLite pool for connection: {}", connection.name);
                         Some(DatabasePool::SQLite(Arc::new(pool)))
                     }
-                    Err(e) => {
-                        println!("Failed to create SQLite pool for '{}': {}", connection.name, e);
+                    Err(_e) => {
                         None
                     }
                 }
@@ -852,9 +819,7 @@ impl MyApp {
             // Get the data directory path
             let data_dir = Self::get_data_dir();
             let db_path = data_dir.join("connections.db");
-            
-            println!("Attempting to connect to database at: {}", db_path.display());
-            
+                        
             // Convert path to string and use file:// prefix for SQLite
             let db_path_str = db_path.to_string_lossy();
             let connection_string = format!("sqlite://{}?mode=rwc", db_path_str);
@@ -875,12 +840,21 @@ impl MyApp {
                             username TEXT NOT NULL,
                             password TEXT NOT NULL,
                             database_name TEXT NOT NULL,
-                            connection_type TEXT NOT NULL
+                            connection_type TEXT NOT NULL,
+                            folder TEXT DEFAULT NULL
                         )
                         "#
                     )
                     .execute(&pool)
                     .await;
+                    
+                    // Add folder column if it doesn't exist (for existing databases)
+                    let _ = sqlx::query(
+                        "ALTER TABLE connections ADD COLUMN folder TEXT DEFAULT NULL"
+                    )
+                    .execute(&pool)
+                    .await;
+                    
                     
                     // Create database cache table
                     let create_db_cache_result = sqlx::query(
@@ -954,7 +928,6 @@ impl MyApp {
                     
                     match (create_connections_result, create_db_cache_result, create_table_cache_result, create_column_cache_result, create_history_result) {
                         (Ok(_), Ok(_), Ok(_), Ok(_), Ok(_)) => {
-                            println!("All database tables created successfully");
                             Some(pool)
                         },
                         _ => {
@@ -995,49 +968,109 @@ impl MyApp {
     }
 
     fn refresh_connections_tree(&mut self) {
-        println!("=== refresh_connections_tree called with {} connections ===", self.connections.len());
-        
-        // Debug: List all connections that will be processed
-        for (i, conn) in self.connections.iter().enumerate() {
-            println!("  [{}] Processing connection: {} (ID: {:?})", i, conn.name, conn.id);
-        }
-        
+                
         // Clear existing tree
-        let old_tree_count = self.items_tree.len();
         self.items_tree.clear();
-        println!("Cleared old tree (had {} nodes)", old_tree_count);
 
-        // Convert connections to tree nodes
-        self.items_tree = self.connections.iter()
-            .filter_map(|conn| {
-                println!("Converting connection: {} (ID: {:?})", conn.name, conn.id);
-                if let Some(id) = conn.id {
-                    let connection_icon = match conn.connection_type {
-                        DatabaseType::MySQL => "🐬",
-                        DatabaseType::PostgreSQL => "🐘",
-                        DatabaseType::SQLite => "📄",
-                    };
-                    let node = TreeNode::new_connection(
-                        format!("{} {}", connection_icon, conn.name),
-                        id
-                    );
-                    println!("Created tree node for connection: {}", node.name);
-                    Some(node)
-                } else {
-                    println!("Skipping connection with no ID: {}", conn.name);
-                    None
-                }
-            })
-            .collect();
+        // Create folder structure for connections
+        self.items_tree = self.create_connections_folder_structure();
             
-        println!("After refresh: items_tree has {} nodes", self.items_tree.len());
         
-        // Debug: List all tree nodes created
-        for (i, node) in self.items_tree.iter().enumerate() {
-            println!("  Tree node [{}]: {} (connection_id: {:?})", i, node.name, node.connection_id);
+    }
+
+    fn create_connections_folder_structure(&self) -> Vec<TreeNode> {
+        // Group connections by custom folder first, then by database type
+        let mut folder_groups: std::collections::HashMap<String, Vec<&ConnectionConfig>> = std::collections::HashMap::new();
+        
+        // Group connections by custom folder
+        for conn in &self.connections {
+            let folder_name = conn.folder.as_ref().unwrap_or(&"Default".to_string()).clone();
+            folder_groups.entry(folder_name).or_insert_with(Vec::new).push(conn);
         }
         
-        println!("=== refresh_connections_tree completed ===");
+        let mut result = Vec::new();
+        
+        // Create folder structure for each custom folder
+        for (folder_name, connections) in folder_groups {
+            if connections.is_empty() {
+                continue;
+            }
+            
+            // Create custom folder node
+            let mut custom_folder = TreeNode::new(folder_name.clone(), NodeType::CustomFolder);
+            custom_folder.is_expanded = true; // Expand by default
+            
+            // Within each custom folder, group by database type
+            let mut mysql_connections = Vec::new();
+            let mut postgresql_connections = Vec::new();
+            let mut sqlite_connections = Vec::new();
+            
+            for conn in connections {
+                if let Some(id) = conn.id {
+                    let node = TreeNode::new_connection(conn.name.clone(), id);
+                    match conn.connection_type {
+                        DatabaseType::MySQL => {
+                            mysql_connections.push(node);
+                        },
+                        DatabaseType::PostgreSQL => {
+                            postgresql_connections.push(node);
+                        },
+                        DatabaseType::SQLite => {
+                            sqlite_connections.push(node);
+                        },
+                    }
+                } else {
+                    println!("  -> Skipping connection with no ID");
+                }
+            }
+            
+            // Create database type folders within custom folder
+            let mut db_type_folders = Vec::new();
+                        
+            if !mysql_connections.is_empty() {
+                let _ = mysql_connections.len();
+                let mut mysql_folder = TreeNode::new("MySQL".to_string(), NodeType::MySQLFolder);
+                mysql_folder.children = mysql_connections;
+                mysql_folder.is_expanded = true;
+                db_type_folders.push(mysql_folder);
+            }
+            
+            if !postgresql_connections.is_empty() {
+                let _ = postgresql_connections.len();
+                let mut postgresql_folder = TreeNode::new("PostgreSQL".to_string(), NodeType::PostgreSQLFolder);
+                postgresql_folder.children = postgresql_connections;
+                postgresql_folder.is_expanded = true;
+                db_type_folders.push(postgresql_folder);
+            }
+            
+            if !sqlite_connections.is_empty() {
+                let _ = sqlite_connections.len();
+                let mut sqlite_folder = TreeNode::new("SQLite".to_string(), NodeType::SQLiteFolder);
+                sqlite_folder.children = sqlite_connections;
+                sqlite_folder.is_expanded = true;
+                db_type_folders.push(sqlite_folder);
+            }
+            
+            custom_folder.children = db_type_folders;
+            result.push(custom_folder);
+        }
+        
+        // Sort folders alphabetically, but put "Default" first
+        result.sort_by(|a, b| {
+            if a.name == "Default" {
+                std::cmp::Ordering::Less
+            } else if b.name == "Default" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+        
+        if result.is_empty() {
+            println!("No connections found, returning empty tree");
+        }
+        
+        result
     }
 
     // Tab management methods
@@ -1415,32 +1448,25 @@ impl MyApp {
         
         // Handle expansions after rendering
         for expansion_req in expansion_requests {
-            println!("=== EXPANSION REQUEST ===");
-            println!("Node Type: {:?}, Connection ID: {}, Database: {:?}", 
-                expansion_req.node_type, expansion_req.connection_id, expansion_req.database_name);
             
             match expansion_req.node_type {
                 NodeType::Connection => {
-                    // Find Connection node and load if not already loaded
-                    for node in nodes.iter_mut() {
-                        if node.node_type == NodeType::Connection && 
-                           node.connection_id == Some(expansion_req.connection_id) && 
-                           !node.is_loaded {
-                            println!("Loading connection tables for Connection node: {}", node.name);
-                            self.load_connection_tables(expansion_req.connection_id, node);
-                            break;
+                    // Find Connection node recursively and load if not already loaded
+                    if let Some(connection_node) = Self::find_connection_node_recursive(nodes, expansion_req.connection_id) {
+                        if !connection_node.is_loaded {
+                            self.load_connection_tables(expansion_req.connection_id, connection_node);
                         }
+                    } else {
+                        println!("Connection node not found for ID: {}", expansion_req.connection_id);
                     }
                 },
                 NodeType::DatabasesFolder => {
                     // Handle DatabasesFolder expansion - load actual databases from server
-                    println!("Loading databases for DatabasesFolder expansion");
                     for node in nodes.iter_mut() {
                         if node.node_type == NodeType::Connection && node.connection_id == Some(expansion_req.connection_id) {
                             // Find the DatabasesFolder within this connection
                             for child in &mut node.children {
                                 if child.node_type == NodeType::DatabasesFolder && !child.is_loaded {
-                                    println!("Found DatabasesFolder, loading databases...");
                                     self.load_databases_for_folder(expansion_req.connection_id, child);
                                     break;
                                 }
@@ -1452,27 +1478,26 @@ impl MyApp {
                 NodeType::TablesFolder | NodeType::ViewsFolder | NodeType::StoredProceduresFolder |
                 NodeType::UserFunctionsFolder | NodeType::TriggersFolder | NodeType::EventsFolder => {
                     // Find the specific folder node and load if not already loaded
-                    println!("Searching for folder node with type: {:?}, connection_id: {}, database: {:?}", 
-                        expansion_req.node_type, expansion_req.connection_id, expansion_req.database_name);
                     
                     // We need to find the exact folder node in the tree
                     let connection_id = expansion_req.connection_id;
                     let folder_type = expansion_req.node_type.clone();
                     let database_name = expansion_req.database_name.clone();
                     
-                    // Search for folder node using the existing find_folder_node_to_expand logic
+                    // Search for folder node by traversing the tree recursively
+                    let mut found = false;
                     for node in nodes.iter_mut() {
-                        if node.node_type == NodeType::Connection && node.connection_id == Some(connection_id) {
-                            if let Some((folder_node, _)) = Self::find_folder_node_to_expand(node, connection_id) {
-                                if folder_node.node_type == folder_type && 
-                                   folder_node.database_name == database_name &&
-                                   !folder_node.is_loaded {
-                                    println!("Found and loading folder content for {:?} node: {}", folder_type, folder_node.name);
-                                    self.load_folder_content(connection_id, folder_node, folder_type);
-                                }
-                                break;
+                        // Search recursively through all nodes, not just top level
+                        if let Some(folder_node) = Self::find_specific_folder_node(node, connection_id, &folder_type, &database_name) {
+                            if !folder_node.is_loaded {
+                                self.load_folder_content(connection_id, folder_node, folder_type.clone());
+                                found = true;
                             }
+                            break;
                         }
+                    }
+                    if !found {
+                        println!("Could not find folder node with type {:?} and database {:?} in any of the nodes", folder_type, database_name);
                     }
                 },
                 _ => {
@@ -1482,6 +1507,7 @@ impl MyApp {
         }
         
         // Handle table column expansions
+        // Handle table expansions
         for (table_index, connection_id, table_name) in tables_to_expand {
             self.load_table_columns_for_node(connection_id, &table_name, nodes, table_index);
         }
@@ -1505,6 +1531,13 @@ impl MyApp {
         let mut processed_refreshes = std::collections::HashSet::new();
         let mut needs_full_refresh = false;
         
+        // Only log if there are actual context menu requests to avoid spam
+        if !context_menu_requests.is_empty() {
+            for (i, context_id) in context_menu_requests.iter().enumerate() {
+                println!("  [{}] Context ID: {}", i, context_id);
+            }
+        }
+        
         for context_id in context_menu_requests {
             if context_id >= 20000 {
                 // ID >= 20000 means query edit operation
@@ -1513,10 +1546,8 @@ impl MyApp {
             } else if context_id <= -20000 {
                 // ID <= -20000 means query removal operation  
                 let hash = (-context_id) - 20000;
-                println!("🗑️ Processing query removal with hash: {}", hash);
                 if self.handle_query_remove_request_by_hash(hash) {
                     // Force refresh of queries tree if removal was successful
-                    println!("🔄 Forcing queries tree refresh after successful removal");
                     self.load_queries_from_directory();
                     
                     // Force immediate UI repaint - this is crucial!
@@ -1525,12 +1556,10 @@ impl MyApp {
                     // Set needs_refresh flag to ensure UI updates
                     self.needs_refresh = true;
                     
-                    println!("✅ Query tree refreshed after removal - UI should update now");
                 }
             } else if context_id > 10000 {
                 // ID > 10000 means copy connection (connection_id = context_id - 10000)
                 let connection_id = context_id - 10000;
-                println!("📋 Processing copy request for connection ID: {}", connection_id);
                 self.copy_connection(connection_id);
                 
                 // Force immediate tree refresh and UI update
@@ -1552,6 +1581,7 @@ impl MyApp {
                 }
             } else if context_id > 0 {
                 // Positive ID means edit connection
+                println!("🔍 Processing edit request for connection ID: {}", context_id);
                 self.start_edit_connection(context_id);
             } else {
                 // Negative ID means remove connection
@@ -1577,11 +1607,9 @@ impl MyApp {
         if needs_full_refresh {
             // Completely clear and rebuild the tree
             self.items_tree.clear();
-            println!("Force refresh: clearing items_tree and rebuilding...");
             self.refresh_connections_tree();
             self.needs_refresh = true; // Set flag for next update cycle
             ui.ctx().request_repaint();
-            println!("Forced complete UI refresh - items_tree now has {} nodes", self.items_tree.len());
             
             // Return early to prevent any further processing of the old tree
             return Vec::new();
@@ -1618,10 +1646,6 @@ impl MyApp {
                 let expand_icon = if node.is_expanded { "▼" } else { "▶" };
                 if ui.button(expand_icon).clicked() {
                     node.is_expanded = !node.is_expanded;
-                    println!("=== NODE EXPANSION CLICKED ===");
-                    println!("Node: {} (type: {:?})", node.name, node.node_type);
-                    println!("Expanded: {}, Loaded: {}", node.is_expanded, node.is_loaded);
-                    println!("Connection ID: {:?}, Database: {:?}", node.connection_id, node.database_name);
                     
                     // If this is a connection node and not loaded, request expansion
                     if node.node_type == NodeType::Connection && !node.is_loaded && node.is_expanded {
@@ -1638,8 +1662,6 @@ impl MyApp {
                     
                     // If this is a table node and not loaded, request table column expansion
                     if node.node_type == NodeType::Table && !node.is_loaded && node.is_expanded {
-                        // We need to find the connection ID from parent
-                        // For now, we'll mark it for expansion and handle it in the calling code
                         if let Some(conn_id) = node.connection_id {
                             table_expansion = Some((node_index, conn_id, node.name.clone()));
                         }
@@ -1654,7 +1676,6 @@ impl MyApp {
                         node.node_type == NodeType::TriggersFolder ||
                         node.node_type == NodeType::EventsFolder) && 
                        !node.is_loaded && node.is_expanded {
-                        println!("FOLDER EXPANSION: Requesting expansion for folder");
                         if let Some(conn_id) = node.connection_id {
                             expansion_request = Some(ExpansionRequest {
                                 node_type: node.node_type.clone(),
@@ -1689,6 +1710,10 @@ impl MyApp {
                     NodeType::UserFunction => "🔧",
                     NodeType::Trigger => "⚡",
                     NodeType::Event => "📅",
+                    NodeType::MySQLFolder => "🐬",
+                    NodeType::PostgreSQLFolder => "🐘",
+                    NodeType::SQLiteFolder => "📄",
+                    NodeType::CustomFolder => "📁",
                 };
                 
                 let label_text = if icon.is_empty() { 
@@ -1709,13 +1734,17 @@ impl MyApp {
                 } else { 
                     format!("{} {}", icon, node.name) 
                 };
-                let response = ui.label(label_text);
+                let response = if node.node_type == NodeType::Connection {
+                    // Use button for connections to make them more clickable
+                    ui.button(&label_text)
+                } else {
+                    ui.label(label_text)
+                };
                 
                 // Handle clicks on connection labels to set active connection
                 if node.node_type == NodeType::Connection && response.clicked() {
                     if let Some(conn_id) = node.connection_id {
                         connection_click_request = Some(conn_id);
-                        println!("Connection {} clicked, setting as active connection", node.name);
                     }
                 }
                 
@@ -1726,9 +1755,6 @@ impl MyApp {
                     // Also trigger table data loading
                     if let Some(conn_id) = node.connection_id {
                         table_click_request = Some((conn_id, node.name.clone()));
-                        println!("Table {} clicked, connection_id: {}", node.name, conn_id);
-                    } else {
-                        println!("Table {} clicked, but no connection_id found", node.name);
                     }
                 }
                 
@@ -1749,7 +1775,6 @@ impl MyApp {
                         }
                         if ui.button("Remove Connection").clicked() {
                             if let Some(conn_id) = node.connection_id {
-                                println!("🗑️ Context menu remove clicked for connection: {} (ID: {})", node.name, conn_id);
                                 context_menu_request = Some(-conn_id); // Negative ID indicates removal
                             }
                             ui.close_menu();
@@ -1767,7 +1792,7 @@ impl MyApp {
             if node.is_expanded {
                 ui.indent(id, |ui| {
                     for (child_index, child) in node.children.iter_mut().enumerate() {
-                        let (child_expansion_request, child_table_expansion, _child_context, child_table_click, _child_connection_click, _child_query_file) = Self::render_tree_node_with_table_expansion(ui, child, editor_text, child_index, refreshing_connections);
+                        let (child_expansion_request, child_table_expansion, child_context, child_table_click, _child_connection_click, _child_query_file) = Self::render_tree_node_with_table_expansion(ui, child, editor_text, child_index, refreshing_connections);
                         
                         // Handle child expansion requests - propagate to parent
                         if let Some(child_expansion) = child_expansion_request {
@@ -1775,15 +1800,25 @@ impl MyApp {
                         }
                         
                         // Handle child table expansions with the parent connection ID
-                        if let Some((_, _, table_name)) = child_table_expansion {
-                            if let Some(conn_id) = node.connection_id {
-                                table_expansion = Some((child_index, conn_id, table_name));
+                        // Only set if we don't already have a table expansion from this node
+                        if table_expansion.is_none() {
+                            if let Some((child_index, child_conn_id, table_name)) = child_table_expansion {
+                                if let Some(conn_id) = node.connection_id {
+                                    table_expansion = Some((child_index, conn_id, table_name));
+                                } else {
+                                    table_expansion = Some((child_index, child_conn_id, table_name));
+                                }
                             }
                         }
                         
                         // Handle child table clicks - propagate to parent
                         if let Some((conn_id, table_name)) = child_table_click {
                             table_click_request = Some((conn_id, table_name));
+                        }
+                        
+                        // Handle child context menu requests - propagate to parent
+                        if let Some(child_context_id) = child_context {
+                            context_menu_request = Some(child_context_id);
                         }
                     }
                 });
@@ -1816,6 +1851,10 @@ impl MyApp {
                     NodeType::UserFunction => "🔧",
                     NodeType::Trigger => "⚡",
                     NodeType::Event => "📅",
+                    NodeType::MySQLFolder => "🐬",
+                    NodeType::PostgreSQLFolder => "🐘",
+                    NodeType::SQLiteFolder => "📄",
+                    NodeType::CustomFolder => "📁",
                 };
                 
                 let response = ui.button(format!("{} {}", icon, node.name));
@@ -1948,6 +1987,12 @@ impl MyApp {
                             ui.label("Database:");
                             ui.text_edit_singleline(&mut connection_data.database);
                             ui.end_row();
+
+                            ui.label("Folder (Optional):");
+                            let mut folder_text = connection_data.folder.as_ref().unwrap_or(&String::new()).clone();
+                            ui.text_edit_singleline(&mut folder_text);
+                            connection_data.folder = if folder_text.trim().is_empty() { None } else { Some(folder_text.trim().to_string()) };
+                            ui.end_row();
                         });
 
                     ui.separator();
@@ -1958,16 +2003,26 @@ impl MyApp {
                             if is_edit_mode {
                                 // Update existing connection
                                 if let Some(id) = connection_data.id {
+                                    println!("Attempting to update connection: {} (ID: {})", connection_data.name, id);
+                                    println!("Connection data: {:?}", connection_data);
+                                    
                                     if self.update_connection_in_database(&connection_data) {
+                                        println!("Database update successful, reloading connections");
                                         self.load_connections();
                                         self.refresh_connections_tree();
                                     } else {
+                                        println!("Database update failed, falling back to in-memory update");
                                         // Fallback to in-memory update
                                         if let Some(existing) = self.connections.iter_mut().find(|c| c.id == Some(id)) {
                                             *existing = connection_data.clone();
                                             self.refresh_connections_tree();
+                                            println!("In-memory update completed");
+                                        } else {
+                                            println!("ERROR: Could not find connection {} in memory", id);
                                         }
                                     }
+                                } else {
+                                    println!("ERROR: Connection has no ID, cannot update");
                                 }
                                 self.show_edit_connection = false;
                             } else {
@@ -2067,8 +2122,8 @@ impl MyApp {
             let rt = tokio::runtime::Runtime::new().unwrap();
             
             let connections_result = rt.block_on(async {
-                sqlx::query_as::<_, (i64, String, String, String, String, String, String, String)>(
-                    "SELECT id, name, host, port, username, password, database_name, connection_type FROM connections"
+                sqlx::query_as::<_, (i64, String, String, String, String, String, String, String, Option<String>)>(
+                    "SELECT id, name, host, port, username, password, database_name, connection_type, folder FROM connections"
                 )
                 .fetch_all(pool_clone.as_ref())
                 .await
@@ -2076,9 +2131,7 @@ impl MyApp {
             
             if let Ok(rows) = connections_result {
 
-                println!("Loaded {} connections from database", rows.len());
-
-                self.connections = rows.into_iter().map(|(id, name, host, port, username, password, database_name, connection_type)| {
+                self.connections = rows.into_iter().map(|(id, name, host, port, username, password, database_name, connection_type, folder)| {
                     ConnectionConfig {
                         id: Some(id),
                         name,
@@ -2092,6 +2145,7 @@ impl MyApp {
                             "PostgreSQL" => DatabaseType::PostgreSQL,
                             _ => DatabaseType::SQLite,
                         },
+                        folder,
                     }
                 }).collect();
             }
@@ -2110,7 +2164,7 @@ impl MyApp {
             
             let result = rt.block_on(async {
                 sqlx::query(
-                    "INSERT INTO connections (name, host, port, username, password, database_name, connection_type) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO connections (name, host, port, username, password, database_name, connection_type, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(connection.name)
                 .bind(connection.host)
@@ -2119,6 +2173,7 @@ impl MyApp {
                 .bind(connection.password)
                 .bind(connection.database)
                 .bind(format!("{:?}", connection.connection_type))
+                .bind(connection.folder)
                 .execute(pool_clone.as_ref())
                 .await
             });
@@ -2130,13 +2185,22 @@ impl MyApp {
     }
 
     fn start_edit_connection(&mut self, connection_id: i64) {
+        println!("📝 start_edit_connection called with ID: {}", connection_id);
         // Find the connection to edit
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
+            println!("✅ Found connection to edit: {} (ID: {:?})", connection.name, connection.id);
             self.edit_connection = connection.clone();
             // Reset test connection status saat buka edit dialog
             self.test_connection_status = None;
             self.test_connection_in_progress = false;
             self.show_edit_connection = true;
+            println!("✅ Edit dialog should now be visible");
+        } else {
+            println!("❌ Connection not found for ID: {}", connection_id);
+            println!("Available connections:");
+            for conn in &self.connections {
+                println!("  - {} (ID: {:?})", conn.name, conn.id);
+            }
         }
     }
 
@@ -2372,9 +2436,12 @@ impl MyApp {
                 let connection = connection.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 
+                println!("Updating connection in database: {} (ID: {})", connection.name, id);
+                println!("Folder value: {:?}", connection.folder);
+                
                 let result = rt.block_on(async {
                     sqlx::query(
-                        "UPDATE connections SET name = ?, host = ?, port = ?, username = ?, password = ?, database_name = ?, connection_type = ? WHERE id = ?"
+                        "UPDATE connections SET name = ?, host = ?, port = ?, username = ?, password = ?, database_name = ?, connection_type = ?, folder = ? WHERE id = ?"
                     )
                     .bind(connection.name)
                     .bind(connection.host)
@@ -2383,16 +2450,28 @@ impl MyApp {
                     .bind(connection.password)
                     .bind(connection.database)
                     .bind(format!("{:?}", connection.connection_type))
+                    .bind(connection.folder)
                     .bind(id)
                     .execute(pool_clone.as_ref())
                     .await
                 });
                 
+                match &result {
+                    Ok(query_result) => {
+                        println!("Update successful: {} rows affected", query_result.rows_affected());
+                    }
+                    Err(e) => {
+                        println!("Update failed: {}", e);
+                    }
+                }
+                
                 result.is_ok()
             } else {
+                println!("Cannot update connection: no ID found");
                 false
             }
         } else {
+            println!("Cannot update connection: no database pool available");
             false
         }
     }
@@ -2517,7 +2596,7 @@ impl MyApp {
             let databases_clone = databases.to_vec();
             let rt = tokio::runtime::Runtime::new().unwrap();
             
-            let _ = rt.block_on(async {
+            rt.block_on(async {
                 // Clear existing cache for this connection
                 let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
                     .bind(connection_id)
@@ -2537,7 +2616,6 @@ impl MyApp {
     }
 
     fn get_databases_from_cache(&self, connection_id: i64) -> Option<Vec<String>> {
-        println!("Getting databases from cache for connection_id: {}", connection_id);
         if let Some(ref pool) = self.db_pool {
             let pool_clone = pool.clone();
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2552,7 +2630,6 @@ impl MyApp {
             match result {
                 Ok(rows) => {
                     let databases: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                    println!("Found {} databases in cache: {:?}", databases.len(), databases);
                     Some(databases)
                 },
                 Err(e) => {
@@ -2573,7 +2650,7 @@ impl MyApp {
             let database_name = database_name.to_string();
             let rt = tokio::runtime::Runtime::new().unwrap();
             
-            let _ = rt.block_on(async {
+            rt.block_on(async {
                 // Clear existing cache for this database
                 let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ? AND database_name = ?")
                     .bind(connection_id)
@@ -2626,7 +2703,7 @@ impl MyApp {
             let table_name = table_name.to_string();
             let rt = tokio::runtime::Runtime::new().unwrap();
             
-            let _ = rt.block_on(async {
+            rt.block_on(async {
                 // Clear existing cache for this table
                 let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ? AND database_name = ? AND table_name = ?")
                     .bind(connection_id)
@@ -2672,6 +2749,24 @@ impl MyApp {
         } else {
             None
         }
+    }
+
+    fn find_connection_node_recursive(nodes: &mut [TreeNode], connection_id: i64) -> Option<&mut TreeNode> {
+        for node in nodes.iter_mut() {
+            // Check if this is the connection node we're looking for
+            if node.node_type == NodeType::Connection && 
+               node.connection_id == Some(connection_id) {
+                return Some(node);
+            }
+            
+            // Recursively search in children
+            if !node.children.is_empty() {
+                if let Some(found) = Self::find_connection_node_recursive(&mut node.children, connection_id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
 
     fn refresh_connection(&mut self, connection_id: i64) {
@@ -2805,7 +2900,7 @@ impl MyApp {
             let pool_clone = pool.clone();
             let rt = tokio::runtime::Runtime::new().unwrap();
             
-            let _ = rt.block_on(async {
+            rt.block_on(async {
                 // Clear all cache tables for this connection
                 let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
                     .bind(connection_id)
@@ -2946,19 +3041,12 @@ impl MyApp {
         // First check if we have cached data
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
             if !databases.is_empty() {
-                println!("Loading connection structure from cache for connection_id: {}", connection_id);
                 self.build_connection_structure_from_cache(connection_id, node, &databases);
                 node.is_loaded = true;
                 return;
-            } else {
-                println!("Cache found but empty for connection_id: {}, fetching from server", connection_id);
             }
-        } else {
-            println!("No cache found for connection_id: {}, fetching from server", connection_id);
         }
 
-        // If no cache or empty cache, create connection and fetch from server
-        println!("Fetching from server for connection_id: {}", connection_id);
         
         // Find the connection by ID
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -2992,13 +3080,10 @@ impl MyApp {
                     let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
                     databases_folder.connection_id = Some(connection_id);
                     
-                    println!("Building from cache: {} databases found", databases.len());
                     // Add each database from cache
                     for db_name in databases {
-                        println!("Processing cached database: {}", db_name);
                         // Skip system databases for cleaner view
                         if !["information_schema", "performance_schema", "mysql", "sys"].contains(&db_name.as_str()) {
-                            println!("Adding cached database to tree: {}", db_name);
                             let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
                             db_node.connection_id = Some(connection_id);
                             db_node.database_name = Some(db_name.clone());
@@ -3132,21 +3217,20 @@ impl MyApp {
         }
     }
 
-    // Helper function to find folder node that needs expansion
-    fn find_folder_node_to_expand(node: &mut TreeNode, connection_id: i64) -> Option<(&mut TreeNode, NodeType)> {
-        // Check if this node itself is a folder that needs expansion
-        if matches!(node.node_type, 
-            NodeType::TablesFolder | NodeType::ViewsFolder | NodeType::StoredProceduresFolder |
-            NodeType::UserFunctionsFolder | NodeType::TriggersFolder | NodeType::EventsFolder
-        ) && node.connection_id == Some(connection_id) && node.is_expanded && !node.is_loaded {
-            println!("Found target folder node: {} (type: {:?})", node.name, node.node_type);
-            let node_type = node.node_type.clone();
-            return Some((node, node_type));
+    // More specific function to find folder node with exact type and database name
+    fn find_specific_folder_node<'a>(node: &'a mut TreeNode, connection_id: i64, folder_type: &NodeType, database_name: &Option<String>) -> Option<&'a mut TreeNode> {
+        // Check if this node is the folder we're looking for
+        if node.node_type == *folder_type && 
+           node.connection_id == Some(connection_id) && 
+           node.database_name == *database_name &&
+           node.is_expanded && 
+           !node.is_loaded {
+            return Some(node);
         }
         
         // Recursively search in children
         for child in &mut node.children {
-            if let Some(result) = Self::find_folder_node_to_expand(child, connection_id) {
+            if let Some(result) = Self::find_specific_folder_node(child, connection_id, folder_type, database_name) {
                 return Some(result);
             }
         }
@@ -3155,7 +3239,6 @@ impl MyApp {
     }
 
     fn load_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
-        println!("Loading databases for connection_id: {}", connection_id);
         
         // Clear any loading placeholders
         databases_folder.children.clear();
@@ -3163,7 +3246,6 @@ impl MyApp {
         // First check cache
         if let Some(cached_databases) = self.get_databases_from_cache(connection_id) {
             if !cached_databases.is_empty() {
-                println!("Loading {} databases from cache", cached_databases.len());
                 
                 for db_name in cached_databases {
                     let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
@@ -3203,13 +3285,9 @@ impl MyApp {
                 return;
             }
         }
-        
-        // If cache is empty or doesn't exist, fetch from actual database connection
-        println!("Cache is empty, fetching databases from actual connection");
-        
+                
         // Try to fetch real databases from the connection
         if let Some(real_databases) = self.fetch_databases_from_connection(connection_id) {
-            println!("Successfully fetched {} databases from connection", real_databases.len());
             
             // Save to cache for future use
             self.save_databases_to_cache(connection_id, &real_databases);
@@ -3251,8 +3329,6 @@ impl MyApp {
             
             databases_folder.is_loaded = true;
         } else {
-            // If connection fails, show sample data as fallback
-            println!("Failed to connect to database, showing sample data as fallback");
             self.populate_sample_databases_for_folder(connection_id, databases_folder);
         }
     }
@@ -3333,12 +3409,10 @@ impl MyApp {
                 databases_folder.children.push(db_node);
             }
             
-            println!("Populated {} sample databases for connection {}", databases_folder.children.len(), connection.name);
         }
     }
     
     fn fetch_databases_from_connection(&mut self, connection_id: i64) -> Option<Vec<String>> {
-        println!("Fetching databases from connection_id: {}", connection_id);
         
         // Find the connection configuration
         let _connection = self.connections.iter().find(|c| c.id == Some(connection_id))?.clone();
@@ -3352,7 +3426,6 @@ impl MyApp {
             
             match pool {
                 DatabasePool::MySQL(mysql_pool) => {
-                    println!("Querying MySQL databases");
                     let result = sqlx::query_as::<_, (String,)>("SHOW DATABASES")
                         .fetch_all(mysql_pool.as_ref())
                         .await;
@@ -3363,7 +3436,6 @@ impl MyApp {
                                 .map(|(db_name,)| db_name)
                                 .filter(|db| !["information_schema", "performance_schema", "mysql", "sys"].contains(&db.as_str()))
                                 .collect();
-                            println!("Found {} MySQL databases: {:?}", databases.len(), databases);
                             Some(databases)
                         },
                         Err(e) => {
@@ -3373,7 +3445,6 @@ impl MyApp {
                     }
                 },
                 DatabasePool::PostgreSQL(pg_pool) => {
-                    println!("Querying PostgreSQL databases");
                     let result = sqlx::query_as::<_, (String,)>(
                         "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1')"
                     )
@@ -3383,7 +3454,6 @@ impl MyApp {
                     match result {
                         Ok(rows) => {
                             let databases: Vec<String> = rows.into_iter().map(|(db_name,)| db_name).collect();
-                            println!("Found {} PostgreSQL databases: {:?}", databases.len(), databases);
                             Some(databases)
                         },
                         Err(e) => {
@@ -3393,7 +3463,6 @@ impl MyApp {
                     }
                 },
                 DatabasePool::SQLite(sqlite_pool) => {
-                    println!("SQLite: Checking for database schema and tables");
                     // For SQLite, we'll query the actual database for table information
                     let result = sqlx::query_as::<_, (String,)>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
                         .fetch_all(sqlite_pool.as_ref())
@@ -3403,7 +3472,6 @@ impl MyApp {
                         Ok(rows) => {
                             let table_count = rows.len();
                             if table_count > 0 {
-                                println!("Found {} tables in SQLite database, returning 'main' database", table_count);
                                 // Since SQLite has tables, return main database
                                 Some(vec!["main".to_string()])
                             } else {
@@ -3422,7 +3490,6 @@ impl MyApp {
     }
     
     fn fetch_tables_from_mysql_connection(&mut self, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
-        println!("Fetching {} from MySQL database: {}", table_type, database_name);
         
         // Create a new runtime for the database query
         let rt = tokio::runtime::Runtime::new().ok()?;
@@ -3446,7 +3513,6 @@ impl MyApp {
                         }
                     };
                     
-                    println!("Executing MySQL query: {}", query);
                     let result = sqlx::query_as::<_, (String,)>(&query)
                         .fetch_all(mysql_pool.as_ref())
                         .await;
@@ -3454,7 +3520,6 @@ impl MyApp {
                     match result {
                         Ok(rows) => {
                             let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                            println!("Found {} {} in MySQL database {}: {:?}", items.len(), table_type, database_name, items);
                             Some(items)
                         },
                         Err(e) => {
@@ -3472,7 +3537,6 @@ impl MyApp {
     }
     
     fn fetch_tables_from_sqlite_connection(&mut self, connection_id: i64, table_type: &str) -> Option<Vec<String>> {
-        println!("Fetching {} from SQLite database", table_type);
         
         // Create a new runtime for the database query
         let rt = tokio::runtime::Runtime::new().ok()?;
@@ -3492,7 +3556,6 @@ impl MyApp {
                         }
                     };
                     
-                    println!("Executing SQLite query: {}", query);
                     let result = sqlx::query_as::<_, (String,)>(query)
                         .fetch_all(sqlite_pool.as_ref())
                         .await;
@@ -3500,7 +3563,6 @@ impl MyApp {
                     match result {
                         Ok(rows) => {
                             let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                            println!("Found {} {} in SQLite database: {:?}", items.len(), table_type, items);
                             Some(items)
                         },
                         Err(e) => {
@@ -3518,7 +3580,6 @@ impl MyApp {
     }
     
     fn fetch_columns_from_database(&self, _connection_id: i64, database_name: &str, table_name: &str, connection: &ConnectionConfig) -> Option<Vec<(String, String)>> {
-        println!("Fetching columns from database for table: {}.{}", database_name, table_name);
         
         // Create a new runtime for the database query
         let rt = tokio::runtime::Runtime::new().ok()?;
@@ -3555,7 +3616,6 @@ impl MyApp {
                             {
                                 Ok(rows) => {
                                     let columns: Vec<(String, String)> = rows.into_iter().collect();
-                                    println!("Found {} columns for MySQL table {}: {:?}", columns.len(), table_name, columns);
                                     Some(columns)
                                 },
                                 Err(e) => {
@@ -3590,7 +3650,6 @@ impl MyApp {
                                     let columns: Vec<(String, String)> = rows.into_iter()
                                         .map(|(_, name, data_type, _, _, _)| (name, data_type))
                                         .collect();
-                                    println!("Found {} columns for SQLite table {}: {:?}", columns.len(), table_name, columns);
                                     Some(columns)
                                 },
                                 Err(e) => {
@@ -3627,7 +3686,6 @@ impl MyApp {
                             {
                                 Ok(rows) => {
                                     let columns: Vec<(String, String)> = rows.into_iter().collect();
-                                    println!("Found {} columns for PostgreSQL table {}: {:?}", columns.len(), table_name, columns);
                                     Some(columns)
                                 },
                                 Err(e) => {
@@ -3647,7 +3705,6 @@ impl MyApp {
     }
 
     fn load_mysql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
-        println!("Loading MySQL database structure using connection pool");
         
         // Since we can't use block_on in an async context, we'll create a simple structure
         // and populate it with cached data or show a loading message
@@ -3702,7 +3759,6 @@ impl MyApp {
     }
 
     fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
-        println!("Loading PostgreSQL structure for connection_id: {}", connection_id);
         
         // Create basic structure for PostgreSQL
         let mut main_children = Vec::new();
@@ -3721,7 +3777,6 @@ impl MyApp {
     }
 
     fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
-        println!("Loading SQLite structure for connection_id: {}", connection_id);
         
         // Create basic structure for SQLite
         let mut main_children = Vec::new();
@@ -3748,21 +3803,14 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_folder_content(&mut self, connection_id: i64, node: &mut TreeNode, folder_type: NodeType) {
-        println!("=== load_folder_content called ===");
-        println!("Connection ID: {}", connection_id);
-        println!("Folder type: {:?}", folder_type);
-        println!("Node name: {}", node.name);
-        
+    fn load_folder_content(&mut self, connection_id: i64, node: &mut TreeNode, folder_type: NodeType) {        
         // Find the connection by ID
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let connection = connection.clone();
             
-            println!("Loading {:?} content for connection {}", folder_type, connection.name);
             
             match connection.connection_type {
                 DatabaseType::MySQL => {
-                    println!("Calling load_mysql_folder_content");
                     self.load_mysql_folder_content(connection_id, &connection, node, folder_type);
                 },
                 DatabaseType::PostgreSQL => {
@@ -3774,7 +3822,6 @@ impl MyApp {
             }
             
             node.is_loaded = true;
-            println!("Folder content loading completed");
         } else {
             println!("ERROR: Connection with ID {} not found!", connection_id);
         }
@@ -3800,9 +3847,7 @@ impl MyApp {
         
         // First try to get from cache
         if let Some(cached_items) = self.get_tables_from_cache(connection_id, database_name, table_type) {
-            if !cached_items.is_empty() {
-                println!("Loading {} {} from cache", cached_items.len(), table_type);
-                
+            if !cached_items.is_empty() {                
                 // Create tree nodes from cached data
                 let child_nodes: Vec<TreeNode> = cached_items.into_iter().map(|item_name| {
                     let mut child_node = TreeNode::new(item_name.clone(), match folder_type {
@@ -3825,9 +3870,7 @@ impl MyApp {
             }
         }
         
-        // If cache is empty, fetch from actual database
-        println!("Cache miss, fetching {} from actual MySQL database: {}", table_type, database_name);
-        
+        // If cache is empty, fetch from actual database        
         if let Some(real_items) = self.fetch_tables_from_mysql_connection(connection_id, database_name, table_type) {
             println!("Successfully fetched {} {} from MySQL database", real_items.len(), table_type);
             
@@ -3989,7 +4032,6 @@ impl MyApp {
         // First try to get from cache
         if let Some(cached_columns) = self.get_columns_from_cache(connection_id, database_name, table_name) {
             if !cached_columns.is_empty() {
-                println!("Loading {} columns from cache for table {}", cached_columns.len(), table_name);
                 return cached_columns.into_iter().map(|(column_name, data_type)| {
                     TreeNode::new(format!("{} ({})", column_name, data_type), NodeType::Column)
                 }).collect();
@@ -3997,11 +4039,7 @@ impl MyApp {
         }
         
         // If cache is empty, fetch from actual database
-        println!("Column cache miss for table {}, fetching from actual database", table_name);
-        
         if let Some(real_columns) = self.fetch_columns_from_database(connection_id, database_name, table_name, connection) {
-            println!("Successfully fetched {} columns from database for table {}", real_columns.len(), table_name);
-            
             // Save to cache for future use
             self.save_columns_to_cache(connection_id, database_name, table_name, &real_columns);
             
@@ -4011,7 +4049,6 @@ impl MyApp {
             }).collect()
         } else {
             // If database fetch fails, return sample columns
-            println!("Failed to fetch columns from database for table {}, using sample data", table_name);
             vec![
                 TreeNode::new("id (INTEGER)".to_string(), NodeType::Column),
                 TreeNode::new("name (VARCHAR)".to_string(), NodeType::Column),
@@ -4029,13 +4066,15 @@ impl MyApp {
             let database_name = self.find_table_database_name(nodes, table_name, connection_id)
                 .unwrap_or_else(|| connection.database.clone());
             
-            println!("Loading columns for table: {}.{}", database_name, table_name);
-            
             // Load columns for this table without creating new runtime
             let columns = self.load_table_columns_sync(connection_id, table_name, &connection, &database_name);
             
             // Find the table node recursively and update it
-            self.update_table_node_with_columns_recursive(nodes, table_name, columns, connection_id);
+            let updated = self.update_table_node_with_columns_recursive(nodes, table_name, columns, connection_id);
+            
+            if !updated {
+                // Log only if update failed
+            }
         }
     }
 
@@ -4064,7 +4103,6 @@ impl MyApp {
                node.connection_id == Some(connection_id) {
                 node.children = columns;
                 node.is_loaded = true;
-                println!("Updated table '{}' with {} columns", table_name, node.children.len());
                 return true;
             }
             
