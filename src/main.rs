@@ -2243,32 +2243,6 @@ impl MyApp {
         false
     }
 
-    fn handle_query_remove_request(&mut self, hash: i64) -> bool {
-        println!("🗑️ Processing query remove request for hash: {}", hash);
-        
-        // Find the query file by hash
-        if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
-            println!("Found query file to remove: {}", query_file_path);
-            
-            // Close any open tabs for this file first
-            self.close_tabs_for_file(&query_file_path);
-            
-            // Remove the file from filesystem
-            match std::fs::remove_file(&query_file_path) {
-                Ok(()) => {
-                    println!("✓ Successfully removed query file: {}", query_file_path);
-                    true
-                },
-                Err(e) => {
-                    println!("❌ Failed to remove query file: {}", e);
-                    false
-                }
-            }
-        } else {
-            println!("Query file not found for hash: {}", hash);
-            false
-        }
-    }
 
     fn find_query_file_by_hash(&self, hash: i64) -> Option<String> {
         let query_dir = Self::get_query_dir();
