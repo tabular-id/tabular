@@ -15,6 +15,10 @@ mod sqlite;
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     
+    // Set window size
+    options.viewport.inner_size = Some(egui::vec2(1400.0, 900.0));
+    options.viewport.min_inner_size = Some(egui::vec2(800.0, 600.0));
+    
     // Set window icon
     if let Some(icon) = load_icon() {
         options.viewport.icon = Some(std::sync::Arc::new(icon));
@@ -1620,7 +1624,7 @@ impl MyApp {
                     let mut is_redis_key = false;
                     let mut key_type: Option<String> = None;
                     
-                    for (_, node) in nodes.iter().enumerate() {
+                    for node in nodes.iter() {
                         if let Some((_, k_type)) = self.find_redis_key_info(node, &table_name) {
                             key_type = Some(k_type.clone());
                             is_redis_key = true;
@@ -1794,7 +1798,15 @@ impl MyApp {
         results
     }
 
-    fn render_tree_node_with_table_expansion(ui: &mut egui::Ui, node: &mut TreeNode, editor_text: &mut String, node_index: usize, refreshing_connections: &std::collections::HashSet<i64>) -> (Option<ExpansionRequest>, Option<(usize, i64, String)>, Option<i64>, Option<(i64, String)>, Option<i64>, Option<(String, String, String)>) {
+    fn render_tree_node_with_table_expansion(
+            ui: &mut egui::Ui, node: &mut TreeNode, 
+            editor_text: &mut String, node_index: usize, 
+            refreshing_connections: &std::collections::HashSet<i64>
+        ) -> (
+            Option<ExpansionRequest>, Option<(usize, i64, String)>, 
+            Option<i64>, Option<(i64, String)>, Option<i64>, 
+            Option<(String, String, String)>
+        ) {
         let has_children = !node.children.is_empty();
         let mut expansion_request = None;
         let mut table_expansion = None;
@@ -2203,7 +2215,7 @@ impl MyApp {
         
         egui::Window::new(title)
             .resizable(false)
-            .default_width(400.0)
+            .default_width(600.0)
             .collapsible(false)
             .open(&mut open)
             .show(ctx, |ui| {
@@ -3642,7 +3654,6 @@ impl MyApp {
         
         // Add each Redis database from cache (db0, db1, etc.)
         for db_name in databases {
-            println!("Adding Redis database from cache: {}", db_name);
             if db_name.starts_with("db") {
                 let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
                 db_node.connection_id = Some(connection_id);
@@ -3916,15 +3927,10 @@ impl MyApp {
     }
 
     fn find_redis_database_node<'a>(node: &'a mut TreeNode, connection_id: i64, database_name: &Option<String>) -> Option<&'a mut TreeNode> {
-        // Debug print to see what we're searching for
-        println!("🔍 Searching for database node: connection_id={}, database_name={:?}, current_node={} (type: {:?})", 
-                 connection_id, database_name, node.name, node.node_type);
-        
         // Check if this is the database node we're looking for
         if node.connection_id == Some(connection_id) && 
            node.node_type == NodeType::Database && 
            node.database_name == *database_name {
-            println!("✅ Found matching database node: {}", node.name);
             return Some(node);
         }
         
@@ -3935,24 +3941,20 @@ impl MyApp {
             }
         }
         
-        println!("❌ Database node not found in branch: {}", node.name);
         None
     }
 
     fn load_redis_keys_for_database(&mut self, connection_id: i64, database_name: &str, db_node: &mut TreeNode) {
-        println!("🔑 load_redis_keys_for_database called for connection_id: {}, database_name: {}", connection_id, database_name);
         
         // Clear existing children and mark as loading
         db_node.children.clear();
         
         // Extract database number from database_name (e.g., "db0" -> 0)
-        let db_number = if database_name.starts_with("db") {
-            database_name[2..].parse::<u8>().unwrap_or(0)
+        let db_number = if let Some(suffix) = database_name.strip_prefix("db") {
+            suffix.parse::<u8>().unwrap_or(0)
         } else {
             0
         };
-        
-        println!("🗄️ Switching to Redis database: {} (number: {})", database_name, db_number);
         
         // Get connection pool and fetch keys
         let rt = tokio::runtime::Runtime::new().unwrap();
