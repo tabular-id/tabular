@@ -1746,6 +1746,72 @@ impl MyApp {
                         }
                     });
                 }
+                
+                // Add context menu for table nodes
+                if node.node_type == NodeType::Table {
+                    response.context_menu(|ui| {
+                        if ui.button("📊 View Data").clicked() {
+                            if let Some(conn_id) = node.connection_id {
+                                table_click_request = Some((conn_id, node.name.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("📋 SELECT Query").clicked() {
+                            *editor_text = format!("SELECT * FROM {} LIMIT 100;", node.name);
+                            ui.close_menu();
+                        }
+                        if ui.button("🔍 COUNT Query").clicked() {
+                            *editor_text = format!("SELECT COUNT(*) FROM {};", node.name);
+                            ui.close_menu();
+                        }
+                        if ui.button("📝 DESCRIBE Query").clicked() {
+                            // Different DESCRIBE syntax for different database types
+                            if node.database_name.is_some() {
+                                *editor_text = format!("DESCRIBE {};", node.name);
+                            } else {
+                                *editor_text = format!("PRAGMA table_info({});", node.name); // SQLite syntax
+                            }
+                            ui.close_menu();
+                        }
+                    });
+                }
+                
+                // Add context menu for view nodes
+                if node.node_type == NodeType::View {
+                    response.context_menu(|ui| {
+                        if ui.button("📊 View Data").clicked() {
+                            if let Some(conn_id) = node.connection_id {
+                                table_click_request = Some((conn_id, node.name.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("📋 SELECT Query").clicked() {
+                            *editor_text = format!("SELECT * FROM {} LIMIT 100;", node.name);
+                            ui.close_menu();
+                        }
+                        if ui.button("🔍 COUNT Query").clicked() {
+                            *editor_text = format!("SELECT COUNT(*) FROM {};", node.name);
+                            ui.close_menu();
+                        }
+                        if ui.button("📝 DESCRIBE View").clicked() {
+                            // Different DESCRIBE syntax for different database types
+                            if node.database_name.is_some() {
+                                *editor_text = format!("DESCRIBE {};", node.name);
+                            } else {
+                                *editor_text = format!("PRAGMA table_info({});", node.name); // SQLite syntax
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("🗂️ Show Columns").clicked() {
+                            // Trigger table expansion to show columns
+                            if let Some(conn_id) = node.connection_id {
+                                table_expansion = Some((0, conn_id, node.name.clone()));
+                            }
+                            ui.close_menu();
+                        }
+                    });
+                }
             });
 
             if node.is_expanded {
