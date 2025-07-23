@@ -1,6 +1,7 @@
 use eframe::{egui, App, Frame};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqlitePool, MySqlPool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use redis::{Client, aio::ConnectionManager};
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -88,6 +89,7 @@ enum NodeType {
     MySQLFolder,       // Folder untuk koneksi MySQL
     PostgreSQLFolder,  // Folder untuk koneksi PostgreSQL
     SQLiteFolder,      // Folder untuk koneksi SQLite
+    RedisFolder,       // Folder untuk koneksi Redis
     CustomFolder,      // Folder custom yang bisa dinamai user
 }
 
@@ -127,6 +129,7 @@ enum DatabaseType {
     MySQL,
     PostgreSQL,
     SQLite,
+    Redis,
 }
 
 impl Default for ConnectionConfig {
@@ -193,6 +196,7 @@ enum DatabasePool {
     MySQL(Arc<MySqlPool>),
     PostgreSQL(Arc<PgPool>),
     SQLite(Arc<SqlitePool>),
+    Redis(Arc<ConnectionManager>),
 }
 
 #[derive(Clone)]
@@ -442,16 +446,21 @@ impl MyApp {
         let db_pool = self.db_pool.clone();
         
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            // Create a single-threaded Tokio runtime for this background thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             
             while let Ok(task) = task_receiver.recv() {
                 match task {
                     BackgroundTask::RefreshConnection { connection_id } => {
-                        let success = Self::refresh_connection_background_with_db(
-                            connection_id,
-                            &db_pool,
-                            &rt
-                        );
+                        let success = rt.block_on(async {
+                            Self::refresh_connection_background_async(
+                                connection_id,
+                                &db_pool
+                            ).await
+                        });
                         
                         let _ = result_sender.send(BackgroundResult::RefreshComplete {
                             connection_id,
@@ -463,21 +472,18 @@ impl MyApp {
         });
     }
 
-    fn refresh_connection_background_with_db(
+    async fn refresh_connection_background_async(
         connection_id: i64,
         db_pool: &Option<Arc<SqlitePool>>,
-        rt: &tokio::runtime::Runtime,
     ) -> bool {
         // Get connection from database
         if let Some(cache_pool_arc) = db_pool {
-            let connection_result = rt.block_on(async {
-                sqlx::query_as::<_, (i64, String, String, String, String, String, String, String)>(
-                    "SELECT id, name, host, port, username, password, database_name, connection_type FROM connections WHERE id = ?"
-                )
-                .bind(connection_id)
-                .fetch_optional(cache_pool_arc.as_ref())
-                .await
-            });
+            let connection_result = sqlx::query_as::<_, (i64, String, String, String, String, String, String, String)>(
+                "SELECT id, name, host, port, username, password, database_name, connection_type FROM connections WHERE id = ?"
+            )
+            .bind(connection_id)
+            .fetch_optional(cache_pool_arc.as_ref())
+            .await;
             
             if let Ok(Some((id, name, host, port, username, password, database_name, connection_type))) = connection_result {
                 let connection = ConnectionConfig {
@@ -491,45 +497,43 @@ impl MyApp {
                     connection_type: match connection_type.as_str() {
                         "MySQL" => DatabaseType::MySQL,
                         "PostgreSQL" => DatabaseType::PostgreSQL,
+                        "Redis" => DatabaseType::Redis,
                         _ => DatabaseType::SQLite,
                     },
                     folder: None, // Will be loaded from database later
                 };
                 
-                let result = rt.block_on(async {
-                    // Clear cache
-                    let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
-                        .bind(connection_id)
-                        .execute(cache_pool_arc.as_ref())
-                        .await;
-                    
-                    let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ?")
-                        .bind(connection_id)
-                        .execute(cache_pool_arc.as_ref())
-                        .await;
-                    
-                    let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ?")
-                        .bind(connection_id)
-                        .execute(cache_pool_arc.as_ref())
-                        .await;
+                // Clear cache
+                let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(cache_pool_arc.as_ref())
+                    .await;
+                
+                let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(cache_pool_arc.as_ref())
+                    .await;
+                
+                let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(cache_pool_arc.as_ref())
+                    .await;
 
-                    // Create new connection pool
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(30), // 30 second timeout
-                        Self::create_database_pool(&connection)
-                    ).await {
-                        Ok(Some(new_pool)) => {
-                            Self::fetch_and_cache_all_data(connection_id, &connection, &new_pool, cache_pool_arc.as_ref()).await
-                        }
-                        Ok(None) => {
-                            false
-                        }
-                        Err(_) => {
-                            false
-                        }
+                // Create new connection pool
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30), // 30 second timeout
+                    Self::create_database_pool(&connection)
+                ).await {
+                    Ok(Some(new_pool)) => {
+                        Self::fetch_and_cache_all_data(connection_id, &connection, &new_pool, cache_pool_arc.as_ref()).await
                     }
-                });
-                result
+                    Ok(None) => {
+                        false
+                    }
+                    Err(_) => {
+                        false
+                    }
+                }
             } else {
                 false
             }
@@ -606,6 +610,23 @@ impl MyApp {
                     }
                 }
             }
+            DatabaseType::Redis => {
+                let connection_string = if connection.password.is_empty() {
+                    format!("redis://{}:{}", connection.host, connection.port)
+                } else {
+                    format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
+                };
+                
+                match Client::open(connection_string) {
+                    Ok(client) => {
+                        match ConnectionManager::new(client).await {
+                            Ok(manager) => Some(DatabasePool::Redis(Arc::new(manager))),
+                            Err(_e) => None,
+                        }
+                    }
+                    Err(_e) => None,
+                }
+            }
         }
     }
 
@@ -633,6 +654,13 @@ impl MyApp {
             DatabaseType::PostgreSQL => {
                 if let DatabasePool::PostgreSQL(postgres_pool) = pool {
                     Self::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
+                } else {
+                    false
+                }
+            }
+            DatabaseType::Redis => {
+                if let DatabasePool::Redis(redis_manager) = pool {
+                    Self::fetch_redis_data(connection_id, redis_manager, cache_pool).await
                 } else {
                     false
                 }
@@ -764,6 +792,58 @@ impl MyApp {
             true
         } else {
             false
+        }
+    }
+
+    async fn fetch_redis_data(connection_id: i64, redis_manager: &ConnectionManager, cache_pool: &SqlitePool) -> bool {
+        // Try to get a Redis connection
+        let mut conn = redis_manager.clone();
+        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
+            Ok(_) => {
+                // Get CONFIG GET databases to determine max database count
+                let max_databases = if let Ok(config_result) = redis::cmd("CONFIG").arg("GET").arg("databases").query_async::<_, Vec<String>>(&mut conn).await {
+                    if config_result.len() >= 2 {
+                        config_result[1].parse::<i32>().unwrap_or(16)
+                    } else {
+                        16 // Default Redis databases count
+                    }
+                } else {
+                    16 // Default fallback
+                };
+                
+                // Cache all potential databases (db0 to db15 by default)
+                for db_num in 0..max_databases {
+                    let db_name = format!("db{}", db_num);
+                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
+                        .bind(connection_id)
+                        .bind(&db_name)
+                        .execute(cache_pool)
+                        .await;
+                }
+                
+                // Get keyspace info to identify which databases actually have keys
+                if let Ok(keyspace_result) = redis::cmd("INFO").arg("keyspace").query_async::<_, String>(&mut conn).await {
+                    for line in keyspace_result.lines() {
+                        if line.starts_with("db") {
+                            if let Some(db_part) = line.split(':').next() {
+                                // Mark this database as having keys by adding a special marker
+                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name, table_type) VALUES (?, ?, ?, ?)")
+                                    .bind(connection_id)
+                                    .bind(db_part)
+                                    .bind("_has_keys")
+                                    .bind("redis_marker")
+                                    .execute(cache_pool)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                
+                true
+            }
+            Err(_e) => {
+                false
+            }
         }
     }
 
@@ -965,6 +1045,7 @@ impl MyApp {
             let mut mysql_connections = Vec::new();
             let mut postgresql_connections = Vec::new();
             let mut sqlite_connections = Vec::new();
+            let mut redis_connections = Vec::new();
             
             for conn in connections {
                 if let Some(id) = conn.id {
@@ -978,6 +1059,9 @@ impl MyApp {
                         },
                         DatabaseType::SQLite => {
                             sqlite_connections.push(node);
+                        },
+                        DatabaseType::Redis => {
+                            redis_connections.push(node);
                         },
                     }
                 } else {
@@ -1010,6 +1094,14 @@ impl MyApp {
                 sqlite_folder.children = sqlite_connections;
                 sqlite_folder.is_expanded = true;
                 db_type_folders.push(sqlite_folder);
+            }
+            
+            if !redis_connections.is_empty() {
+                let _ = redis_connections.len();
+                let mut redis_folder = TreeNode::new("Redis".to_string(), NodeType::RedisFolder);
+                redis_folder.children = redis_connections;
+                redis_folder.is_expanded = true;
+                db_type_folders.push(redis_folder);
             }
             
             custom_folder.children = db_type_folders;
@@ -1254,6 +1346,7 @@ impl MyApp {
                                         DatabaseType::MySQL => "MySQL",
                                         DatabaseType::PostgreSQL => "PostgreSQL",
                                         DatabaseType::SQLite => "SQLite",
+                                        DatabaseType::Redis => "Redis",
                                     }
                                 );
                                 
@@ -1434,6 +1527,47 @@ impl MyApp {
                         }
                     }
                 },
+                NodeType::Database => {
+                    println!("🔍 Database expansion request received for connection_id: {}, database_name: {:?}", 
+                             expansion_req.connection_id, expansion_req.database_name);
+                    
+                    // Handle Database expansion for Redis - load keys for the database
+                    if let Some(connection) = self.connections.iter().find(|c| c.id == Some(expansion_req.connection_id)) {
+                        println!("✅ Found connection: {} (type: {:?})", connection.name, connection.connection_type);
+                        
+                        if connection.connection_type == DatabaseType::Redis {
+                            println!("🔑 Processing Redis database expansion");
+                            
+                            // Find the database node and load its keys
+                            let mut node_found = false;
+                            for (node_idx, node) in nodes.iter_mut().enumerate() {
+                                println!("🌳 Checking tree node [{}]: '{}' (type: {:?}, connection_id: {:?})", 
+                                         node_idx, node.name, node.node_type, node.connection_id);
+                                
+                                if let Some(db_node) = Self::find_redis_database_node(node, expansion_req.connection_id, &expansion_req.database_name) {
+                                    println!("📁 Found database node: {}, is_loaded: {}", db_node.name, db_node.is_loaded);
+                                    node_found = true;
+                                    
+                                    if !db_node.is_loaded {
+                                        println!("⏳ Loading keys for database: {}", expansion_req.database_name.clone().unwrap_or_default());
+                                        self.load_redis_keys_for_database(expansion_req.connection_id, &expansion_req.database_name.clone().unwrap_or_default(), db_node);
+                                    } else {
+                                        println!("✅ Database already loaded with {} children", db_node.children.len());
+                                    }
+                                    break;
+                                }
+                            }
+                            
+                            if !node_found {
+                                println!("❌ Database node not found in any tree branch for database: {:?}", expansion_req.database_name);
+                            }
+                        } else {
+                            println!("❌ Connection is not Redis type: {:?}", connection.connection_type);
+                        }
+                    } else {
+                        println!("❌ Connection not found for ID: {}", expansion_req.connection_id);
+                    }
+                },
                 NodeType::TablesFolder | NodeType::ViewsFolder | NodeType::StoredProceduresFolder |
                 NodeType::UserFunctionsFolder | NodeType::TriggersFolder | NodeType::EventsFolder => {
                     // Find the specific folder node and load if not already loaded
@@ -1473,13 +1607,85 @@ impl MyApp {
         
         // Handle table click requests - create new tab for each table
         for (connection_id, table_name) in table_click_requests {
-            // Create a new tab with SELECT query for the table
-            let query_content = format!("SELECT * FROM {} LIMIT 100;", table_name);
-            let tab_title = format!("Table: {}", table_name);
-            self.create_new_tab(tab_title, query_content);
+            // Find the connection to determine the database type
+            let connection_type = self.connections.iter()
+                .find(|conn| conn.id == Some(connection_id))
+                .map(|conn| &conn.connection_type);
             
-            // Also load the table data
-            self.load_table_data(connection_id, &table_name);
+            match connection_type {
+                Some(DatabaseType::Redis) => {
+                    
+                    // Check if this is a Redis key (has specific Redis data types in the tree structure)
+                    // For Redis keys, we need to find which database they belong to
+                    let mut is_redis_key = false;
+                    let mut key_type: Option<String> = None;
+                    
+                    for (_, node) in nodes.iter().enumerate() {
+                        if let Some((_, k_type)) = self.find_redis_key_info(node, &table_name) {
+                            key_type = Some(k_type.clone());
+                            is_redis_key = true;
+                            break;
+                        }
+                    }
+                    
+                    if is_redis_key {
+                        if let Some(k_type) = key_type {
+                            // This is a Redis key - create a query tab with appropriate Redis command
+                            let redis_command = match k_type.to_lowercase().as_str() {
+                                "string" => format!("GET {}", table_name),
+                                "hash" => format!("HGETALL {}", table_name),
+                                "list" => format!("LRANGE {} 0 -1", table_name),
+                                "set" => format!("SMEMBERS {}", table_name),
+                                "zset" | "sorted_set" => format!("ZRANGE {} 0 -1 WITHSCORES", table_name),
+                                "stream" => format!("XRANGE {} - +", table_name),
+                                _ => format!("TYPE {}", table_name), // Fallback to show type
+                            };
+                            
+                            let tab_title = format!("Redis Key: {} ({})", table_name, k_type);
+                            self.create_new_tab(tab_title, redis_command.clone());
+                            
+                            // Set current connection ID for Redis query execution
+                            self.current_connection_id = Some(connection_id);
+                            
+                            // Auto-execute the Redis query
+                            if let Some((headers, data)) = self.execute_query_with_connection(connection_id, redis_command) {
+                                self.current_table_headers = headers;
+                                self.current_table_data = data.clone();
+                                self.all_table_data = data;
+                                self.current_table_name = format!("Redis Key: {}", table_name);
+                                self.total_rows = self.all_table_data.len();
+                                self.current_page = 0;
+                            }
+                        }
+                    } else {
+                        // This is a Redis folder/type - create a query tab for scanning keys
+                        let redis_command = match table_name.as_str() {
+                            "hashes" => "SCAN 0 MATCH *:* TYPE hash COUNT 100".to_string(),
+                            "strings" => "SCAN 0 MATCH *:* TYPE string COUNT 100".to_string(),
+                            "lists" => "SCAN 0 MATCH *:* TYPE list COUNT 100".to_string(),
+                            "sets" => "SCAN 0 MATCH *:* TYPE set COUNT 100".to_string(),
+                            "sorted_sets" => "SCAN 0 MATCH *:* TYPE zset COUNT 100".to_string(),
+                            "streams" => "SCAN 0 MATCH *:* TYPE stream COUNT 100".to_string(),
+                            _ => {
+                                // Extract folder name from display format like "Strings (5)"
+                                let clean_name = table_name.split('(').next().unwrap_or(&table_name).trim();
+                                format!("SCAN 0 MATCH *:* COUNT 100 # Browse {}", clean_name)
+                            }
+                        };
+                        let tab_title = format!("Redis {}", table_name);
+                        self.create_new_tab(tab_title, redis_command);
+                    }
+                }
+                _ => {
+                    // SQL databases - use regular SELECT query
+                    let query_content = format!("SELECT * FROM {} LIMIT 100;", table_name);
+                    let tab_title = format!("Table: {}", table_name);
+                    self.create_new_tab(tab_title, query_content);
+                    
+                    // Also load the table data
+                    self.load_table_data(connection_id, &table_name);
+                }
+            };
         }
         
         // Handle query file open requests
@@ -1653,6 +1859,17 @@ impl MyApp {
                             });
                         }
                     }
+                    
+                    // If this is a Database node and not loaded, request database expansion (for Redis keys)
+                    if node.node_type == NodeType::Database && !node.is_loaded && node.is_expanded {
+                        if let Some(conn_id) = node.connection_id {
+                            expansion_request = Some(ExpansionRequest {
+                                node_type: NodeType::Database,
+                                connection_id: conn_id,
+                                database_name: node.database_name.clone(),
+                            });
+                        }
+                    }
                 }
                 
                 let icon = match node.node_type {
@@ -1682,6 +1899,7 @@ impl MyApp {
                     NodeType::MySQLFolder => "🐬",
                     NodeType::PostgreSQLFolder => "🐘",
                     NodeType::SQLiteFolder => "📄",
+                    NodeType::RedisFolder => "🔴",
                     NodeType::CustomFolder => "📁",
                 };
                 
@@ -1898,6 +2116,7 @@ impl MyApp {
                     NodeType::MySQLFolder => "🐬",
                     NodeType::PostgreSQLFolder => "🐘",
                     NodeType::SQLiteFolder => "📄",
+                    NodeType::RedisFolder => "🔴",
                     NodeType::CustomFolder => "📁",
                 };
                 
@@ -2003,11 +2222,13 @@ impl MyApp {
                                     DatabaseType::MySQL => "MySQL",
                                     DatabaseType::PostgreSQL => "PostgreSQL",
                                     DatabaseType::SQLite => "SQLite",
+                                    DatabaseType::Redis => "Redis",
                                 })
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut connection_data.connection_type, DatabaseType::MySQL, "MySQL");
                                     ui.selectable_value(&mut connection_data.connection_type, DatabaseType::PostgreSQL, "PostgreSQL");
                                     ui.selectable_value(&mut connection_data.connection_type, DatabaseType::SQLite, "SQLite");
+                                    ui.selectable_value(&mut connection_data.connection_type, DatabaseType::Redis, "Redis");
                                 });
                             ui.end_row();
 
@@ -2186,6 +2407,7 @@ impl MyApp {
                         connection_type: match connection_type.as_str() {
                             "MySQL" => DatabaseType::MySQL,
                             "PostgreSQL" => DatabaseType::PostgreSQL,
+                            "Redis" => DatabaseType::Redis,
                             _ => DatabaseType::SQLite,
                         },
                         folder,
@@ -2408,6 +2630,7 @@ impl MyApp {
                     DatabaseType::MySQL => self.generate_mysql_alter_table_template(&table_name),
                     DatabaseType::PostgreSQL => self.generate_postgresql_alter_table_template(&table_name),
                     DatabaseType::SQLite => self.generate_sqlite_alter_table_template(&table_name),
+                    DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database".to_string(),
                 };
                 
                 // Set the ALTER TABLE template in the editor
@@ -2421,6 +2644,7 @@ impl MyApp {
                     DatabaseType::MySQL => "-- MySQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  MODIFY COLUMN existing_column INT,\n  DROP COLUMN old_column;".to_string(),
                     DatabaseType::PostgreSQL => "-- PostgreSQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  ALTER COLUMN existing_column TYPE INTEGER,\n  DROP COLUMN old_column;".to_string(),
                     DatabaseType::SQLite => "-- SQLite ALTER TABLE template\n-- Note: SQLite has limited ALTER TABLE support\nALTER TABLE your_table_name\n  ADD COLUMN new_column TEXT;".to_string(),
+                    DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database\n-- Use Redis commands like SET, GET, HSET, etc.".to_string(),
                 };
                 
                 self.editor_text = alter_template;
@@ -2535,6 +2759,35 @@ impl MyApp {
                             }
                         },
                         Err(e) => (false, format!("SQLite connection failed: {}", e)),
+                    }
+                },
+                DatabaseType::Redis => {
+                    let connection_string = if connection.password.is_empty() {
+                        format!("redis://{}:{}", connection.host, connection.port)
+                    } else {
+                        format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
+                    };
+                    
+                    match Client::open(connection_string) {
+                        Ok(client) => {
+                            match client.get_connection() {
+                                Ok(mut conn) => {
+                                    // Test with a simple PING command
+                                    match redis::cmd("PING").query::<String>(&mut conn) {
+                                        Ok(response) => {
+                                            if response == "PONG" {
+                                                (true, "Redis connection successful!".to_string())
+                                            } else {
+                                                (false, "Redis PING returned unexpected response".to_string())
+                                            }
+                                        },
+                                        Err(e) => (false, format!("Redis PING failed: {}", e)),
+                                    }
+                                },
+                                Err(e) => (false, format!("Redis connection failed: {}", e)),
+                            }
+                        },
+                        Err(e) => (false, format!("Redis client creation failed: {}", e)),
                     }
                 }
             }
@@ -2953,6 +3206,7 @@ impl MyApp {
                     DatabaseType::MySQL => vec!["table", "view", "procedure", "function", "trigger", "event"],
                     DatabaseType::PostgreSQL => vec!["table", "view"], // Add PostgreSQL support later
                     DatabaseType::SQLite => vec!["table", "view"],
+                    DatabaseType::Redis => vec!["info_section", "redis_keys"], // Redis specific types
                 };
                 
                 let mut all_tables = Vec::new();
@@ -2968,6 +3222,9 @@ impl MyApp {
                         DatabaseType::PostgreSQL => {
                             // TODO: Add PostgreSQL support
                             None
+                        },
+                        DatabaseType::Redis => {
+                            self.fetch_tables_from_redis_connection(connection_id, database_name, table_type)
                         },
                     };
                     
@@ -3151,6 +3408,34 @@ impl MyApp {
                             None
                         }
                     }
+                },
+                DatabaseType::Redis => {
+                    let connection_string = if connection.password.is_empty() {
+                        format!("redis://{}:{}", connection.host, connection.port)
+                    } else {
+                        format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
+                    };
+                    
+                    println!("Creating new Redis connection manager for: {}", connection.name);
+                    match Client::open(connection_string) {
+                        Ok(client) => {
+                            match ConnectionManager::new(client).await {
+                                Ok(manager) => {
+                                    let database_pool = DatabasePool::Redis(Arc::new(manager));
+                                    self.connection_pools.insert(connection_id, database_pool.clone());
+                                    Some(database_pool)
+                                },
+                                Err(e) => {
+                                    println!("Failed to create Redis connection manager: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to create Redis client: {}", e);
+                            None
+                        }
+                    }
                 }
             }
         } else {
@@ -3183,6 +3468,9 @@ impl MyApp {
                 },
                 DatabaseType::SQLite => {
                     self.load_sqlite_structure(connection_id, &connection, node);
+                },
+                DatabaseType::Redis => {
+                    self.load_redis_structure(connection_id, &connection, node);
                 }
             }
             
@@ -3331,10 +3619,72 @@ impl MyApp {
                     views_folder.is_loaded = false;
                     
                     main_children = vec![tables_folder, views_folder];
+                },
+                DatabaseType::Redis => {
+                    // Redis structure with databases
+                    self.build_redis_structure_from_cache(connection_id, node, databases);
+                    return;
                 }
             }
             
             node.children = main_children;
+        }
+    }
+
+    fn build_redis_structure_from_cache(&mut self, connection_id: i64, node: &mut TreeNode, databases: &[String]) {
+        let mut main_children = Vec::new();
+        
+        // Create databases folder for Redis
+        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        databases_folder.connection_id = Some(connection_id);
+        databases_folder.is_expanded = true;
+        databases_folder.is_loaded = true;
+        
+        // Add each Redis database from cache (db0, db1, etc.)
+        for db_name in databases {
+            println!("Adding Redis database from cache: {}", db_name);
+            if db_name.starts_with("db") {
+                let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                db_node.connection_id = Some(connection_id);
+                db_node.database_name = Some(db_name.clone());
+                db_node.is_loaded = false; // Keys will be loaded when clicked
+                
+                // Check if this database has keys by looking for the marker
+                let has_keys = self.check_redis_database_has_keys(connection_id, db_name);
+                if has_keys {
+                    // Add a placeholder for keys that will be loaded on expansion
+                    let loading_node = TreeNode::new("Loading keys...".to_string(), NodeType::Table);
+                    db_node.children.push(loading_node);
+                }
+                
+                databases_folder.children.push(db_node);
+            }
+        }
+        
+        main_children.push(databases_folder);
+        node.children = main_children;
+    }
+
+    fn check_redis_database_has_keys(&self, connection_id: i64, database_name: &str) -> bool {
+        if let Some(ref pool) = self.db_pool {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let pool_clone = pool.clone();
+            let database_name = database_name.to_string();
+            
+            let result = rt.block_on(async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM table_cache WHERE connection_id = ? AND database_name = ? AND table_name = '_has_keys'"
+                )
+                .bind(connection_id)
+                .bind(database_name)
+                .fetch_one(pool_clone.as_ref())
+                .await
+                .unwrap_or(0)
+            });
+            
+            result > 0
+        } else {
+            false
         }
     }
 
@@ -3360,6 +3710,13 @@ impl MyApp {
     }
 
     fn load_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
+        // Check connection type to handle Redis differently
+        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
+            if connection.connection_type == DatabaseType::Redis {
+                self.load_redis_databases_for_folder(connection_id, databases_folder);
+                return;
+            }
+        }
         
         // Clear any loading placeholders
         databases_folder.children.clear();
@@ -3461,6 +3818,7 @@ impl MyApp {
                 DatabaseType::MySQL => vec!["information_schema".to_string(), "sakila".to_string(), "world".to_string(), "test".to_string()],
                 DatabaseType::PostgreSQL => vec!["postgres".to_string(), "template1".to_string(), "dvdrental".to_string()],
                 DatabaseType::SQLite => vec!["main".to_string()],
+                DatabaseType::Redis => vec!["redis".to_string(), "info".to_string()],
             };
             
             // Clear loading message
@@ -3531,6 +3889,170 @@ impl MyApp {
             }
             
         }
+    }
+    
+    fn load_redis_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
+        // Clear loading placeholders
+        databases_folder.children.clear();
+
+        // Ambil daftar database Redis dari cache
+        if let Some(cached_databases) = self.get_databases_from_cache(connection_id) {
+            for db_name in cached_databases {
+                if db_name.starts_with("db") {
+                    let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                    db_node.connection_id = Some(connection_id);
+                    db_node.database_name = Some(db_name.clone());
+                    db_node.is_loaded = false;
+
+                    // Tambahkan node child untuk key, akan di-load saat node db di-expand
+                    let loading_keys_node = TreeNode::new("Loading keys...".to_string(), NodeType::Table);
+                    db_node.children.push(loading_keys_node);
+
+                    databases_folder.children.push(db_node);
+                }
+            }
+            databases_folder.is_loaded = true;
+        }
+    }
+
+    fn find_redis_database_node<'a>(node: &'a mut TreeNode, connection_id: i64, database_name: &Option<String>) -> Option<&'a mut TreeNode> {
+        // Debug print to see what we're searching for
+        println!("🔍 Searching for database node: connection_id={}, database_name={:?}, current_node={} (type: {:?})", 
+                 connection_id, database_name, node.name, node.node_type);
+        
+        // Check if this is the database node we're looking for
+        if node.connection_id == Some(connection_id) && 
+           node.node_type == NodeType::Database && 
+           node.database_name == *database_name {
+            println!("✅ Found matching database node: {}", node.name);
+            return Some(node);
+        }
+        
+        // Recursively search in children
+        for child in &mut node.children {
+            if let Some(found) = Self::find_redis_database_node(child, connection_id, database_name) {
+                return Some(found);
+            }
+        }
+        
+        println!("❌ Database node not found in branch: {}", node.name);
+        None
+    }
+
+    fn load_redis_keys_for_database(&mut self, connection_id: i64, database_name: &str, db_node: &mut TreeNode) {
+        println!("🔑 load_redis_keys_for_database called for connection_id: {}, database_name: {}", connection_id, database_name);
+        
+        // Clear existing children and mark as loading
+        db_node.children.clear();
+        
+        // Extract database number from database_name (e.g., "db0" -> 0)
+        let db_number = if database_name.starts_with("db") {
+            database_name[2..].parse::<u8>().unwrap_or(0)
+        } else {
+            0
+        };
+        
+        println!("🗄️ Switching to Redis database: {} (number: {})", database_name, db_number);
+        
+        // Get connection pool and fetch keys
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let keys_result = rt.block_on(async {
+            if let Some(pool) = self.get_or_create_connection_pool(connection_id).await {
+                if let DatabasePool::Redis(redis_manager) = pool {
+                    let mut conn = redis_manager.as_ref().clone();
+                    
+                    // Select the specific database
+                    if let Err(e) = redis::cmd("SELECT").arg(db_number).query_async::<_, ()>(&mut conn).await {
+                        println!("❌ Failed to select database {}: {}", db_number, e);
+                        return Vec::new();
+                    }
+                    
+                    // Use SCAN for safe key enumeration (better than KEYS * in production)
+                    let mut cursor = 0u64;
+                    let mut all_keys = Vec::new();
+                    let max_keys = 100; // Limit to first 100 keys to avoid overwhelming UI
+                    
+                    loop {
+                        match redis::cmd("SCAN")
+                            .arg(cursor)
+                            .arg("COUNT")
+                            .arg(10)
+                            .query_async::<_, (u64, Vec<String>)>(&mut conn)
+                            .await 
+                        {
+                            Ok((next_cursor, keys)) => {
+                                for key in keys {
+                                    if all_keys.len() >= max_keys {
+                                        break;
+                                    }
+                                    
+                                    // Get the type of each key
+                                    if let Ok(key_type) = redis::cmd("TYPE").arg(&key).query_async::<_, String>(&mut conn).await {
+                                        all_keys.push((key, key_type));
+                                    }
+                                }
+                                
+                                cursor = next_cursor;
+                                if cursor == 0 || all_keys.len() >= max_keys {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                println!("❌ SCAN command failed: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    println!("✅ Found {} keys in database {}", all_keys.len(), database_name);
+                    all_keys
+                } else {
+                    println!("❌ Connection pool is not Redis type");
+                    Vec::new()
+                }
+            } else {
+                println!("❌ Failed to get Redis connection pool");
+                Vec::new()
+            }
+        });
+        
+        // Group keys by type
+        let mut keys_by_type: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        for (key, key_type) in keys_result {
+            keys_by_type.entry(key_type.clone()).or_insert_with(Vec::new).push((key, key_type));
+        }
+        
+        // Create folder structure for each Redis data type
+        for (data_type, keys) in keys_by_type {
+            let folder_name = match data_type.as_str() {
+                "string" => "Strings",
+                "hash" => "Hashes", 
+                "list" => "Lists",
+                "set" => "Sets",
+                "zset" => "Sorted Sets",
+                "stream" => "Streams",
+                _ => &data_type,
+            };
+            
+            let mut type_folder = TreeNode::new(format!("{} ({})", folder_name, keys.len()), NodeType::TablesFolder);
+            type_folder.connection_id = Some(connection_id);
+            type_folder.database_name = Some(database_name.to_string());
+            type_folder.is_expanded = true;
+            type_folder.is_loaded = true;
+            
+            // Add keys of this type to the folder
+            for (key, _key_type) in keys {
+                let mut key_node = TreeNode::new(key.clone(), NodeType::Table);
+                key_node.connection_id = Some(connection_id);
+                key_node.database_name = Some(database_name.to_string());
+                type_folder.children.push(key_node);
+            }
+            
+            db_node.children.push(type_folder);
+        }
+        
+        db_node.is_loaded = true;
+        println!("✅ Database node loaded with {} type folders", db_node.children.len());
     }
     
     fn fetch_databases_from_connection(&mut self, connection_id: i64) -> Option<Vec<String>> {
@@ -3605,6 +4127,30 @@ impl MyApp {
                             Some(vec!["main".to_string()]) // Fallback to main
                         }
                     }
+                },
+                DatabasePool::Redis(redis_manager) => {
+                    // For Redis, get actual databases (db0, db1, etc.)
+                    let mut conn = redis_manager.as_ref().clone();
+                    
+                    // Get CONFIG GET databases to determine max database count
+                    let max_databases = match redis::cmd("CONFIG").arg("GET").arg("databases").query_async::<_, Vec<String>>(&mut conn).await {
+                        Ok(config_result) if config_result.len() >= 2 => {
+                            config_result[1].parse::<i32>().unwrap_or(16)
+                        }
+                        _ => 16 // Default fallback
+                    };
+                    
+                    println!("Redis max databases: {}", max_databases);
+                    
+                    // Create list of all Redis databases (db0 to db15 by default)
+                    let mut databases = Vec::new();
+                    for db_num in 0..max_databases {
+                        let db_name = format!("db{}", db_num);
+                        databases.push(db_name);
+                    }
+                    
+                    println!("Generated Redis databases: {:?}", databases);
+                    Some(databases)
                 }
             }
         })
@@ -3700,6 +4246,80 @@ impl MyApp {
         })
     }
     
+    fn fetch_tables_from_redis_connection(&mut self, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
+        
+        // Create a new runtime for the database query
+        let rt = tokio::runtime::Runtime::new().ok()?;
+        
+        rt.block_on(async {
+            // Get or create connection pool
+            let pool = self.get_or_create_connection_pool(connection_id).await?;
+            
+            match pool {
+                DatabasePool::Redis(redis_manager) => {
+                    let mut conn = redis_manager.as_ref().clone();
+                    match table_type {
+                                "info_section" => {
+                                    // Return the info sections we cached
+                                    if database_name == "info" {
+                                        // Get Redis INFO sections
+                                        match redis::cmd("INFO").query_async::<_, String>(&mut conn).await {
+                                            Ok(info_result) => {
+                                                let sections: Vec<String> = info_result
+                                                    .lines()
+                                                    .filter(|line| line.starts_with('#') && !line.is_empty())
+                                                    .map(|line| line.trim_start_matches('#').trim().to_string())
+                                                    .filter(|section| !section.is_empty())
+                                                    .collect();
+                                                Some(sections)
+                                            },
+                                            Err(e) => {
+                                                println!("Error getting Redis INFO: {}", e);
+                                                None
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                },
+                                "redis_keys" => {
+                                    // Get sample keys from Redis
+                                    if database_name.starts_with("db") {
+                                        // Select the specific database
+                                        if let Ok(db_num) = database_name.trim_start_matches("db").parse::<i32>() {
+                                            if let Ok(_) = redis::cmd("SELECT").arg(db_num).query_async::<_, String>(&mut conn).await {
+                                                // Get a sample of keys (limit to first 100)
+                                                match redis::cmd("SCAN").arg(0).arg("COUNT").arg(100).query_async::<_, Vec<String>>(&mut conn).await {
+                                                    Ok(keys) => Some(keys),
+                                                    Err(e) => {
+                                                        println!("Error scanning Redis keys: {}", e);
+                                                        Some(vec!["keys".to_string()]) // Return generic "keys" entry
+                                                    }
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                },
+                                _ => {
+                                    println!("Unsupported Redis table type: {}", table_type);
+                                    None
+                                }
+                            }
+                },
+                _ => {
+                    println!("Wrong pool type for Redis connection");
+                    None
+                }
+            }
+        })
+    }
+
     fn fetch_columns_from_database(&self, _connection_id: i64, database_name: &str, table_name: &str, connection: &ConnectionConfig) -> Option<Vec<(String, String)>> {
         
         // Create a new runtime for the database query
@@ -3820,6 +4440,16 @@ impl MyApp {
                             None
                         }
                     }
+                },
+                DatabaseType::Redis => {
+                    // Redis doesn't have traditional tables/columns
+                    // Return some generic "columns" for Redis key-value structure
+                    Some(vec![
+                        ("key".to_string(), "String".to_string()),
+                        ("value".to_string(), "Any".to_string()),
+                        ("type".to_string(), "String".to_string()),
+                        ("ttl".to_string(), "Integer".to_string()),
+                    ])
                 }
             }
         })
@@ -3924,6 +4554,49 @@ impl MyApp {
         node.children = main_children;
     }
 
+    fn load_redis_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+        // Check if we have cached databases
+        if let Some(databases) = self.get_databases_from_cache(connection_id) {
+            println!("🔍 Found cached Redis databases: {:?}", databases);
+            if !databases.is_empty() {
+                self.build_redis_structure_from_cache(connection_id, node, &databases);
+                node.is_loaded = true;
+                return;
+            }
+        }
+        
+        println!("🔄 No cached Redis databases found, fetching from server...");
+        
+        // Fetch fresh data from Redis server
+        self.fetch_and_cache_connection_data(connection_id);
+        
+        // Try again to get from cache after fetching
+        if let Some(databases) = self.get_databases_from_cache(connection_id) {
+            println!("✅ Successfully loaded Redis databases from server: {:?}", databases);
+            if !databases.is_empty() {
+                self.build_redis_structure_from_cache(connection_id, node, &databases);
+                node.is_loaded = true;
+                return;
+            }
+        }
+        
+        // Create basic structure for Redis with databases as fallback
+        let mut main_children = Vec::new();
+        
+        // Add databases folder for Redis
+        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        databases_folder.connection_id = Some(connection_id);
+        databases_folder.is_loaded = false;
+        
+        // Add a loading indicator
+        let loading_node = TreeNode::new("Loading databases...".to_string(), NodeType::Database);
+        databases_folder.children.push(loading_node);
+        
+        main_children.push(databases_folder);
+        
+        node.children = main_children;
+    }
+
     fn load_folder_content(&mut self, connection_id: i64, node: &mut TreeNode, folder_type: NodeType) {        
         // Find the connection by ID
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -3939,6 +4612,9 @@ impl MyApp {
                 },
                 DatabaseType::SQLite => {
                     self.load_sqlite_folder_content(connection_id, &connection, node, folder_type);
+                },
+                DatabaseType::Redis => {
+                    self.load_redis_folder_content(connection_id, &connection, node, folder_type);
                 }
             }
             
@@ -4149,6 +4825,61 @@ impl MyApp {
         println!("Loaded {} items into {:?} folder for SQLite", node.children.len(), folder_type);
     }
 
+    fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode, folder_type: NodeType) {
+        println!("Loading {:?} content for Redis", folder_type);
+        
+        // Redis doesn't have traditional folder structures like SQL databases
+        // We'll create a simplified structure based on Redis concepts
+        match folder_type {
+            NodeType::TablesFolder => {
+                // For Redis, "tables" could be key patterns or data structures
+                let redis_structures = vec![
+                    "strings".to_string(),
+                    "hashes".to_string(), 
+                    "lists".to_string(),
+                    "sets".to_string(),
+                    "sorted_sets".to_string(),
+                    "streams".to_string(),
+                ];
+                
+                node.children = redis_structures.into_iter().map(|structure_name| {
+                    let mut structure_node = TreeNode::new(structure_name, NodeType::Table);
+                    structure_node.connection_id = Some(connection_id);
+                    structure_node.database_name = Some("redis".to_string());
+                    structure_node.is_loaded = false;
+                    structure_node
+                }).collect();
+            },
+            NodeType::ViewsFolder => {
+                // For Redis, "views" could be info sections
+                let info_sections = vec![
+                    "server".to_string(),
+                    "clients".to_string(),
+                    "memory".to_string(),
+                    "persistence".to_string(),
+                    "stats".to_string(),
+                    "replication".to_string(),
+                    "cpu".to_string(),
+                    "keyspace".to_string(),
+                ];
+                
+                node.children = info_sections.into_iter().map(|section_name| {
+                    let mut section_node = TreeNode::new(section_name, NodeType::View);
+                    section_node.connection_id = Some(connection_id);
+                    section_node.database_name = Some("info".to_string());
+                    section_node.is_loaded = false;
+                    section_node
+                }).collect();
+            },
+            _ => {
+                // Other folder types not supported for Redis
+                node.children = vec![TreeNode::new("Not supported for Redis".to_string(), NodeType::Column)];
+            }
+        }
+        
+        println!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
+    }
+
     fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &ConnectionConfig, database_name: &str) -> Vec<TreeNode> {
         // First try to get from cache
         if let Some(cached_columns) = self.get_columns_from_cache(connection_id, database_name, table_name) {
@@ -4317,14 +5048,36 @@ impl MyApp {
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
             println!("Found connection for table: {}", table_name);
             
-            let select_query = format!("SELECT * FROM {} LIMIT 10000", table_name);
+            // Generate appropriate query based on database type
+            let query = match connection.connection_type {
+                DatabaseType::Redis => {
+                    // Create safe Redis commands using SCAN instead of KEYS for production safety
+                    match table_name {
+                        "hashes" => "SCAN 0 MATCH hash:* COUNT 100".to_string(),  // Scan hash keys safely
+                        "strings" => "SCAN 0 MATCH string:* COUNT 100".to_string(), // Scan string keys safely
+                        "lists" => "SCAN 0 MATCH list:* COUNT 100".to_string(),     // Scan list keys safely
+                        "sets" => "SCAN 0 MATCH set:* COUNT 100".to_string(),       // Scan set keys safely
+                        "sorted_sets" => "SCAN 0 MATCH zset:* COUNT 100".to_string(), // Scan sorted set keys safely
+                        "streams" => "SCAN 0 MATCH stream:* COUNT 100".to_string(),   // Scan stream keys safely
+                        "keys" => "SCAN 0 COUNT 100".to_string(),                     // Scan all keys safely
+                        _ => {
+                            // For info sections or other types, show INFO command
+                            format!("INFO {}", table_name)
+                        }
+                    }
+                }
+                _ => {
+                    // SQL databases - use regular SELECT query
+                    format!("SELECT * FROM {} LIMIT 10000", table_name)
+                }
+            };
             
             // Set the query in the editor  
-            self.editor_text = select_query.clone();
+            self.editor_text = query.clone();
             self.current_connection_id = Some(connection_id);
             
             // Execute the query with proper database connection
-            if let Some((headers, data)) = self.execute_table_query_sync(connection_id, &connection, &select_query) {
+            if let Some((headers, data)) = self.execute_table_query_sync(connection_id, &connection, &query) {
                 self.current_table_headers = headers;
                 
                 // Use pagination for table data
@@ -4344,6 +5097,49 @@ impl MyApp {
                 println!("Failed to execute query for table: {}", table_name);
             }
         }
+    }
+
+    fn find_redis_key_info(&self, node: &TreeNode, key_name: &str) -> Option<(String, String)> {
+        // Check if this node is a type folder (like "Strings (5)")
+        if node.node_type == NodeType::TablesFolder {            
+            // Extract the type from folder name
+            let folder_type = if node.name.starts_with("Strings") {
+                "string"
+            } else if node.name.starts_with("Hashes") {
+                "hash"
+            } else if node.name.starts_with("Lists") {
+                "list"
+            } else if node.name.starts_with("Sets") {
+                "set"
+            } else if node.name.starts_with("Sorted Sets") {
+                "zset"
+            } else if node.name.starts_with("Streams") {
+                "stream"
+            } else {
+                // Continue searching instead of returning None
+                "unknown"
+            };
+            
+            
+            // Search for the key in this folder's children
+            for child in &node.children {
+                println!("🔍 Checking child: '{}' (type: {:?})", child.name, child.node_type);
+                if child.node_type == NodeType::Table && child.name == key_name {
+                    if let Some(db_name) = &child.database_name {
+                        return Some((db_name.clone(), folder_type.to_string()));
+                    }
+                }
+            }
+        }
+        
+        // Recursively search in children
+        for child in &node.children {
+            if let Some((db_name, key_type)) = self.find_redis_key_info(child, key_name) {
+                return Some((db_name, key_type));
+            }
+        }
+        
+        None
     }
 
     fn execute_query(&mut self) {
@@ -4514,6 +5310,268 @@ impl MyApp {
                                     Some((
                                         vec!["Error".to_string()],
                                         vec![vec![format!("Query error: {}", e)]]
+                                    ))
+                                }
+                            }
+                        },
+                        DatabasePool::Redis(redis_manager) => {
+                            println!("Executing Redis command: {}", query);
+                            
+                            // For Redis, we need to handle commands differently
+                            // Redis doesn't have SQL queries, so we'll treat the query as a Redis command
+                            let mut connection = redis_manager.as_ref().clone();
+                            use redis::AsyncCommands;
+                            
+                            // Parse simple Redis commands
+                            let parts: Vec<&str> = query.trim().split_whitespace().collect();
+                            if parts.is_empty() {
+                                return Some((
+                                    vec!["Error".to_string()],
+                                    vec![vec!["Empty command".to_string()]]
+                                ));
+                            }
+                            
+                            match parts[0].to_uppercase().as_str() {
+                                "GET" => {
+                                    if parts.len() != 2 {
+                                        return Some((
+                                            vec!["Error".to_string()],
+                                            vec![vec!["GET requires exactly one key".to_string()]]
+                                        ));
+                                    }
+                                    match connection.get::<&str, Option<String>>(parts[1]).await {
+                                        Ok(Some(value)) => {
+                                            Some((
+                                                vec!["Key".to_string(), "Value".to_string()],
+                                                vec![vec![parts[1].to_string(), value]]
+                                            ))
+                                        },
+                                        Ok(None) => {
+                                            Some((
+                                                vec!["Key".to_string(), "Value".to_string()],
+                                                vec![vec![parts[1].to_string(), "NULL".to_string()]]
+                                            ))
+                                        },
+                                        Err(e) => {
+                                            Some((
+                                                vec!["Error".to_string()],
+                                                vec![vec![format!("Redis GET error: {}", e)]]
+                                            ))
+                                        }
+                                    }
+                                },
+                                "KEYS" => {
+                                    if parts.len() != 2 {
+                                        return Some((
+                                            vec!["Error".to_string()],
+                                            vec![vec!["KEYS requires exactly one pattern".to_string()]]
+                                        ));
+                                    }
+                                    match connection.keys::<&str, Vec<String>>(parts[1]).await {
+                                        Ok(keys) => {
+                                            let table_data: Vec<Vec<String>> = keys.into_iter()
+                                                .map(|key| vec![key])
+                                                .collect();
+                                            Some((
+                                                vec!["Key".to_string()],
+                                                table_data
+                                            ))
+                                        },
+                                        Err(e) => {
+                                            Some((
+                                                vec!["Error".to_string()],
+                                                vec![vec![format!("Redis KEYS error: {}", e)]]
+                                            ))
+                                        }
+                                    }
+                                },
+                                "SCAN" => {
+                                    // SCAN cursor [MATCH pattern] [COUNT count]
+                                    // Parse SCAN command arguments
+                                    if parts.len() < 2 {
+                                        return Some((
+                                            vec!["Error".to_string()],
+                                            vec![vec!["SCAN requires cursor parameter".to_string()]]
+                                        ));
+                                    }
+                                    
+                                    let cursor = parts[1];
+                                    let mut match_pattern = "*"; // default pattern
+                                    let mut count = 10; // default count
+                                    
+                                    // Parse optional MATCH and COUNT parameters
+                                    let mut i = 2;
+                                    while i < parts.len() {
+                                        match parts[i].to_uppercase().as_str() {
+                                            "MATCH" => {
+                                                if i + 1 < parts.len() {
+                                                    match_pattern = parts[i + 1];
+                                                    i += 2;
+                                                } else {
+                                                    return Some((
+                                                        vec!["Error".to_string()],
+                                                        vec![vec!["MATCH requires a pattern".to_string()]]
+                                                    ));
+                                                }
+                                            },
+                                            "COUNT" => {
+                                                if i + 1 < parts.len() {
+                                                    if let Ok(c) = parts[i + 1].parse::<i64>() {
+                                                        count = c;
+                                                        i += 2;
+                                                    } else {
+                                                        return Some((
+                                                            vec!["Error".to_string()],
+                                                            vec![vec!["COUNT must be a number".to_string()]]
+                                                        ));
+                                                    }
+                                                } else {
+                                                    return Some((
+                                                        vec!["Error".to_string()],
+                                                        vec![vec!["COUNT requires a number".to_string()]]
+                                                    ));
+                                                }
+                                            },
+                                            _ => {
+                                                return Some((
+                                                    vec!["Error".to_string()],
+                                                    vec![vec![format!("Unknown SCAN parameter: {}", parts[i])]]
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Execute SCAN command using redis::cmd
+                                    let mut cmd = redis::cmd("SCAN");
+                                    cmd.arg(cursor);
+                                    if match_pattern != "*" {
+                                        cmd.arg("MATCH").arg(match_pattern);
+                                    }
+                                    cmd.arg("COUNT").arg(count);
+                                    
+                                    match cmd.query_async::<_, (String, Vec<String>)>(&mut connection).await {
+                                        Ok((next_cursor, keys)) => {
+                                            let mut table_data = Vec::new();
+                                            
+                                            if keys.is_empty() {
+                                                // No keys found, provide helpful information
+                                                table_data.push(vec!["Info".to_string(), format!("No keys found matching pattern: {}", match_pattern)]);
+                                                table_data.push(vec!["Cursor".to_string(), next_cursor.clone()]);
+                                                table_data.push(vec!["Suggestion".to_string(), "Try different pattern or use 'SCAN 0 COUNT 100' to see all keys".to_string()]);
+                                                
+                                                // If this was a pattern search and found nothing, try a general scan as fallback
+                                                if match_pattern != "*" {
+                                                    match redis::cmd("SCAN").arg("0").arg("COUNT").arg("10").query_async::<_, (String, Vec<String>)>(&mut connection).await {
+                                                        Ok((_, sample_keys)) => {
+                                                            if !sample_keys.is_empty() {
+                                                                table_data.push(vec!["Sample Keys Found".to_string(), "".to_string()]);
+                                                                for (i, key) in sample_keys.iter().take(5).enumerate() {
+                                                                    table_data.push(vec![format!("Sample {}", i+1), key.clone()]);
+                                                                }
+                                                            }
+                                                        },
+                                                        Err(_) => {
+                                                            table_data.push(vec!["Note".to_string(), "Could not retrieve sample keys".to_string()]);
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                // Add cursor info as first row
+                                                table_data.push(vec!["CURSOR".to_string(), next_cursor]);
+                                                
+                                                // Add keys as subsequent rows
+                                                for key in keys {
+                                                    table_data.push(vec!["KEY".to_string(), key]);
+                                                }
+                                            }
+                                            
+                                            Some((
+                                                vec!["Type".to_string(), "Value".to_string()],
+                                                table_data
+                                            ))
+                                        },
+                                        Err(e) => {
+                                            Some((
+                                                vec!["Error".to_string()],
+                                                vec![vec![format!("Redis SCAN error: {}", e)]]
+                                            ))
+                                        }
+                                    }
+                                },
+                                "INFO" => {
+                                    // INFO command can have optional section parameter
+                                    let section = if parts.len() > 1 { parts[1] } else { "default" };
+                                    
+                                    // Use Redis cmd for INFO command
+                                    match redis::cmd("INFO").arg(section).query_async::<_, String>(&mut connection).await {
+                                        Ok(info_result) => {
+                                            // Parse INFO result into key-value pairs
+                                            let mut table_data = Vec::new();
+                                            
+                                            for line in info_result.lines() {
+                                                if line.trim().is_empty() || line.starts_with('#') {
+                                                    continue;
+                                                }
+                                                
+                                                if let Some((key, value)) = line.split_once(':') {
+                                                    table_data.push(vec![key.to_string(), value.to_string()]);
+                                                }
+                                            }
+                                            
+                                            Some((
+                                                vec!["Property".to_string(), "Value".to_string()],
+                                                table_data
+                                            ))
+                                        },
+                                        Err(e) => {
+                                            Some((
+                                                vec!["Error".to_string()],
+                                                vec![vec![format!("Redis INFO error: {}", e)]]
+                                            ))
+                                        }
+                                    }
+                                },
+                                "HGETALL" => {
+                                    // HGETALL key - get all fields and values from a hash
+                                    if parts.len() != 2 {
+                                        return Some((
+                                            vec!["Error".to_string()],
+                                            vec![vec!["HGETALL requires exactly one key".to_string()]]
+                                        ));
+                                    }
+                                    
+                                    match redis::cmd("HGETALL").arg(parts[1]).query_async::<_, Vec<String>>(&mut connection).await {
+                                        Ok(hash_data) => {
+                                            let mut table_data = Vec::new();
+                                            
+                                            // HGETALL returns a flat list: [field1, value1, field2, value2, ...]
+                                            for chunk in hash_data.chunks(2) {
+                                                if chunk.len() == 2 {
+                                                    table_data.push(vec![chunk[0].clone(), chunk[1].clone()]);
+                                                }
+                                            }
+                                            
+                                            if table_data.is_empty() {
+                                                table_data.push(vec!["No data".to_string(), "Hash is empty or key does not exist".to_string()]);
+                                            }
+                                            
+                                            Some((
+                                                vec!["Field".to_string(), "Value".to_string()],
+                                                table_data
+                                            ))
+                                        },
+                                        Err(e) => {
+                                            Some((
+                                                vec!["Error".to_string()],
+                                                vec![vec![format!("Redis HGETALL error: {}", e)]]
+                                            ))
+                                        }
+                                    }
+                                },
+                                _ => {
+                                    Some((
+                                        vec!["Error".to_string()],
+                                        vec![vec![format!("Unsupported Redis command: {}", parts[0])]]
                                     ))
                                 }
                             }
