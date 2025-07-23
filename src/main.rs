@@ -256,6 +256,11 @@ struct MyApp {
     current_table_headers: Vec<String>,
     current_table_name: String,
     current_connection_id: Option<i64>,
+    // Pagination
+    current_page: usize,
+    page_size: usize,
+    total_rows: usize,
+    all_table_data: Vec<Vec<String>>, // Store all data for pagination
     // Splitter position for resizable table view (0.0 to 1.0)
     table_split_ratio: f32,
     // Table sorting state
@@ -380,6 +385,10 @@ impl MyApp {
             current_table_headers: Vec::new(),
             current_table_name: String::new(),
             current_connection_id: None,
+            current_page: 0,
+            page_size: 100, // Default 100 rows per page
+            total_rows: 0,
+            all_table_data: Vec::new(),
             table_split_ratio: 0.6, // Default 60% for editor, 40% for table
             sort_column: None,
             sort_ascending: true,
@@ -4077,6 +4086,64 @@ impl MyApp {
         false
     }
 
+    // Pagination methods
+    fn update_pagination_data(&mut self, all_data: Vec<Vec<String>>) {
+        self.all_table_data = all_data;
+        self.total_rows = self.all_table_data.len();
+        self.current_page = 0; // Reset to first page
+        self.update_current_page_data();
+    }
+
+    fn update_current_page_data(&mut self) {
+        let start_index = self.current_page * self.page_size;
+        let end_index = ((self.current_page + 1) * self.page_size).min(self.all_table_data.len());
+        
+        if start_index < self.all_table_data.len() {
+            self.current_table_data = self.all_table_data[start_index..end_index].to_vec();
+        } else {
+            self.current_table_data.clear();
+        }
+    }
+
+    fn next_page(&mut self) {
+        let max_page = (self.total_rows.saturating_sub(1)) / self.page_size;
+        if self.current_page < max_page {
+            self.current_page += 1;
+            self.update_current_page_data();
+        }
+    }
+
+    fn previous_page(&mut self) {
+        if self.current_page > 0 {
+            self.current_page -= 1;
+            self.update_current_page_data();
+        }
+    }
+
+    fn go_to_page(&mut self, page: usize) {
+        let max_page = (self.total_rows.saturating_sub(1)) / self.page_size;
+        if page <= max_page {
+            self.current_page = page;
+            self.update_current_page_data();
+        }
+    }
+
+    fn set_page_size(&mut self, new_size: usize) {
+        if new_size > 0 {
+            self.page_size = new_size;
+            self.current_page = 0; // Reset to first page
+            self.update_current_page_data();
+        }
+    }
+
+    fn get_total_pages(&self) -> usize {
+        if self.total_rows == 0 {
+            0
+        } else {
+            (self.total_rows + self.page_size - 1) / self.page_size
+        }
+    }
+
 
 
     fn render_tree_for_database_section(&mut self, ui: &mut egui::Ui) {
@@ -4101,7 +4168,7 @@ impl MyApp {
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
             println!("Found connection for table: {}", table_name);
             
-            let select_query = format!("SELECT * FROM {} LIMIT 100", table_name);
+            let select_query = format!("SELECT * FROM {} LIMIT 10000", table_name);
             
             // Set the query in the editor  
             self.editor_text = select_query.clone();
@@ -4110,13 +4177,17 @@ impl MyApp {
             // Execute the query with proper database connection
             if let Some((headers, data)) = self.execute_table_query_sync(connection_id, &connection, &select_query) {
                 self.current_table_headers = headers;
-                self.current_table_data = data;
-                if self.current_table_data.is_empty() {
+                
+                // Use pagination for table data
+                self.update_pagination_data(data);
+                
+                if self.total_rows == 0 {
                     self.current_table_name = format!("Table: {} (no results)", table_name);
                 } else {
-                    self.current_table_name = format!("Table: {} ({} rows)", table_name, self.current_table_data.len());
+                    self.current_table_name = format!("Table: {} ({} total rows, showing page {} of {})", 
+                        table_name, self.total_rows, self.current_page + 1, self.get_total_pages());
                 }
-                println!("Successfully loaded {} rows from table {}", self.current_table_data.len(), table_name);
+                println!("Successfully loaded {} total rows from table {}", self.total_rows, table_name);
             } else {
                 self.current_table_name = format!("Failed to load table: {}", table_name);
                 self.current_table_headers.clear();
@@ -4146,11 +4217,15 @@ impl MyApp {
             let result = self.execute_query_with_connection(connection_id, query.clone());
             if let Some((headers, data)) = result {
                 self.current_table_headers = headers;
-                self.current_table_data = data;
-                if self.current_table_data.is_empty() {
+                
+                // Use pagination for query results
+                self.update_pagination_data(data);
+                
+                if self.total_rows == 0 {
                     self.current_table_name = "Query executed successfully (no results)".to_string();
                 } else {
-                    self.current_table_name = format!("Query Results ({} rows)", self.current_table_data.len());
+                    self.current_table_name = format!("Query Results ({} total rows, showing page {} of {})", 
+                        self.total_rows, self.current_page + 1, self.get_total_pages());
                 }
                 // Save query to history after successful execution
                 self.save_query_to_history(&query, connection_id);
@@ -4158,6 +4233,8 @@ impl MyApp {
                 self.current_table_name = "Query execution failed".to_string();
                 self.current_table_headers.clear();
                 self.current_table_data.clear();
+                self.all_table_data.clear();
+                self.total_rows = 0;
             }
         } else {
             // No active connection - check if we have any connections available
@@ -4165,6 +4242,8 @@ impl MyApp {
                 self.current_table_name = "No connections available. Please add a connection first.".to_string();
                 self.current_table_headers.clear();
                 self.current_table_data.clear();
+                self.all_table_data.clear();
+                self.total_rows = 0;
             } else {
                 // Show connection selector popup
                 self.pending_query = query.clone();
@@ -4827,7 +4906,62 @@ impl MyApp {
     }
 
     fn render_table_data(&mut self, ui: &mut egui::Ui) {
-        if !self.current_table_headers.is_empty() || !self.current_table_name.is_empty() {            
+        if !self.current_table_headers.is_empty() || !self.current_table_name.is_empty() {
+            // Render pagination controls at the top
+            if self.total_rows > 0 {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Total rows: {}", self.total_rows));
+                    ui.separator();
+                    
+                    // Page size selector
+                    ui.label("Rows per page:");
+                    let mut page_size_str = self.page_size.to_string();
+                    if ui.text_edit_singleline(&mut page_size_str).changed() {
+                        if let Ok(new_size) = page_size_str.parse::<usize>() {
+                            if new_size > 0 && new_size <= 10000 {
+                                self.set_page_size(new_size);
+                            }
+                        }
+                    }
+                    
+                    ui.separator();
+                    
+                    // Navigation buttons
+                    if ui.button("⏮ First").clicked() {
+                        self.go_to_page(0);
+                    }
+                    
+                    ui.add_enabled(self.current_page > 0, egui::Button::new("◀ Prev"))
+                        .clicked()
+                        .then(|| self.previous_page());
+                    
+                    ui.label(format!("Page {} of {}", self.current_page + 1, self.get_total_pages()));
+                    
+                    ui.add_enabled(self.current_page < self.get_total_pages().saturating_sub(1), egui::Button::new("Next ▶"))
+                        .clicked()
+                        .then(|| self.next_page());
+                    
+                    if ui.button("Last ⏭").clicked() {
+                        let last_page = self.get_total_pages().saturating_sub(1);
+                        self.go_to_page(last_page);
+                    }
+                    
+                    ui.separator();
+                    
+                    // Quick page jump
+                    ui.label("Go to page:");
+                    let mut page_input = (self.current_page + 1).to_string();
+                    if ui.text_edit_singleline(&mut page_input).changed() {
+                        if let Ok(page_num) = page_input.parse::<usize>() {
+                            if page_num > 0 {
+                                self.go_to_page(page_num - 1);
+                            }
+                        }
+                    }
+                });
+                ui.separator();
+            }
+            
             if !self.current_table_headers.is_empty() && !self.current_table_data.is_empty() {
                 // Store sort state locally to avoid borrowing issues
                 let current_sort_column = self.sort_column;
@@ -4838,7 +4972,7 @@ impl MyApp {
                 // Use available height instead of fixed height for responsive design
                 let available_height = ui.available_height();
                 egui::ScrollArea::both()
-                    .max_height(available_height - 20.0) // Leave small margin for padding
+                    .max_height(available_height - 60.0) // Leave more space for pagination controls
                     .show(ui, |ui| {
                         egui::Grid::new("table_data_grid")
                             .striped(true)
@@ -4961,7 +5095,7 @@ impl MyApp {
     }
     
     fn sort_table_data(&mut self, column_index: usize, ascending: bool) {
-        if column_index >= self.current_table_headers.len() || self.current_table_data.is_empty() {
+        if column_index >= self.current_table_headers.len() || self.all_table_data.is_empty() {
             return;
         }
         
@@ -4969,8 +5103,8 @@ impl MyApp {
         self.sort_column = Some(column_index);
         self.sort_ascending = ascending;
         
-        // Sort the data with improved handling
-        self.current_table_data.sort_by(|a, b| {
+        // Sort ALL the data (not just current page)
+        self.all_table_data.sort_by(|a, b| {
             if column_index >= a.len() || column_index >= b.len() {
                 return std::cmp::Ordering::Equal;
             }
@@ -5004,11 +5138,14 @@ impl MyApp {
             }
         });
         
+        // Update current page data after sorting
+        self.update_current_page_data();
+        
         let sort_direction = if ascending { "^ ascending" } else { "v descending" };
-        println!("✓ Sorted table by column '{}' in {} order ({} rows)", 
+        println!("✓ Sorted table by column '{}' in {} order ({} total rows)", 
             self.current_table_headers[column_index], 
             sort_direction,
-            self.current_table_data.len()
+            self.all_table_data.len()
         );
     }
 
@@ -5984,7 +6121,16 @@ impl App for MyApp {
                         ui.separator();
                     }
                 }
-                ui.label(format!("Showing {} rows", self.current_table_data.len()));
+                // Show pagination info
+                if self.total_rows > 0 {
+                    ui.label(format!("Showing {} of {} rows (page {}/{})", 
+                        self.current_table_data.len(), 
+                        self.total_rows,
+                        self.current_page + 1,
+                        self.get_total_pages()));
+                } else {
+                    ui.label(format!("Showing {} rows", self.current_table_data.len()));
+                }
                 ui.separator();
                 
                 // Show execution hint
