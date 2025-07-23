@@ -1471,8 +1471,14 @@ impl MyApp {
             self.load_table_columns_for_node(connection_id, &table_name, nodes, table_index);
         }
         
-        // Handle table click requests
+        // Handle table click requests - create new tab for each table
         for (connection_id, table_name) in table_click_requests {
+            // Create a new tab with SELECT query for the table
+            let query_content = format!("SELECT * FROM {} LIMIT 100;", table_name);
+            let tab_title = format!("Table: {}", table_name);
+            self.create_new_tab(tab_title, query_content);
+            
+            // Also load the table data
             self.load_table_data(connection_id, &table_name);
         }
         
@@ -1711,11 +1717,10 @@ impl MyApp {
                     }
                 }
                 
-                // Handle clicks on table labels to load table data
+                // Handle clicks on table labels to load table data - open in new tab
                 if node.node_type == NodeType::Table && response.clicked() {
-                    // Generate a SELECT query for the table
-                    *editor_text = format!("SELECT * FROM {} LIMIT 10;", node.name);
-                    // Also trigger table data loading
+                    // Don't modify current editor_text, we'll create a new tab instead
+                    // Still trigger table data loading
                     if let Some(conn_id) = node.connection_id {
                         table_click_request = Some((conn_id, node.name.clone()));
                     }
@@ -1760,15 +1765,16 @@ impl MyApp {
                             }
                             ui.close_menu();
                         }
-                        if ui.button("📋 SELECT Query").clicked() {
-                            *editor_text = format!("SELECT * FROM {} LIMIT 100;", node.name);
+                        if ui.button("📋 SELECT Query (New Tab)").clicked() {
+                            // We'll create a new tab instead of modifying current editor
+                            // Store the request and handle it in render_tree
                             ui.close_menu();
                         }
-                        if ui.button("🔍 COUNT Query").clicked() {
+                        if ui.button("🔍 COUNT Query (Current Tab)").clicked() {
                             *editor_text = format!("SELECT COUNT(*) FROM {};", node.name);
                             ui.close_menu();
                         }
-                        if ui.button("📝 DESCRIBE Query").clicked() {
+                        if ui.button("📝 DESCRIBE Query (Current Tab)").clicked() {
                             // Different DESCRIBE syntax for different database types
                             if node.database_name.is_some() {
                                 *editor_text = format!("DESCRIBE {};", node.name);
@@ -1797,15 +1803,16 @@ impl MyApp {
                             }
                             ui.close_menu();
                         }
-                        if ui.button("📋 SELECT Query").clicked() {
-                            *editor_text = format!("SELECT * FROM {} LIMIT 100;", node.name);
+                        if ui.button("📋 SELECT Query (New Tab)").clicked() {
+                            // We'll create a new tab instead of modifying current editor  
+                            // Store the request and handle it in render_tree
                             ui.close_menu();
                         }
-                        if ui.button("🔍 COUNT Query").clicked() {
+                        if ui.button("🔍 COUNT Query (Current Tab)").clicked() {
                             *editor_text = format!("SELECT COUNT(*) FROM {};", node.name);
                             ui.close_menu();
                         }
-                        if ui.button("📝 DESCRIBE View").clicked() {
+                        if ui.button("📝 DESCRIBE View (Current Tab)").clicked() {
                             // Different DESCRIBE syntax for different database types
                             if node.database_name.is_some() {
                                 *editor_text = format!("DESCRIBE {};", node.name);
@@ -1900,9 +1907,8 @@ impl MyApp {
                     // Handle node selection
                     match node.node_type {
                         NodeType::Table => {
-                            // Generate a SELECT query for the table
-                            *editor_text = format!("SELECT * FROM {} LIMIT 10;", node.name);
-                            // Also trigger table data loading
+                            // Don't modify current editor_text, we'll create a new tab
+                            // Just trigger table data loading 
                             if let Some(conn_id) = node.connection_id {
                                 table_click_request = Some((conn_id, node.name.clone()));
                             }
