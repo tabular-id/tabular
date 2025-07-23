@@ -7,6 +7,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::hash::{Hash, Hasher};
 
+
+mod helpers;
+
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     
@@ -1241,14 +1244,12 @@ impl MyApp {
                     ui.text_edit_singleline(&mut self.save_filename);
                     
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            if !self.save_filename.is_empty() {
-                                if let Err(err) = self.save_current_tab_with_name(self.save_filename.clone()) {
-                                    println!("Failed to save: {}", err);
-                                }
-                                self.show_save_dialog = false;
-                                self.save_filename.clear();
+                        if ui.button("Save").clicked() && !self.save_filename.is_empty() {
+                            if let Err(err) = self.save_current_tab_with_name(self.save_filename.clone()) {
+                                println!("Failed to save: {}", err);
                             }
+                            self.show_save_dialog = false;
+                            self.save_filename.clear();
                         }
                         
                         if ui.button("Cancel").clicked() {
@@ -2354,6 +2355,12 @@ impl MyApp {
     }
 
     fn test_database_connection(&self, connection: &ConnectionConfig) -> (bool, String) {
+
+        // ping the host first
+        if !helpers::ping_host(&connection.host) {
+            return (false, format!("Failed to ping host: {}", connection.host));
+        }
+
         let rt = tokio::runtime::Runtime::new().unwrap();
         
         let result = rt.block_on(async {
@@ -2924,6 +2931,8 @@ impl MyApp {
 
     // Helper function untuk mendapatkan atau membuat connection pool
     async fn get_or_create_connection_pool(&mut self, connection_id: i64) -> Option<DatabasePool> {
+
+
         // ALWAYS recreate pool to ensure we use the new Arc<Pool> architecture
         // Remove any existing cached pool first
         self.connection_pools.remove(&connection_id);
@@ -2939,6 +2948,11 @@ impl MyApp {
                         "mysql://{}:{}@{}:{}/{}",
                         encoded_username, encoded_password, connection.host, connection.port, connection.database
                     );
+
+                    // ping the host first
+                    if !helpers::ping_host(&connection.host) {
+                        return None;
+                    }
                     
                     println!("Creating new MySQL connection pool for: {}", connection.name);
                     
