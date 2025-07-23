@@ -5035,10 +5035,8 @@ impl MyApp {
                 let headers = self.current_table_headers.clone();
                 let mut sort_requests = Vec::new();
                 
-                // Use available height instead of fixed height for responsive design
-                let available_height = ui.available_height();
+                // Use available height for full responsive design
                 egui::ScrollArea::both()
-                    .max_height(available_height - 60.0) // Leave more space for pagination controls
                     .show(ui, |ui| {
                         egui::Grid::new("table_data_grid")
                             .striped(true)
