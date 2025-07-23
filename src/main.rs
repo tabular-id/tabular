@@ -5037,19 +5037,18 @@ impl MyApp {
 
 
     fn render_tree_for_database_section(&mut self, ui: &mut egui::Ui) {
-        // Add search box
-        ui.horizontal(|ui| {
-            ui.label("🔍");
-            let search_response = ui.text_edit_singleline(&mut self.database_search_text);
+        // Add responsive search box
+        ui.horizontal(|ui| {            
+            // Make search box responsive to sidebar width
+            let available_width = ui.available_width() - 5.0; // Leave space for clear button and padding
+            let search_response = ui.add_sized(
+                [available_width, 20.0], 
+                egui::TextEdit::singleline(&mut self.database_search_text)
+                    .hint_text("Search databases, tables, keys...")
+            );
             
             if search_response.changed() {
                 self.update_search_results();
-            }
-            
-            if ui.small_button("✖").clicked() {
-                self.database_search_text.clear();
-                self.show_search_results = false;
-                self.filtered_items_tree.clear();
             }
         });
         
