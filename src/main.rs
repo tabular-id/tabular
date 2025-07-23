@@ -309,6 +309,10 @@ struct MyApp {
     theme_selector_selected_index: usize,
     // Flag to request theme selector on next frame
     request_theme_selector: bool,
+    // Database search functionality
+    database_search_text: String,
+    filtered_items_tree: Vec<TreeNode>,
+    show_search_results: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +428,10 @@ impl MyApp {
             command_palette_selected_index: 0,
             theme_selector_selected_index: 0,
             request_theme_selector: false,
+            // Database search functionality
+            database_search_text: String::new(),
+            filtered_items_tree: Vec::new(),
+            show_search_results: false,
         };
         
         // Clear any old cached pools
@@ -5029,18 +5037,304 @@ impl MyApp {
 
 
     fn render_tree_for_database_section(&mut self, ui: &mut egui::Ui) {
-        // Use slice to avoid borrowing issues
-        let mut items_tree = std::mem::take(&mut self.items_tree);
+        // Add search box
+        ui.horizontal(|ui| {
+            ui.label("🔍");
+            let search_response = ui.text_edit_singleline(&mut self.database_search_text);
+            
+            if search_response.changed() {
+                self.update_search_results();
+            }
+            
+            if ui.small_button("✖").clicked() {
+                self.database_search_text.clear();
+                self.show_search_results = false;
+                self.filtered_items_tree.clear();
+            }
+        });
         
-        let _ = self.render_tree(ui, &mut items_tree);
+        ui.separator();
         
-        // Check if tree was refreshed inside render_tree
-        if self.items_tree.is_empty() {
-            // Tree was not refreshed, restore the modified tree
-            self.items_tree = items_tree;
+        // Use search results if search is active, otherwise use normal tree
+        if self.show_search_results && !self.database_search_text.trim().is_empty() {
+            // Show search results
+            let mut filtered_tree = std::mem::take(&mut self.filtered_items_tree);
+            let _ = self.render_tree(ui, &mut filtered_tree);
+            self.filtered_items_tree = filtered_tree;
         } else {
-            // Tree was refreshed inside render_tree, keep the new tree
-            println!("Tree was refreshed inside render_tree, keeping the new tree");
+            // Show normal tree
+            // Use slice to avoid borrowing issues
+            let mut items_tree = std::mem::take(&mut self.items_tree);
+            
+            let _ = self.render_tree(ui, &mut items_tree);
+            
+            // Check if tree was refreshed inside render_tree
+            if self.items_tree.is_empty() {
+                // Tree was not refreshed, restore the modified tree
+                self.items_tree = items_tree;
+            } else {
+                // Tree was refreshed inside render_tree, keep the new tree
+                println!("Tree was refreshed inside render_tree, keeping the new tree");
+            }
+        }
+    }
+
+    fn update_search_results(&mut self) {
+        // Clone search text to avoid borrowing issues
+        let search_text = self.database_search_text.trim().to_string();
+        
+        if search_text.is_empty() {
+            self.show_search_results = false;
+            self.filtered_items_tree.clear();
+            return;
+        }
+        
+        self.show_search_results = true;
+        self.filtered_items_tree.clear();
+        
+        // Search through the main items_tree with LIKE functionality
+        for node in &self.items_tree {
+            if let Some(filtered_node) = self.filter_node_with_like_search(node, &search_text) {
+                self.filtered_items_tree.push(filtered_node);
+            }
+        }
+        
+        // If we have an active connection, also search in its database/table cache
+        if let Some(connection_id) = self.current_connection_id {
+            self.search_in_connection_data(connection_id, &search_text);
+        }
+        // Note: We don't search all connections to avoid borrowing issues
+        // Users can select a specific connection to search within it
+    }
+    
+    fn filter_node_with_like_search(&self, node: &TreeNode, search_text: &str) -> Option<TreeNode> {
+        let mut matches = false;
+        let mut filtered_children = Vec::new();
+        
+        // Check if current node matches using case-insensitive LIKE search
+        let node_name_lower = node.name.to_lowercase();
+        let search_lower = search_text.to_lowercase();
+        
+        // LIKE search: if search text is contained anywhere in the node name
+        if node_name_lower.contains(&search_lower) {
+            matches = true;
+        }
+        
+        // Check children recursively
+        for child in &node.children {
+            if let Some(filtered_child) = self.filter_node_with_like_search(child, search_text) {
+                filtered_children.push(filtered_child);
+                matches = true;
+            }
+        }
+        
+        if matches {
+            let mut filtered_node = node.clone();
+            filtered_node.children = filtered_children;
+            filtered_node.is_expanded = true; // Auto-expand search results
+            Some(filtered_node)
+        } else {
+            None
+        }
+    }
+    
+    fn search_in_connection_data(&mut self, connection_id: i64, search_text: &str) {
+        // Find the connection to determine its type
+        let connection_type = self.connections.iter()
+            .find(|c| c.id == Some(connection_id))
+            .map(|c| c.connection_type.clone());
+            
+        if let Some(conn_type) = connection_type {
+            match conn_type {
+                DatabaseType::Redis => {
+                    self.search_redis_keys(connection_id, search_text);
+                }
+                DatabaseType::MySQL | DatabaseType::PostgreSQL | DatabaseType::SQLite => {
+                    self.search_sql_tables(connection_id, search_text, &conn_type);
+                }
+            }
+        }
+    }
+    
+    fn search_redis_keys(&mut self, connection_id: i64, search_text: &str) {
+        // Search through Redis keys using SCAN with flexible pattern
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        let search_results = rt.block_on(async {
+            if let Some(pool) = self.get_or_create_connection_pool(connection_id).await {
+                if let DatabasePool::Redis(redis_manager) = pool {
+                    let mut conn = redis_manager.as_ref().clone();
+                    
+                    // Use flexible pattern for LIKE search - search text can appear anywhere
+                    let pattern = format!("*{}*", search_text.to_lowercase());
+                    let mut cursor = 0u64;
+                    let mut found_keys = Vec::new();
+                    
+                    // First try exact pattern match
+                    for _iteration in 0..20 { // Increase iterations for more comprehensive search
+                        let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                            .arg(cursor)
+                            .arg("MATCH")
+                            .arg(&pattern)
+                            .arg("COUNT")
+                            .arg(100) // Increase count for better performance
+                            .query_async(&mut conn)
+                            .await;
+                            
+                        if let Ok((new_cursor, keys)) = scan_result {
+                            // Additional filtering for case-insensitive LIKE search
+                            let search_lower = search_text.to_lowercase();
+                            for key in keys {
+                                let key_lower = key.to_lowercase();
+                                if key_lower.contains(&search_lower) {
+                                    found_keys.push(key);
+                                }
+                            }
+                            cursor = new_cursor;
+                            if cursor == 0 {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    // Also try case-insensitive pattern if not found enough results
+                    if found_keys.len() < 10 {
+                        let upper_pattern = format!("*{}*", search_text.to_uppercase());
+                        cursor = 0u64;
+                        
+                        for _iteration in 0..10 {
+                            let scan_result: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                                .arg(cursor)
+                                .arg("MATCH")
+                                .arg(&upper_pattern)
+                                .arg("COUNT")
+                                .arg(100)
+                                .query_async(&mut conn)
+                                .await;
+                                
+                            if let Ok((new_cursor, keys)) = scan_result {
+                                let search_lower = search_text.to_lowercase();
+                                for key in keys {
+                                    let key_lower = key.to_lowercase();
+                                    if key_lower.contains(&search_lower) && !found_keys.contains(&key) {
+                                        found_keys.push(key);
+                                    }
+                                }
+                                cursor = new_cursor;
+                                if cursor == 0 {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    found_keys
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            }
+        });
+        
+        // Add search results to filtered tree
+        if !search_results.is_empty() {
+            // Find or create the connection node in filtered results
+            let connection_name = self.connections.iter()
+                .find(|c| c.id == Some(connection_id))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Unknown Connection".to_string());
+                
+            let mut search_result_node = TreeNode::new(
+                format!("🔍 Search Results in {} ({} keys)", connection_name, search_results.len()), 
+                NodeType::CustomFolder
+            );
+            search_result_node.connection_id = Some(connection_id);
+            search_result_node.is_expanded = true;
+            
+            // Add found keys as children
+            for key in search_results {
+                let mut key_node = TreeNode::new(key.clone(), NodeType::Table);
+                key_node.connection_id = Some(connection_id);
+                search_result_node.children.push(key_node);
+            }
+            
+            self.filtered_items_tree.push(search_result_node);
+        }
+    }
+    
+    fn search_sql_tables(&mut self, connection_id: i64, search_text: &str, db_type: &DatabaseType) {
+        // Search through cached table data first
+        if let Some(ref pool) = self.db_pool {
+            let pool_clone = pool.clone();
+            let search_pattern = format!("%{}%", search_text);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            
+            let search_results = rt.block_on(async {
+                let query = match db_type {
+                    DatabaseType::SQLite => {
+                        "SELECT table_name, database_name, table_type FROM table_cache WHERE connection_id = ? AND table_name LIKE ? ORDER BY table_name"
+                    }
+                    _ => {
+                        "SELECT table_name, database_name, table_type FROM table_cache WHERE connection_id = ? AND table_name LIKE ? ORDER BY database_name, table_name"
+                    }
+                };
+                
+                sqlx::query_as::<_, (String, String, String)>(query)
+                    .bind(connection_id)
+                    .bind(&search_pattern)
+                    .fetch_all(pool_clone.as_ref())
+                    .await
+                    .unwrap_or_default()
+            });
+            
+            // Group results by database
+            let mut results_by_db: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (table_name, database_name, _table_type) in search_results {
+                results_by_db.entry(database_name).or_insert_with(Vec::new).push(table_name);
+            }
+            
+            // Add search results to filtered tree
+            if !results_by_db.is_empty() {
+                let connection_name = self.connections.iter()
+                    .find(|c| c.id == Some(connection_id))
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| "Unknown Connection".to_string());
+                
+                let total_tables: usize = results_by_db.values().map(|v| v.len()).sum();
+                let mut search_result_node = TreeNode::new(
+                    format!("🔍 Search Results in {} ({} tables)", connection_name, total_tables), 
+                    NodeType::CustomFolder
+                );
+                search_result_node.connection_id = Some(connection_id);
+                search_result_node.is_expanded = true;
+                
+                // Add databases and their tables
+                for (database_name, tables) in results_by_db {
+                    let mut db_node = TreeNode::new(
+                        format!("📁 {} ({} tables)", database_name, tables.len()),
+                        NodeType::Database
+                    );
+                    db_node.connection_id = Some(connection_id);
+                    db_node.database_name = Some(database_name.clone());
+                    db_node.is_expanded = true;
+                    
+                    for table_name in tables {
+                        let mut table_node = TreeNode::new(table_name.clone(), NodeType::Table);
+                        table_node.connection_id = Some(connection_id);
+                        table_node.database_name = Some(database_name.clone());
+                        db_node.children.push(table_node);
+                    }
+                    
+                    search_result_node.children.push(db_node);
+                }
+                
+                self.filtered_items_tree.push(search_result_node);
+            }
         }
     }
 
