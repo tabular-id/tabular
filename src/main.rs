@@ -285,6 +285,8 @@ struct MyApp {
     show_error_message: bool,
     // Advanced Editor Configuration
     advanced_editor: AdvancedEditor,
+    // Selected text for executing only selected queries
+    selected_text: String,
     // Command Palette
     show_command_palette: bool,
     command_palette_input: String,
@@ -397,6 +399,7 @@ impl MyApp {
             error_message: String::new(),
             show_error_message: false,
             advanced_editor: AdvancedEditor::default(),
+            selected_text: String::new(),
             show_command_palette: false,
             command_palette_input: String::new(),
             show_theme_selector: false,
@@ -4124,7 +4127,13 @@ impl MyApp {
     }
 
     fn execute_query(&mut self) {
-        let query = self.editor_text.trim().to_string();
+        // Use selected text if available, otherwise use full editor text
+        let query = if !self.selected_text.trim().is_empty() {
+            self.selected_text.trim().to_string()
+        } else {
+            self.editor_text.trim().to_string()
+        };
+        
         if query.is_empty() {
             self.current_table_name = "No query to execute".to_string();
             self.current_table_headers.clear();
@@ -5132,6 +5141,29 @@ impl MyApp {
             .with_numlines(self.advanced_editor.show_line_numbers);
 
         let response = editor.show(ui, &mut self.editor_text);
+        
+        // Try to capture selected text from the response
+        // Note: This is a simplified approach. The actual implementation may vary depending on the CodeEditor version
+        if let Some(text_cursor_range) = response.cursor_range {
+            let start = text_cursor_range.primary.ccursor.index.min(text_cursor_range.secondary.ccursor.index);
+            let end = text_cursor_range.primary.ccursor.index.max(text_cursor_range.secondary.ccursor.index);
+            
+            if start != end {
+                // There is a selection
+                if let Some(selected) = self.editor_text.get(start..end) {
+                    self.selected_text = selected.to_string();
+                } else {
+                    self.selected_text.clear();
+                }
+            } else {
+                // No selection
+                self.selected_text.clear();
+            }
+        } else {
+            // No cursor range available, clear selection
+            self.selected_text.clear();
+        }
+        
         // If you get a type error here, try:
         // let mut buffer = egui_code_editor::SimpleTextBuffer::from(&self.editor_text);
         // let response = editor.show(ui, &mut buffer);
@@ -5883,13 +5915,17 @@ impl App for MyApp {
                                     // Check for Ctrl+Enter or Cmd+Enter to execute query
                                     if ui.input(|i| {
                                         (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::Enter)
-                                    }) && !self.editor_text.trim().is_empty() {
+                                    }) && (!self.selected_text.trim().is_empty() || !self.editor_text.trim().is_empty()) {
                                         if self.current_connection_id.is_some() {
                                             // Connection is already selected, execute query
                                             self.execute_query();
                                         } else if !self.connections.is_empty() {
                                             // No connection selected but connections exist, show selector
-                                            self.pending_query = self.editor_text.clone();
+                                            self.pending_query = if !self.selected_text.trim().is_empty() {
+                                                self.selected_text.clone()
+                                            } else {
+                                                self.editor_text.clone()
+                                            };
                                             self.auto_execute_after_connection = true;
                                             self.show_connection_selector = true;
                                         } else {
@@ -5930,6 +5966,14 @@ impl App for MyApp {
                 ui.separator();
                 ui.label(format!("Lines: {}", self.editor_text.lines().count()));
                 ui.separator();
+                
+                // Show selection status
+                if !self.selected_text.trim().is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(0, 150, 255), 
+                        format!("Selected: {} chars", self.selected_text.len()));
+                    ui.separator();
+                }
+                
                 ui.label(format!("Tabs: {}", self.query_tabs.len()));
                 ui.separator();
                 ui.label(format!("Connections: {}", self.connections.len()));
@@ -5941,6 +5985,14 @@ impl App for MyApp {
                     }
                 }
                 ui.label(format!("Showing {} rows", self.current_table_data.len()));
+                ui.separator();
+                
+                // Show execution hint
+                if !self.selected_text.trim().is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "CMD+Enter: Execute selection");
+                } else {
+                    ui.label("CMD+Enter: Execute all");
+                }
             });
         });
     }
