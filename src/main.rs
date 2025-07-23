@@ -1498,7 +1498,11 @@ impl MyApp {
         }
         
         for context_id in context_menu_requests {
-            if context_id >= 20000 {
+            if context_id >= 30000 {
+                // ID >= 30000 means alter table operation
+                let connection_id = context_id - 30000;
+                self.handle_alter_table_request(connection_id);
+            } else if context_id >= 20000 {
                 // ID >= 20000 means query edit operation
                 let hash = context_id - 20000;
                 self.handle_query_edit_request(hash);
@@ -1770,6 +1774,14 @@ impl MyApp {
                                 *editor_text = format!("DESCRIBE {};", node.name);
                             } else {
                                 *editor_text = format!("PRAGMA table_info({});", node.name); // SQLite syntax
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("🔧 Alter Table").clicked() {
+                            if let Some(conn_id) = node.connection_id {
+                                // Use connection_id + 30000 to indicate alter table request
+                                context_menu_request = Some(conn_id + 30000);
                             }
                             ui.close_menu();
                         }
@@ -2376,6 +2388,71 @@ impl MyApp {
         for &index in indices_to_close.iter().rev() {
             self.close_tab(index);
         }
+    }
+
+    fn handle_alter_table_request(&mut self, connection_id: i64) {
+        println!("🔧 Processing alter table request for connection ID: {}", connection_id);
+        
+        // Find the connection by ID to determine database type
+        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
+            // Find the currently selected table in the tree
+            if let Some(table_name) = self.find_selected_table_name(connection_id) {
+                // Generate ALTER TABLE template based on database type
+                let alter_template = match connection.connection_type {
+                    DatabaseType::MySQL => self.generate_mysql_alter_table_template(&table_name),
+                    DatabaseType::PostgreSQL => self.generate_postgresql_alter_table_template(&table_name),
+                    DatabaseType::SQLite => self.generate_sqlite_alter_table_template(&table_name),
+                };
+                
+                // Set the ALTER TABLE template in the editor
+                self.editor_text = alter_template;
+                self.current_connection_id = Some(connection_id);
+                
+                println!("✅ Generated ALTER TABLE template for table: {}", table_name);
+            } else {
+                // If no specific table is selected, show a generic template
+                let alter_template = match connection.connection_type {
+                    DatabaseType::MySQL => "-- MySQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  MODIFY COLUMN existing_column INT,\n  DROP COLUMN old_column;".to_string(),
+                    DatabaseType::PostgreSQL => "-- PostgreSQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  ALTER COLUMN existing_column TYPE INTEGER,\n  DROP COLUMN old_column;".to_string(),
+                    DatabaseType::SQLite => "-- SQLite ALTER TABLE template\n-- Note: SQLite has limited ALTER TABLE support\nALTER TABLE your_table_name\n  ADD COLUMN new_column TEXT;".to_string(),
+                };
+                
+                self.editor_text = alter_template;
+                self.current_connection_id = Some(connection_id);
+                
+                println!("✅ Generated generic ALTER TABLE template");
+            }
+        } else {
+            println!("❌ Connection with ID {} not found", connection_id);
+        }
+    }
+
+    fn find_selected_table_name(&self, _connection_id: i64) -> Option<String> {
+        // This is a simplified approach - in a more sophisticated implementation,
+        // you might track which table was right-clicked
+        // For now, we'll return None to show the generic template
+        None
+    }
+
+    fn generate_mysql_alter_table_template(&self, table_name: &str) -> String {
+        format!(
+            "-- MySQL ALTER TABLE for {}\nALTER TABLE {}\n  ADD COLUMN new_column VARCHAR(255) DEFAULT NULL COMMENT 'New column description',\n  MODIFY COLUMN existing_column INT NOT NULL,\n  DROP COLUMN old_column,\n  ADD INDEX idx_new_column (new_column);",
+            table_name, table_name
+        )
+    }
+
+    fn generate_postgresql_alter_table_template(&self, table_name: &str) -> String {
+        format!(
+            "-- PostgreSQL ALTER TABLE for {}\nALTER TABLE {}\n  ADD COLUMN new_column VARCHAR(255) DEFAULT NULL,\n  ALTER COLUMN existing_column TYPE INTEGER,\n  DROP COLUMN old_column;\n\n-- Add constraint example\n-- ALTER TABLE {} ADD CONSTRAINT chk_constraint CHECK (new_column IS NOT NULL);",
+            table_name, table_name, table_name
+        )
+    }
+
+    fn generate_sqlite_alter_table_template(&self, table_name: &str) -> String {
+        format!(
+            "-- SQLite ALTER TABLE for {}\n-- Note: SQLite has limited ALTER TABLE support\n-- Only ADD COLUMN and RENAME operations are supported\n\nALTER TABLE {} ADD COLUMN new_column TEXT DEFAULT NULL;\n\n-- To modify or drop columns, you need to recreate the table:\n-- CREATE TABLE {}_new AS SELECT existing_columns FROM {};\n-- DROP TABLE {};\n-- ALTER TABLE {}_new RENAME TO {};",
+            table_name, table_name, table_name, table_name, table_name, table_name, table_name
+        )
     }
 
     fn test_database_connection(&self, connection: &ConnectionConfig) -> (bool, String) {
@@ -5037,6 +5114,7 @@ impl MyApp {
                 
                 // Use available height for full responsive design
                 egui::ScrollArea::both()
+                    .auto_shrink([false, false]) // Don't auto-shrink to content
                     .show(ui, |ui| {
                         egui::Grid::new("table_data_grid")
                             .striped(true)
