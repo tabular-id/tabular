@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 mod helpers;
 mod sqlite;
+mod export;
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
@@ -6840,7 +6841,7 @@ impl MyApp {
                 egui::ScrollArea::both()
                     .auto_shrink([false, false]) // Don't auto-shrink to content
                     .show(ui, |ui| {
-                        egui::Grid::new("table_data_grid")
+                        let grid_response = egui::Grid::new("table_data_grid")
                             .striped(true)
                             .show(ui, |ui| {
                                 // Render No column header first (centered)
@@ -6893,7 +6894,7 @@ impl MyApp {
                                                     ("v", true) // Letter v for descending  
                                                 }
                                             } else {
-                                                ("=", false) // Equals sign for unsorted
+                                                ("-", false) // Equals sign for unsorted
                                             };
                                             
                                             let sort_button = ui.add(
@@ -6965,6 +6966,21 @@ impl MyApp {
                                     ui.end_row();
                                 }
                             });
+                        
+                        // Add context menu detection for export
+                        grid_response.response.context_menu(|ui| {
+                            ui.set_min_width(150.0);
+                            ui.vertical(|ui| {
+                                if ui.button("📄 Export to CSV").clicked() {
+                                    export::export_to_csv(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
+                                    ui.close_menu();
+                                }
+                                if ui.button("📊 Export to XLSX").clicked() {
+                                    export::export_to_xlsx(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
+                                    ui.close_menu();
+                                }
+                            });
+                        });
                     });
                 
                 // Process sort requests after the UI is rendered
@@ -7612,7 +7628,7 @@ impl App for MyApp {
                 }
             }
             
-            // Escape to close command palette or theme selector
+            // Escape to close command palette or theme selector  
             if i.key_pressed(egui::Key::Escape) {
                 if self.show_theme_selector {
                     self.show_theme_selector = false;
