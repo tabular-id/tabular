@@ -1,3 +1,0 @@
-SELECT *
-FROM data
-LIMIT 1;

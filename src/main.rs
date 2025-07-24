@@ -95,6 +95,7 @@ enum NodeType {
     SQLiteFolder,      // Folder untuk koneksi SQLite
     RedisFolder,       // Folder untuk koneksi Redis
     CustomFolder,      // Folder custom yang bisa dinamai user
+    QueryFolder,       // Folder untuk mengelompokkan query files
 }
 
 #[derive(Clone, Debug)]
@@ -313,6 +314,15 @@ struct MyApp {
     database_search_text: String,
     filtered_items_tree: Vec<TreeNode>,
     show_search_results: bool,
+    // Query folder management
+    show_create_folder_dialog: bool,
+    new_folder_name: String,
+    selected_query_for_move: Option<String>,
+    show_move_to_folder_dialog: bool,
+    target_folder_name: String,
+    parent_folder_for_creation: Option<String>,
+    selected_folder_for_removal: Option<String>,
+    folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
 }
 
 #[derive(Debug, Clone)]
@@ -432,6 +442,15 @@ impl MyApp {
             database_search_text: String::new(),
             filtered_items_tree: Vec::new(),
             show_search_results: false,
+            // Query folder management
+            show_create_folder_dialog: false,
+            new_folder_name: String::new(),
+            selected_query_for_move: None,
+            show_move_to_folder_dialog: false,
+            target_folder_name: String::new(),
+            parent_folder_for_creation: None,
+            selected_folder_for_removal: None,
+            folder_removal_map: std::collections::HashMap::new(),
         };
         
         // Clear any old cached pools
@@ -1275,15 +1294,45 @@ impl MyApp {
         self.queries_tree.clear();
         
         let query_dir = Self::get_query_dir();
-        if let Ok(entries) = std::fs::read_dir(&query_dir) {
+        self.queries_tree = Self::load_directory_recursive(&query_dir);
+        
+        // Sort folders and files alphabetically
+        self.queries_tree.sort_by(|a, b| {
+            match (&a.node_type, &b.node_type) {
+                (NodeType::QueryFolder, NodeType::Query) => std::cmp::Ordering::Less, // Folders first
+                (NodeType::Query, NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
+                _ => a.name.cmp(&b.name), // Alphabetical within same type
+            }
+        });
+    }
+
+    fn load_directory_recursive(dir_path: &std::path::Path) -> Vec<TreeNode> {
+        let mut items = Vec::new();
+        
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
+                    if metadata.is_dir() {
+                        // This is a folder
+                        if let Some(folder_name) = entry.file_name().to_str() {
+                            let folder_path = entry.path();
+                            
+                            // Recursively load the folder contents
+                            let folder_contents = Self::load_directory_recursive(&folder_path);
+                            
+                            let mut folder_node = TreeNode::new(folder_name.to_string(), NodeType::QueryFolder);
+                            folder_node.children = folder_contents;
+                            folder_node.is_expanded = true;
+                            folder_node.file_path = Some(folder_path.to_string_lossy().to_string());
+                            items.push(folder_node);
+                        }
+                    } else if metadata.is_file() {
+                        // This is a file
                         if let Some(file_name) = entry.file_name().to_str() {
                             if file_name.ends_with(".sql") {
                                 let mut node = TreeNode::new(file_name.to_string(), NodeType::Query);
                                 node.file_path = Some(entry.path().to_string_lossy().to_string());
-                                self.queries_tree.push(node);
+                                items.push(node);
                             }
                         }
                     }
@@ -1291,8 +1340,111 @@ impl MyApp {
             }
         }
         
-        // Sort files alphabetically
-        self.queries_tree.sort_by(|a, b| a.name.cmp(&b.name));
+        // Sort the items: folders first, then files, all alphabetically
+        items.sort_by(|a, b| {
+            match (&a.node_type, &b.node_type) {
+                (NodeType::QueryFolder, NodeType::Query) => std::cmp::Ordering::Less, // Folders first
+                (NodeType::Query, NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
+                _ => a.name.cmp(&b.name), // Alphabetical within same type
+            }
+        });
+        
+        items
+    }
+
+    fn create_query_folder(&mut self, folder_name: &str) -> Result<(), String> {
+        if folder_name.trim().is_empty() {
+            return Err("Folder name cannot be empty".to_string());
+        }
+        
+        let query_dir = Self::get_query_dir();
+        let folder_path = query_dir.join(folder_name);
+        
+        if folder_path.exists() {
+            return Err("Folder already exists".to_string());
+        }
+        
+        std::fs::create_dir_all(&folder_path)
+            .map_err(|e| format!("Failed to create folder: {}", e))?;
+            
+        // Refresh the queries tree
+        self.load_queries_from_directory();
+        
+        Ok(())
+    }
+
+    fn create_query_folder_in_parent(&mut self, folder_name: &str, parent_folder: &str) -> Result<(), String> {
+        if folder_name.trim().is_empty() {
+            return Err("Folder name cannot be empty".to_string());
+        }
+        
+        let query_dir = Self::get_query_dir();
+        let parent_path = query_dir.join(parent_folder);
+        
+        if !parent_path.exists() || !parent_path.is_dir() {
+            return Err(format!("Parent folder '{}' does not exist", parent_folder));
+        }
+        
+        let folder_path = parent_path.join(folder_name);
+        
+        if folder_path.exists() {
+            return Err(format!("Folder '{}' already exists in '{}'", folder_name, parent_folder));
+        }
+        
+        std::fs::create_dir_all(&folder_path)
+            .map_err(|e| format!("Failed to create folder: {}", e))?;
+            
+        // Refresh the queries tree
+        self.load_queries_from_directory();
+        
+        Ok(())
+    }
+
+    fn move_query_to_folder(&mut self, query_file_path: &str, target_folder: &str) -> Result<(), String> {
+        let source_path = std::path::Path::new(query_file_path);
+        let file_name = source_path.file_name()
+            .ok_or("Invalid file path")?;
+            
+        let query_dir = Self::get_query_dir();
+        let target_folder_path = query_dir.join(target_folder);
+        let target_file_path = target_folder_path.join(file_name);
+        
+        // Create target folder if it doesn't exist
+        std::fs::create_dir_all(&target_folder_path)
+            .map_err(|e| format!("Failed to create target folder: {}", e))?;
+            
+        // Move the file
+        std::fs::rename(source_path, &target_file_path)
+            .map_err(|e| format!("Failed to move file: {}", e))?;
+            
+        // Close any open tabs for this file and update with new path
+        self.close_tabs_for_file(query_file_path);
+        
+        // Refresh the queries tree
+        self.load_queries_from_directory();
+        
+        Ok(())
+    }
+
+    fn move_query_to_root(&mut self, query_file_path: &str) -> Result<(), String> {
+        let source_path = std::path::Path::new(query_file_path);
+        let file_name = source_path.file_name()
+            .ok_or("Invalid file path")?;
+            
+        let query_dir = Self::get_query_dir();
+        let target_file_path = query_dir.join(file_name);
+        
+        // Move the file to root
+        std::fs::rename(source_path, &target_file_path)
+            .map_err(|e| format!("Failed to move file: {}", e))?;
+            
+        // Close any open tabs for this file and update with new path
+        self.close_tabs_for_file(query_file_path);
+        
+        // Refresh the queries tree
+        self.load_queries_from_directory();
+        
+        Ok(())
     }
 
     fn render_save_dialog(&mut self, ctx: &egui::Context) {
@@ -1427,6 +1579,112 @@ impl MyApp {
         }
     }
 
+    fn render_create_folder_dialog(&mut self, ctx: &egui::Context) {
+        if self.show_create_folder_dialog {
+            let window_title = if let Some(ref parent) = self.parent_folder_for_creation {
+                format!("Create Folder in '{}'", parent)
+            } else {
+                "Create Query Folder".to_string()
+            };
+            
+            egui::Window::new(window_title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(ref parent) = self.parent_folder_for_creation {
+                        ui.label(format!("Creating folder inside: {}", parent));
+                        ui.separator();
+                    }
+                    
+                    ui.label("Folder name:");
+                    ui.text_edit_singleline(&mut self.new_folder_name);
+                    ui.separator();
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            let folder_name = self.new_folder_name.clone();
+                            let parent_folder = self.parent_folder_for_creation.clone();
+                            
+                            let result = if let Some(parent) = parent_folder {
+                                self.create_query_folder_in_parent(&folder_name, &parent)
+                            } else {
+                                self.create_query_folder(&folder_name)
+                            };
+                            
+                            if let Err(err) = result {
+                                self.error_message = err;
+                                self.show_error_message = true;
+                            } else {
+                                // Force immediate UI repaint after successful folder creation
+                                ui.ctx().request_repaint();
+                            }
+                            
+                            self.show_create_folder_dialog = false;
+                            self.new_folder_name.clear();
+                            self.parent_folder_for_creation = None;
+                        }
+                        
+                        if ui.button("Cancel").clicked() {
+                            self.show_create_folder_dialog = false;
+                            self.new_folder_name.clear();
+                            self.parent_folder_for_creation = None;
+                        }
+                    });
+                });
+        }
+    }
+
+    fn render_move_to_folder_dialog(&mut self, ctx: &egui::Context) {
+        if self.show_move_to_folder_dialog {
+            egui::Window::new("Move Query to Folder")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(query_path) = &self.selected_query_for_move {
+                        let file_name = std::path::Path::new(query_path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Unknown");
+                        ui.label(format!("Moving: {}", file_name));
+                        ui.separator();
+                    }
+                    
+                    ui.label("Target folder:");
+                    ui.text_edit_singleline(&mut self.target_folder_name);
+                    ui.small("(Leave empty to move to root, or enter folder name)");
+                    ui.separator();
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button("Move").clicked() {
+                            if let Some(query_path) = self.selected_query_for_move.clone() {
+                                if self.target_folder_name.trim().is_empty() {
+                                    // Move to root
+                                    if let Err(err) = self.move_query_to_root(&query_path) {
+                                        self.error_message = err;
+                                        self.show_error_message = true;
+                                    }
+                                } else if let Err(err) = self.move_query_to_folder(&query_path, &self.target_folder_name.clone()) {
+                                    self.error_message = err;
+                                    self.show_error_message = true;
+                                }
+                            }
+                            self.show_move_to_folder_dialog = false;
+                            self.selected_query_for_move = None;
+                            self.target_folder_name.clear();
+                        }
+                        
+                        if ui.button("Cancel").clicked() {
+                            self.show_move_to_folder_dialog = false;
+                            self.selected_query_for_move = None;
+                            self.target_folder_name.clear();
+                        }
+                    });
+                });
+        }
+    }
+
     fn open_query_file(&mut self, file_path: &str) -> Result<(), String> {
         let content = std::fs::read_to_string(file_path)
             .map_err(|e| format!("Failed to read file: {}", e))?;
@@ -1483,12 +1741,22 @@ impl MyApp {
         let mut query_files_to_open = Vec::new();
         
         for (index, node) in nodes.iter_mut().enumerate() {
-            let (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open) = Self::render_tree_node_with_table_expansion(ui, node, &mut self.editor_text, index, &self.refreshing_connections);
+            let (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open, folder_for_removal, parent_for_creation, folder_removal_mapping) = Self::render_tree_node_with_table_expansion(ui, node, &mut self.editor_text, index, &self.refreshing_connections);
             if let Some(expansion_req) = expansion_request {
                 expansion_requests.push(expansion_req);
             }
             if let Some((table_index, connection_id, table_name)) = table_expansion {
                 tables_to_expand.push((table_index, connection_id, table_name));
+            }
+            if let Some(folder_name) = folder_for_removal {
+                self.selected_folder_for_removal = Some(folder_name.clone());
+            }
+            if let Some((hash, folder_path)) = folder_removal_mapping {
+                self.folder_removal_map.insert(hash, folder_path);
+                println!("📁 Stored folder removal mapping: hash={} -> path={}", hash, self.folder_removal_map.get(&hash).unwrap_or(&"NONE".to_string()));
+            }
+            if let Some(parent_folder) = parent_for_creation {
+                self.parent_folder_for_creation = Some(parent_folder);
             }
             if let Some(context_id) = context_menu_request {
                 context_menu_requests.push(context_id);
@@ -1722,7 +1990,17 @@ impl MyApp {
         }
         
         for context_id in context_menu_requests {
-            if context_id >= 30000 {
+            if context_id >= 50000 {
+                // ID >= 50000 means create folder in folder operation
+                let hash = context_id - 50000;
+                self.handle_create_folder_in_folder_request(hash);
+                // Force immediate UI repaint after create folder request
+                ui.ctx().request_repaint();
+            } else if context_id >= 40000 {
+                // ID >= 40000 means move query to folder operation
+                let hash = context_id - 40000;
+                self.handle_query_move_request(hash);
+            } else if context_id >= 30000 {
                 // ID >= 30000 means alter table operation
                 let connection_id = context_id - 30000;
                 self.handle_alter_table_request(connection_id);
@@ -1730,6 +2008,12 @@ impl MyApp {
                 // ID >= 20000 means query edit operation
                 let hash = context_id - 20000;
                 self.handle_query_edit_request(hash);
+            } else if context_id <= -50000 {
+                // ID <= -50000 means remove folder operation
+                let hash = (-context_id) - 50000;
+                self.handle_remove_folder_request(hash);
+                // Force immediate UI repaint after folder removal
+                ui.ctx().request_repaint();
             } else if context_id <= -20000 {
                 // ID <= -20000 means query removal operation  
                 let hash = (-context_id) - 20000;
@@ -1802,6 +2086,9 @@ impl MyApp {
             return Vec::new();
         }
         
+        // Clean up processed folder removal mappings (optional - only if we want to prevent memory buildup)
+        // We could also keep them for potential retry scenarios
+        
         // Return query files that were clicked
         results
     }
@@ -1813,15 +2100,19 @@ impl MyApp {
         ) -> (
             Option<ExpansionRequest>, Option<(usize, i64, String)>, 
             Option<i64>, Option<(i64, String)>, Option<i64>, 
-            Option<(String, String, String)>
+            Option<(String, String, String)>, Option<String>, Option<String>, // Add parent folder for creation
+            Option<(i64, String)> // Add mapping for folder removal: (hash, folder_path)
         ) {
         let has_children = !node.children.is_empty();
         let mut expansion_request = None;
         let mut table_expansion = None;
         let mut context_menu_request = None;
         let mut table_click_request = None;
+        let mut folder_removal_mapping: Option<(i64, String)> = None;
         let mut connection_click_request = None;
         let mut query_file_to_open = None;
+        let mut folder_name_for_removal = None;
+        let mut parent_folder_for_creation = None;
         
         if has_children || node.node_type == NodeType::Connection || node.node_type == NodeType::Table || 
            node.node_type == NodeType::DatabasesFolder || node.node_type == NodeType::TablesFolder ||
@@ -1830,7 +2121,7 @@ impl MyApp {
            node.node_type == NodeType::EventsFolder || node.node_type == NodeType::DBAViewsFolder ||
            node.node_type == NodeType::UsersFolder || node.node_type == NodeType::PrivilegesFolder ||
            node.node_type == NodeType::ProcessesFolder || node.node_type == NodeType::StatusFolder ||
-           node.node_type == NodeType::Database {
+           node.node_type == NodeType::Database || node.node_type == NodeType::QueryFolder {
             // Use more unique ID including connection_id for connections
             let unique_id = match node.node_type {
                 NodeType::Connection => format!("conn_{}_{}", node_index, node.connection_id.unwrap_or(0)),
@@ -1921,6 +2212,7 @@ impl MyApp {
                     NodeType::SQLiteFolder => "📄",
                     NodeType::RedisFolder => "🔴",
                     NodeType::CustomFolder => "📁",
+                    NodeType::QueryFolder => "📂",
                 };
                 
                 let label_text = if icon.is_empty() { 
@@ -1989,6 +2281,54 @@ impl MyApp {
                             if let Some(conn_id) = node.connection_id {
                                 context_menu_request = Some(conn_id * 1000); // Use multiplication to indicate refresh
                             }
+                            ui.close_menu();
+                        }
+                    });
+                }
+                
+                // Add context menu for folder nodes
+                if node.node_type == NodeType::QueryFolder {
+                    response.context_menu(|ui| {
+                        if ui.button("📁 Create New Folder").clicked() {
+                            // Store the parent folder name for creation
+                            parent_folder_for_creation = Some(node.name.clone());
+                            // Use ID range 50000+ for create folder in folder operations
+                            let create_in_folder_id = 50000 + (node.name.len() as i64 % 1000);
+                            context_menu_request = Some(create_in_folder_id);
+                            println!("🎯 Create new folder in '{}' requested, id: {}", node.name, create_in_folder_id);
+                            println!("🎯 Setting parent_folder_for_creation to: {:?}", parent_folder_for_creation);
+                            ui.close_menu();
+                        }
+                        
+                        if ui.button("🗑️ Remove Folder").clicked() {
+                            // Store the full folder path for removal (relative to query dir)
+                            if let Some(full_path) = &node.file_path {
+                                let query_dir = Self::get_query_dir();
+                                // Get relative path from query directory
+                                let relative_path = std::path::Path::new(full_path)
+                                    .strip_prefix(&query_dir)
+                                    .unwrap_or(std::path::Path::new(&node.name))
+                                    .to_string_lossy()
+                                    .to_string();
+                                folder_name_for_removal = Some(relative_path.clone());
+                                
+                                // Use ID range -50000 for remove folder operations
+                                let remove_folder_id = -50000 - (node.name.len() as i64 % 1000);
+                                let hash = (-remove_folder_id) - 50000;
+                                folder_removal_mapping = Some((hash, relative_path));
+                                context_menu_request = Some(remove_folder_id);
+                            } else {
+                                // Fallback to just folder name for root folders
+                                let folder_name = node.name.clone();
+                                folder_name_for_removal = Some(folder_name.clone());
+                                
+                                // Use ID range -50000 for remove folder operations
+                                let remove_folder_id = -50000 - (node.name.len() as i64 % 1000);
+                                let hash = (-remove_folder_id) - 50000;
+                                folder_removal_mapping = Some((hash, folder_name));
+                                context_menu_request = Some(remove_folder_id);
+                            }
+                            println!("Remove folder '{}' requested", node.name);
                             ui.close_menu();
                         }
                     });
@@ -2074,7 +2414,7 @@ impl MyApp {
             if node.is_expanded {
                 ui.indent(id, |ui| {
                     for (child_index, child) in node.children.iter_mut().enumerate() {
-                        let (child_expansion_request, child_table_expansion, child_context, child_table_click, _child_connection_click, _child_query_file) = Self::render_tree_node_with_table_expansion(ui, child, editor_text, child_index, refreshing_connections);
+                        let (child_expansion_request, child_table_expansion, child_context, child_table_click, _child_connection_click, _child_query_file, _child_folder_removal, _child_parent_creation, _child_folder_removal_mapping) = Self::render_tree_node_with_table_expansion(ui, child, editor_text, child_index, refreshing_connections);
                         
                         // Handle child expansion requests - propagate to parent
                         if let Some(child_expansion) = child_expansion_request {
@@ -2096,6 +2436,21 @@ impl MyApp {
                         // Handle child table clicks - propagate to parent
                         if let Some((conn_id, table_name)) = child_table_click {
                             table_click_request = Some((conn_id, table_name));
+                        }
+                        
+                        // Handle child folder removal - propagate to parent
+                        if let Some(child_folder_name) = _child_folder_removal {
+                            folder_name_for_removal = Some(child_folder_name);
+                        }
+                        
+                        // Handle child parent folder creation - propagate to parent
+                        if let Some(child_parent) = _child_parent_creation {
+                            parent_folder_for_creation = Some(child_parent);
+                        }
+                        
+                        // Handle child folder removal mapping - propagate to parent
+                        if let Some(child_mapping) = _child_folder_removal_mapping {
+                            folder_removal_mapping = Some(child_mapping);
                         }
                         
                         // Handle child context menu requests - propagate to parent
@@ -2138,6 +2493,7 @@ impl MyApp {
                     NodeType::SQLiteFolder => "📄",
                     NodeType::RedisFolder => "🔴",
                     NodeType::CustomFolder => "📁",
+                    NodeType::QueryFolder => "📂",
                 };
                 
                 let response = ui.button(format!("{} {}", icon, node.name));
@@ -2186,6 +2542,17 @@ impl MyApp {
                             }
                             ui.close_menu();
                         }
+                        
+                        if ui.button("Move to Folder").clicked() {
+                            if let Some(file_path) = &node.file_path {
+                                // Use a different ID range for move operations
+                                let move_id = 40000 + (file_path.len() as i64 % 1000);
+                                context_menu_request = Some(move_id);
+                                println!("Move to folder requested for: {}", file_path);
+                            }
+                            ui.close_menu();
+                        }
+                        
                         if ui.button("Remove Query").clicked() {
                             if let Some(file_path) = &node.file_path {
                                 // Use the file path directly as context identifier
@@ -2201,7 +2568,7 @@ impl MyApp {
             });
         }
         
-        (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open)
+        (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open, folder_name_for_removal, parent_folder_for_creation, folder_removal_mapping)
     }
 
     fn render_connection_dialog(&mut self, ctx: &egui::Context, is_edit_mode: bool) {
@@ -2539,6 +2906,21 @@ impl MyApp {
         }
     }
 
+    fn handle_query_move_request(&mut self, hash: i64) {
+        println!("📂 Processing query move request for hash: {}", hash);
+        
+        // Find the query file by hash
+        if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
+            println!("Found query file to move: {}", query_file_path);
+            
+            // Set up the move dialog
+            self.selected_query_for_move = Some(query_file_path);
+            self.show_move_to_folder_dialog = true;
+        } else {
+            println!("Query file not found for hash: {}", hash);
+        }
+    }
+
     fn handle_query_remove_request_by_hash(&mut self, hash: i64) -> bool {
         println!("🗑️ Processing query remove request for hash: {}", hash);
         
@@ -2596,30 +2978,37 @@ impl MyApp {
     fn find_query_file_by_hash(&self, hash: i64) -> Option<String> {
         let query_dir = Self::get_query_dir();
         
-        if let Ok(entries) = std::fs::read_dir(&query_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        if let Some(filename) = entry.file_name().to_str() {
-                            if filename.ends_with(".sql") {
-                                let file_path = entry.path().to_string_lossy().to_string();
-                                
-                                // Calculate hash of the file path
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                file_path.hash(&mut hasher);
-                                let file_hash = hasher.finish() as i64;
-                                
-                                if (file_hash % 10000) == hash {
-                                    return Some(file_path);
+        // Function to search recursively in directories
+        fn search_in_dir(dir: &std::path::Path, target_hash: i64) -> Option<String> {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_file() {
+                            if let Some(filename) = entry.file_name().to_str() {
+                                if filename.ends_with(".sql") {
+                                    let file_path = entry.path().to_string_lossy().to_string();
+                                    
+                                    // Use same hash calculation as in context menu: file_path.len() % 1000
+                                    let file_hash = (file_path.len() as i64) % 1000;
+                                    
+                                    if file_hash == target_hash {
+                                        return Some(file_path);
+                                    }
                                 }
+                            }
+                        } else if metadata.is_dir() {
+                            // Recursively search in subdirectories
+                            if let Some(found) = search_in_dir(&entry.path(), target_hash) {
+                                return Some(found);
                             }
                         }
                     }
                 }
             }
+            None
         }
         
-        None
+        search_in_dir(&query_dir, hash)
     }
 
     fn close_tabs_for_file(&mut self, file_path: &str) {
@@ -2703,6 +3092,119 @@ impl MyApp {
             "-- SQLite ALTER TABLE for {}\n-- Note: SQLite has limited ALTER TABLE support\n-- Only ADD COLUMN and RENAME operations are supported\n\nALTER TABLE {} ADD COLUMN new_column TEXT DEFAULT NULL;\n\n-- To modify or drop columns, you need to recreate the table:\n-- CREATE TABLE {}_new AS SELECT existing_columns FROM {};\n-- DROP TABLE {};\n-- ALTER TABLE {}_new RENAME TO {};",
             table_name, table_name, table_name, table_name, table_name, table_name, table_name
         )
+    }
+
+    fn handle_create_folder_in_folder_request(&mut self, hash: i64) {
+        println!("📁 Processing create folder in folder request, hash: {}", hash);
+        println!("📁 Current parent_folder_for_creation: {:?}", self.parent_folder_for_creation);
+        
+        // Parent folder should already be set when context menu was clicked
+        if self.parent_folder_for_creation.is_some() {
+            // Show the create folder dialog
+            self.show_create_folder_dialog = true;
+            println!("✅ Parent folder set: {:?}, showing dialog", self.parent_folder_for_creation);
+        } else {
+            println!("❌ No parent folder set for creation! This should not happen.");
+            println!("❌ Debug: Hash was {}, showing error", hash);
+            self.error_message = "No parent folder selected for creation".to_string();
+            self.show_error_message = true;
+        }
+    }
+
+    fn handle_remove_folder_request(&mut self, hash: i64) {
+        println!("🗑️ Processing remove folder request with hash: {}", hash);
+        
+        // Look up the folder path using the hash
+        if let Some(folder_relative_path) = self.folder_removal_map.get(&hash).cloned() {
+            let query_dir = Self::get_query_dir();
+            let folder_path = query_dir.join(&folder_relative_path);
+            
+            println!("🗑️ Attempting to remove folder: {} ({})", folder_relative_path, folder_path.display());
+            
+            if folder_path.exists() && folder_path.is_dir() {
+                // Check if folder is empty (recursively)
+                let is_empty = Self::is_directory_empty(&folder_path);
+                
+                if is_empty {
+                    // Remove empty folder
+                    match std::fs::remove_dir(&folder_path) {
+                        Ok(()) => {
+                            println!("✅ Successfully removed empty folder: {}", folder_relative_path);
+                            // Refresh the queries tree
+                            self.load_queries_from_directory();
+                            // Force UI refresh
+                            self.needs_refresh = true;
+                        }
+                        Err(e) => {
+                            println!("❌ Failed to remove folder: {}", e);
+                            self.error_message = format!("Failed to remove folder '{}': {}", folder_relative_path, e);
+                            self.show_error_message = true;
+                        }
+                    }
+                } else {
+                    // Offer option to remove folder and all contents
+                    self.error_message = format!("Folder '{}' is not empty.\n\nWould you like to remove it and all its contents?", folder_relative_path);
+                    self.show_error_message = true;
+                    println!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
+                }
+            } else {
+                self.error_message = format!("Folder '{}' does not exist", folder_relative_path);
+                self.show_error_message = true;
+                println!("❌ Folder does not exist: {}", folder_relative_path);
+            }
+            
+            // Remove the mapping after processing
+            self.folder_removal_map.remove(&hash);
+        } else {
+            println!("❌ No folder path found for hash: {}", hash);
+            println!("❌ Available mappings: {:?}", self.folder_removal_map);
+            // Fallback to the old method
+            if let Some(folder_relative_path) = &self.selected_folder_for_removal {
+                let query_dir = Self::get_query_dir();
+                let folder_path = query_dir.join(folder_relative_path);
+                
+                println!("🗑️ Fallback: Attempting to remove folder: {}", folder_path.display());
+                
+                if folder_path.exists() && folder_path.is_dir() {
+                    let is_empty = Self::is_directory_empty(&folder_path);
+                    
+                    if is_empty {
+                        match std::fs::remove_dir(&folder_path) {
+                            Ok(()) => {
+                                println!("✅ Successfully removed empty folder: {}", folder_relative_path);
+                                self.load_queries_from_directory();
+                                self.needs_refresh = true;
+                            }
+                            Err(e) => {
+                                println!("❌ Failed to remove folder: {}", e);
+                                self.error_message = format!("Failed to remove folder '{}': {}", folder_relative_path, e);
+                                self.show_error_message = true;
+                            }
+                        }
+                    } else {
+                        self.error_message = format!("Folder '{}' is not empty.\n\nWould you like to remove it and all its contents?", folder_relative_path);
+                        self.show_error_message = true;
+                        println!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
+                    }
+                } else {
+                    self.error_message = format!("Folder '{}' does not exist", folder_relative_path);
+                    self.show_error_message = true;
+                    println!("❌ Folder does not exist: {}", folder_relative_path);
+                }
+                
+                self.selected_folder_for_removal = None;
+            } else {
+                println!("❌ No folder selected for removal in fallback either");
+            }
+        }
+    }
+
+    fn is_directory_empty(dir_path: &std::path::Path) -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
+            entries.count() == 0
+        } else {
+            false
+        }
     }
 
     fn test_database_connection(&self, connection: &ConnectionConfig) -> (bool, String) {
@@ -7304,6 +7806,8 @@ impl App for MyApp {
         self.render_save_dialog(ctx);
         self.render_connection_selector(ctx);
         self.render_error_dialog(ctx);
+        self.render_create_folder_dialog(ctx);
+        self.render_move_to_folder_dialog(ctx);
 
         egui::SidePanel::left("sidebar")
             .resizable(true)
@@ -7358,8 +7862,26 @@ impl App for MyApp {
                                 }
                             },
                             "Queries" => {
-                                ui.label("🔍 Saved Queries");
+                                ui.horizontal(|ui| {
+                                    ui.label("🔍 Saved Queries");
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("📂").on_hover_text("Create Folder").clicked() {
+                                            self.show_create_folder_dialog = true;
+                                        }
+                                    });
+                                });
                                 ui.separator();
+                                
+                                // Add right-click context menu support to the UI area itself
+                                let queries_response = ui.interact(ui.available_rect_before_wrap(), egui::Id::new("queries_area"), egui::Sense::click());
+                                queries_response.context_menu(|ui| {
+                                    if ui.button("📂 Create Folder").clicked() {
+                                        self.show_create_folder_dialog = true;
+                                        ui.close_menu();
+                                    }
+                                });
+                                
+                                // Render the queries tree normally
                                 let mut queries_tree = std::mem::take(&mut self.queries_tree);
                                 let _ = self.render_tree(ui, &mut queries_tree);
                                 self.queries_tree = queries_tree;
