@@ -1980,14 +1980,7 @@ impl MyApp {
         let mut processed_removals = std::collections::HashSet::new();
         let mut processed_refreshes = std::collections::HashSet::new();
         let mut needs_full_refresh = false;
-        
-        // Only log if there are actual context menu requests to avoid spam
-        if !context_menu_requests.is_empty() {
-            for (i, context_id) in context_menu_requests.iter().enumerate() {
-                println!("  [{}] Context ID: {}", i, context_id);
-            }
-        }
-        
+                
         for context_id in context_menu_requests {
             if context_id >= 50000 {
                 // ID >= 50000 means create folder in folder operation
@@ -2894,44 +2887,24 @@ impl MyApp {
 
     fn handle_query_remove_request_by_hash(&mut self, hash: i64) -> bool {
         
-        // Find the query file by hash (using file length as simple hash)
-        let query_dir = Self::get_query_dir();
-        
-        if let Ok(entries) = std::fs::read_dir(&query_dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        if let Some(filename) = entry.file_name().to_str() {
-                            if filename.ends_with(".sql") {
-                                let file_path = entry.path().to_string_lossy().to_string();
-                                
-                                // Calculate simple hash based on file path length
-                                let file_hash = file_path.len() as i64 % 1000;
-                                
-                                
-                                if file_hash == hash {
-                                    
-                                    // Close any open tabs for this file first
-                                    self.close_tabs_for_file(&file_path);
-                                    
-                                    // Remove the file from filesystem
-                                    match std::fs::remove_file(&file_path) {
-                                        Ok(()) => {
-                                            
-                                            // Set needs_refresh flag for next update cycle
-                                            self.needs_refresh = true;
-                                            
-                                            return true;
-                                        },
-                                        Err(e) => {
-                                            println!("❌ Failed to remove query file: {}", e);
-                                            return false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+        // Find the query file by hash using recursive search
+        if let Some(file_path) = self.find_query_file_by_hash(hash) {
+            
+            // Close any open tabs for this file first
+            self.close_tabs_for_file(&file_path);
+            
+            // Remove the file from filesystem
+            match std::fs::remove_file(&file_path) {
+                Ok(()) => {
+                    
+                    // Set needs_refresh flag for next update cycle
+                    self.needs_refresh = true;
+                    
+                    return true;
+                },
+                Err(e) => {
+                    println!("❌ Failed to remove query file: {}", e);
+                    return false;
                 }
             }
         }
@@ -6893,7 +6866,7 @@ impl MyApp {
                                     ui.horizontal(|ui| {
                                         // Center the header content with fixed width
                                         ui.allocate_ui_with_layout(
-                                            [120.0, ui.available_height()].into(),
+                                            [200.0, ui.available_height()].into(), // Match data column width
                                             egui::Layout::top_down(egui::Align::Center),
                                             |ui| {
                                                 // Header text with bold styling and better appearance
@@ -6966,9 +6939,28 @@ impl MyApp {
                                         }
                                     );
                                     
-                                    // Add data cells (left-aligned)
+                                    // Add data cells (left-aligned with max width)
                                     for cell in row {
-                                        ui.label(cell);
+                                        ui.allocate_ui_with_layout(
+                                            [200.0, ui.available_height()].into(), // Set max width to 200px
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                // Truncate text if it's too long and add tooltip
+                                                let max_chars = 50; // Max characters to display
+                                                let display_text = if cell.chars().count() > max_chars {
+                                                    format!("{}...", cell.chars().take(max_chars - 3).collect::<String>())
+                                                } else {
+                                                    cell.clone()
+                                                };
+                                                
+                                                let label = ui.add(egui::Label::new(display_text));
+                                                
+                                                // Show full text in tooltip if truncated
+                                                if cell.chars().count() > max_chars {
+                                                    label.on_hover_text(cell);
+                                                }
+                                            }
+                                        );
                                     }
                                     ui.end_row();
                                 }
@@ -7570,7 +7562,6 @@ impl App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         // Handle forced refresh flag
         if self.needs_refresh {
-            println!("🔄 Processing forced refresh request");
             self.needs_refresh = false;
             
             // Force refresh of query tree
@@ -7578,8 +7569,6 @@ impl App for MyApp {
             
             // Request UI repaint
             ctx.request_repaint();
-            
-            println!("✅ Forced refresh completed");
         }
         
         // Handle deferred theme selector request
