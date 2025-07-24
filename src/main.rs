@@ -6272,28 +6272,28 @@ impl MyApp {
                         match row.try_get::<Option<i8>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "SMALLINT" => {
                         match row.try_get::<Option<i16>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "MEDIUMINT" | "INT" => {
                         match row.try_get::<Option<i32>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "BIGINT" => {
                         match row.try_get::<Option<i64>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Unsigned integer types
@@ -6301,28 +6301,28 @@ impl MyApp {
                         match row.try_get::<Option<u8>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "SMALLINT UNSIGNED" => {
                         match row.try_get::<Option<u16>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => {
                         match row.try_get::<Option<u32>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "BIGINT UNSIGNED" => {
                         match row.try_get::<Option<u64>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Floating point types
@@ -6330,14 +6330,14 @@ impl MyApp {
                         match row.try_get::<Option<f32>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     "DOUBLE" => {
                         match row.try_get::<Option<f64>, _>(column_name) {
                             Ok(Some(val)) => val.to_string(),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Decimal types - fallback to string
@@ -6345,7 +6345,7 @@ impl MyApp {
                         match row.try_get::<Option<String>, _>(column_name) {
                             Ok(Some(val)) => val,
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // String types
@@ -6353,7 +6353,7 @@ impl MyApp {
                         match row.try_get::<Option<String>, _>(column_name) {
                             Ok(Some(val)) => val,
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Binary types
@@ -6361,7 +6361,7 @@ impl MyApp {
                         match row.try_get::<Option<Vec<u8>>, _>(column_name) {
                             Ok(Some(val)) => format!("[BINARY:{} bytes]", val.len()),
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Date and time types - try proper types first, then fallback to string
@@ -6376,7 +6376,7 @@ impl MyApp {
                             match row.try_get::<Option<String>, _>(column_name) {
                                 Ok(Some(val)) => val,
                                 Ok(None) => "NULL".to_string(),
-                                Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                                Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                             }
                         }
                     },
@@ -6391,7 +6391,7 @@ impl MyApp {
                             match row.try_get::<Option<String>, _>(column_name) {
                                 Ok(Some(val)) => val,
                                 Ok(None) => "NULL".to_string(),
-                                Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                                Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                             }
                         }
                     },
@@ -6406,7 +6406,7 @@ impl MyApp {
                             match row.try_get::<Option<String>, _>(column_name) {
                                 Ok(Some(val)) => val,
                                 Ok(None) => "NULL".to_string(),
-                                Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                                Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                             }
                         }
                     },
@@ -6420,7 +6420,7 @@ impl MyApp {
                                 match row.try_get::<Option<i8>, _>(column_name) {
                                     Ok(Some(val)) => (val != 0).to_string(),
                                     Ok(None) => "NULL".to_string(),
-                                    Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                                    Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                                 }
                             }
                         }
@@ -6430,7 +6430,7 @@ impl MyApp {
                         match row.try_get::<Option<String>, _>(column_name) {
                             Ok(Some(val)) => val,
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => format!("[TYPE_ERROR:{}]", type_name)
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     },
                     // Default case: try string first, then generic fallback
@@ -6438,18 +6438,7 @@ impl MyApp {
                         match row.try_get::<Option<String>, _>(column_name) {
                             Ok(Some(val)) => val,
                             Ok(None) => "NULL".to_string(),
-                            Err(_) => {
-                                // Generic fallback - try common types
-                                if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(column_name) {
-                                    val.to_string()
-                                } else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(column_name) {
-                                    val.to_string()
-                                } else if let Ok(Some(val)) = row.try_get::<Option<bool>, _>(column_name) {
-                                    val.to_string()
-                                } else {
-                                    format!("[UNKNOWN_TYPE:{}]", type_name)
-                                }
-                            }
+                            Err(_) => Self::fallback_mysql_value_extraction(row, column_name, type_name)
                         }
                     }
                 };
@@ -6460,6 +6449,133 @@ impl MyApp {
         }
         
         table_data
+    }
+
+    // Helper function for fallback value extraction when type-specific conversion fails
+    fn fallback_mysql_value_extraction(row: &sqlx::mysql::MySqlRow, column_name: &str, type_name: &str) -> String {
+        use sqlx::{Row, ValueRef};
+        
+        // Get the column index - this is more reliable for EXPLAIN queries
+        let column_index = match row.columns().iter().position(|col| col.name() == column_name) {
+            Some(idx) => idx,
+            None => {
+                println!("Column '{}' not found in row", column_name);
+                return format!("[COLUMN_NOT_FOUND:{}]", column_name);
+            }
+        };
+        
+        // Try to get the raw value reference first
+        if let Ok(value_ref) = row.try_get_raw(column_index) {
+            if value_ref.is_null() {
+                return "NULL".to_string();
+            }
+        }
+        
+        // For EXPLAIN queries, we need to be very aggressive about type conversion
+        // Try all possible conversions using column index (more reliable than name)
+        
+        // Method 1: Try string conversion with column index
+        if let Ok(val) = row.try_get::<String, _>(column_index) {
+            return val;
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<String>, _>(column_index) {
+            return val;
+        }
+        
+        // Method 2: Try string conversion with column name as fallback
+        if let Ok(val) = row.try_get::<String, _>(column_name) {
+            return val;
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<String>, _>(column_name) {
+            return val;
+        }
+        
+        // Method 3: Try different numeric types based on declared type using column index
+        match type_name {
+            "BIGINT UNSIGNED" => {
+                // Try unsigned first, then signed
+                if let Ok(val) = row.try_get::<u64, _>(column_index) {
+                    return val.to_string();
+                }
+                if let Ok(Some(val)) = row.try_get::<Option<u64>, _>(column_index) {
+                    return val.to_string();
+                }
+                if let Ok(val) = row.try_get::<i64, _>(column_index) {
+                    return val.to_string();
+                }
+                if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(column_index) {
+                    return val.to_string();
+                }
+            }
+            "BIGINT" => {
+                if let Ok(val) = row.try_get::<i64, _>(column_index) {
+                    return val.to_string();
+                }
+                if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(column_index) {
+                    return val.to_string();
+                }
+            }
+            "VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => {
+                // Try bytes conversion as last resort for text fields
+                if let Ok(val) = row.try_get::<Vec<u8>, _>(column_index) {
+                    if let Ok(s) = String::from_utf8(val) {
+                        return s;
+                    }
+                }
+                if let Ok(Some(val)) = row.try_get::<Option<Vec<u8>>, _>(column_index) {
+                    if let Ok(s) = String::from_utf8(val) {
+                        return s;
+                    }
+                }
+            }
+            _ => {}
+        }
+        
+        // Method 4: Final desperate attempts with all common types using column index
+        if let Ok(val) = row.try_get::<i64, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<i64>, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(val) = row.try_get::<u64, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<u64>, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(val) = row.try_get::<i32, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<i32>, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(val) = row.try_get::<f64, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(val) = row.try_get::<bool, _>(column_index) {
+            return val.to_string();
+        }
+        if let Ok(Some(val)) = row.try_get::<Option<bool>, _>(column_index) {
+            return val.to_string();
+        }
+        
+        // Method 5: Try raw value extraction and manual conversion
+        if let Ok(value_ref) = row.try_get_raw(column_index) {
+            // Check if value is null
+            if value_ref.is_null() {
+                return "NULL".to_string();
+            }
+            // For non-null values, try to get as bytes and convert to string
+            return "[RAW_VALUE_EXISTS]".to_string();
+        }
+        
+        // Method 6: Last resort - try to get the value as Any and extract info
+        // This is a desperate measure for EXPLAIN query compatibility
+        format!("[TYPE_ERROR:{}]", type_name)
     }
 
     // Helper function to convert SQLite rows to Vec<Vec<String>> with proper type checking
