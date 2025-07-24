@@ -6,7 +6,6 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::hash::{Hash, Hasher};
 
 
 mod helpers;
@@ -2046,20 +2045,17 @@ impl MyApp {
                 let connection_id = context_id / 1000;
                 if !processed_refreshes.contains(&connection_id) {
                     processed_refreshes.insert(connection_id);
-                    println!("Processing refresh request for connection ID: {}", connection_id);
                     self.refresh_connection(connection_id);
                     needs_full_refresh = true;
                 }
             } else if context_id > 0 {
                 // Positive ID means edit connection
-                println!("🔍 Processing edit request for connection ID: {}", context_id);
                 self.start_edit_connection(context_id);
             } else {
                 // Negative ID means remove connection
                 let connection_id = -context_id;
                 if !processed_removals.contains(&connection_id) {
                     processed_removals.insert(connection_id);
-                    println!("🚀 Processing remove request for connection ID: {} (context_id was: {})", connection_id, context_id);
                     self.remove_connection(connection_id);
                     
                     // Force immediate tree refresh and UI update
@@ -2295,8 +2291,6 @@ impl MyApp {
                             // Use ID range 50000+ for create folder in folder operations
                             let create_in_folder_id = 50000 + (node.name.len() as i64 % 1000);
                             context_menu_request = Some(create_in_folder_id);
-                            println!("🎯 Create new folder in '{}' requested, id: {}", node.name, create_in_folder_id);
-                            println!("🎯 Setting parent_folder_for_creation to: {:?}", parent_folder_for_creation);
                             ui.close_menu();
                         }
                         
@@ -2328,7 +2322,6 @@ impl MyApp {
                                 folder_removal_mapping = Some((hash, folder_name));
                                 context_menu_request = Some(remove_folder_id);
                             }
-                            println!("Remove folder '{}' requested", node.name);
                             ui.close_menu();
                         }
                     });
@@ -2538,7 +2531,6 @@ impl MyApp {
                                 // Format: 20000 + simple index to differentiate from connections
                                 let edit_id = 20000 + (file_path.len() as i64 % 1000); // Simple deterministic ID
                                 context_menu_request = Some(edit_id);
-                                println!("Edit query requested for: {}", file_path);
                             }
                             ui.close_menu();
                         }
@@ -2548,7 +2540,6 @@ impl MyApp {
                                 // Use a different ID range for move operations
                                 let move_id = 40000 + (file_path.len() as i64 % 1000);
                                 context_menu_request = Some(move_id);
-                                println!("Move to folder requested for: {}", file_path);
                             }
                             ui.close_menu();
                         }
@@ -2559,7 +2550,6 @@ impl MyApp {
                                 // Format: -20000 - simple index to differentiate from connections
                                 let remove_id = -20000 - (file_path.len() as i64 % 1000); // Simple deterministic ID
                                 context_menu_request = Some(remove_id);
-                                println!("🗑️ Remove query requested for: {} (hash: {})", file_path, file_path.len() as i64 % 1000);
                             }
                             ui.close_menu();
                         }
@@ -2654,20 +2644,15 @@ impl MyApp {
                             if is_edit_mode {
                                 // Update existing connection
                                 if let Some(id) = connection_data.id {
-                                    println!("Attempting to update connection: {} (ID: {})", connection_data.name, id);
-                                    println!("Connection data: {:?}", connection_data);
                                     
                                     if self.update_connection_in_database(&connection_data) {
-                                        println!("Database update successful, reloading connections");
                                         self.load_connections();
                                         self.refresh_connections_tree();
                                     } else {
-                                        println!("Database update failed, falling back to in-memory update");
                                         // Fallback to in-memory update
                                         if let Some(existing) = self.connections.iter_mut().find(|c| c.id == Some(id)) {
                                             *existing = connection_data.clone();
                                             self.refresh_connections_tree();
-                                            println!("In-memory update completed");
                                         } else {
                                             println!("ERROR: Could not find connection {} in memory", id);
                                         }
@@ -2837,19 +2822,14 @@ impl MyApp {
     }
 
     fn start_edit_connection(&mut self, connection_id: i64) {
-        println!("📝 start_edit_connection called with ID: {}", connection_id);
         // Find the connection to edit
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-            println!("✅ Found connection to edit: {} (ID: {:?})", connection.name, connection.id);
             self.edit_connection = connection.clone();
             // Reset test connection status saat buka edit dialog
             self.test_connection_status = None;
             self.test_connection_in_progress = false;
             self.show_edit_connection = true;
-            println!("✅ Edit dialog should now be visible");
         } else {
-            println!("❌ Connection not found for ID: {}", connection_id);
-            println!("Available connections:");
             for conn in &self.connections {
                 println!("  - {} (ID: {:?})", conn.name, conn.id);
             }
@@ -2865,13 +2845,11 @@ impl MyApp {
             copied_connection.id = None;
             copied_connection.name = format!("{} - Copy", copied_connection.name);
             
-            println!("📋 Copying connection: {} -> {}", connection.name, copied_connection.name);
             
             // Try to save to database first
             if self.save_connection_to_database(&copied_connection) {
                 // If database save successful, reload from database to get ID
                 self.load_connections();
-                println!("✓ Connection copied successfully to database");
             } else {
                 // Fallback to in-memory storage
                 let new_id = self.connections.iter()
@@ -2880,22 +2858,17 @@ impl MyApp {
                     .unwrap_or(0) + 1;
                 copied_connection.id = Some(new_id);
                 self.connections.push(copied_connection);
-                println!("✓ Connection copied to memory (database save failed)");
             }
             
-            // Don't refresh here - let the caller handle it
-            println!("✓ Connection copy data operation completed");
         } else {
             println!("❌ Connection with ID {} not found for copying", connection_id);
         }
     }
 
     fn handle_query_edit_request(&mut self, hash: i64) {
-        println!("📝 Processing query edit request for hash: {}", hash);
         
         // Find the query file by hash
         if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
-            println!("Found query file to edit: {}", query_file_path);
             
             // Open the query file in a new tab for editing
             if let Err(err) = self.open_query_file(&query_file_path) {
@@ -2907,11 +2880,9 @@ impl MyApp {
     }
 
     fn handle_query_move_request(&mut self, hash: i64) {
-        println!("📂 Processing query move request for hash: {}", hash);
         
         // Find the query file by hash
         if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
-            println!("Found query file to move: {}", query_file_path);
             
             // Set up the move dialog
             self.selected_query_for_move = Some(query_file_path);
@@ -2922,11 +2893,9 @@ impl MyApp {
     }
 
     fn handle_query_remove_request_by_hash(&mut self, hash: i64) -> bool {
-        println!("🗑️ Processing query remove request for hash: {}", hash);
         
         // Find the query file by hash (using file length as simple hash)
         let query_dir = Self::get_query_dir();
-        println!("🔍 Scanning query directory: {}", query_dir.display());
         
         if let Ok(entries) = std::fs::read_dir(&query_dir) {
             for entry in entries.flatten() {
@@ -2939,10 +2908,8 @@ impl MyApp {
                                 // Calculate simple hash based on file path length
                                 let file_hash = file_path.len() as i64 % 1000;
                                 
-                                println!("📄 Found file: {} (hash: {} vs requested: {})", filename, file_hash, hash);
                                 
                                 if file_hash == hash {
-                                    println!("✅ Found matching query file to remove: {}", file_path);
                                     
                                     // Close any open tabs for this file first
                                     self.close_tabs_for_file(&file_path);
@@ -2950,7 +2917,6 @@ impl MyApp {
                                     // Remove the file from filesystem
                                     match std::fs::remove_file(&file_path) {
                                         Ok(()) => {
-                                            println!("✅ Successfully removed query file: {}", file_path);
                                             
                                             // Set needs_refresh flag for next update cycle
                                             self.needs_refresh = true;
@@ -3028,7 +2994,6 @@ impl MyApp {
     }
 
     fn handle_alter_table_request(&mut self, connection_id: i64) {
-        println!("🔧 Processing alter table request for connection ID: {}", connection_id);
         
         // Find the connection by ID to determine database type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -3046,7 +3011,6 @@ impl MyApp {
                 self.editor_text = alter_template;
                 self.current_connection_id = Some(connection_id);
                 
-                println!("✅ Generated ALTER TABLE template for table: {}", table_name);
             } else {
                 // If no specific table is selected, show a generic template
                 let alter_template = match connection.connection_type {
@@ -3059,7 +3023,6 @@ impl MyApp {
                 self.editor_text = alter_template;
                 self.current_connection_id = Some(connection_id);
                 
-                println!("✅ Generated generic ALTER TABLE template");
             }
         } else {
             println!("❌ Connection with ID {} not found", connection_id);
@@ -3095,14 +3058,11 @@ impl MyApp {
     }
 
     fn handle_create_folder_in_folder_request(&mut self, hash: i64) {
-        println!("📁 Processing create folder in folder request, hash: {}", hash);
-        println!("📁 Current parent_folder_for_creation: {:?}", self.parent_folder_for_creation);
         
         // Parent folder should already be set when context menu was clicked
         if self.parent_folder_for_creation.is_some() {
             // Show the create folder dialog
             self.show_create_folder_dialog = true;
-            println!("✅ Parent folder set: {:?}, showing dialog", self.parent_folder_for_creation);
         } else {
             println!("❌ No parent folder set for creation! This should not happen.");
             println!("❌ Debug: Hash was {}, showing error", hash);
@@ -3112,14 +3072,12 @@ impl MyApp {
     }
 
     fn handle_remove_folder_request(&mut self, hash: i64) {
-        println!("🗑️ Processing remove folder request with hash: {}", hash);
         
         // Look up the folder path using the hash
         if let Some(folder_relative_path) = self.folder_removal_map.get(&hash).cloned() {
             let query_dir = Self::get_query_dir();
             let folder_path = query_dir.join(&folder_relative_path);
             
-            println!("🗑️ Attempting to remove folder: {} ({})", folder_relative_path, folder_path.display());
             
             if folder_path.exists() && folder_path.is_dir() {
                 // Check if folder is empty (recursively)
@@ -3129,7 +3087,6 @@ impl MyApp {
                     // Remove empty folder
                     match std::fs::remove_dir(&folder_path) {
                         Ok(()) => {
-                            println!("✅ Successfully removed empty folder: {}", folder_relative_path);
                             // Refresh the queries tree
                             self.load_queries_from_directory();
                             // Force UI refresh
@@ -3163,7 +3120,6 @@ impl MyApp {
                 let query_dir = Self::get_query_dir();
                 let folder_path = query_dir.join(folder_relative_path);
                 
-                println!("🗑️ Fallback: Attempting to remove folder: {}", folder_path.display());
                 
                 if folder_path.exists() && folder_path.is_dir() {
                     let is_empty = Self::is_directory_empty(&folder_path);
@@ -3171,7 +3127,6 @@ impl MyApp {
                     if is_empty {
                         match std::fs::remove_dir(&folder_path) {
                             Ok(()) => {
-                                println!("✅ Successfully removed empty folder: {}", folder_relative_path);
                                 self.load_queries_from_directory();
                                 self.needs_refresh = true;
                             }
@@ -3216,7 +3171,7 @@ impl MyApp {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         
-        let result = rt.block_on(async {
+        rt.block_on(async {
             match connection.connection_type {
                 DatabaseType::MySQL => {
                     let encoded_username = Self::url_encode(&connection.username);
@@ -3313,9 +3268,7 @@ impl MyApp {
                     }
                 }
             }
-        });
-        
-        result
+        })
     }
 
     fn update_connection_in_database(&self, connection: &ConnectionConfig) -> bool {
@@ -3325,8 +3278,6 @@ impl MyApp {
                 let connection = connection.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 
-                println!("Updating connection in database: {} (ID: {})", connection.name, id);
-                println!("Folder value: {:?}", connection.folder);
                 
                 let result = rt.block_on(async {
                     sqlx::query(
@@ -3368,14 +3319,6 @@ impl MyApp {
 
 
     fn remove_connection(&mut self, connection_id: i64) {
-        println!("=== REMOVE CONNECTION DEBUG START ===");
-        println!("Removing connection with ID {}", connection_id);
-        
-        // Debug: List all connections before removal
-        println!("Before removal - All connections:");
-        for (i, conn) in self.connections.iter().enumerate() {
-            println!("  [{}] {} (ID: {:?})", i, conn.name, conn.id);
-        }
         
         // Remove from database first with explicit transaction
         if let Some(ref pool) = self.db_pool {
@@ -3416,7 +3359,6 @@ impl MyApp {
             
             match result {
                 Ok(delete_result) => {
-                    println!("Successfully deleted from database, affected rows: {}", delete_result.rows_affected());
                     
                     // Only proceed if we actually deleted something
                     if delete_result.rows_affected() == 0 {
@@ -3431,52 +3373,17 @@ impl MyApp {
             }
         }
         
-        // Remove from memory
-        let before_count = self.connections.len();
-        println!("Before memory removal: {} connections", before_count);
-        
-        // Debug: Find which connection will be removed
-        for conn in &self.connections {
-            if conn.id == Some(connection_id) {
-                println!("Found connection to remove: {} (ID: {:?})", conn.name, conn.id);
-            }
-        }
-        
         self.connections.retain(|c| c.id != Some(connection_id));
-        let after_count = self.connections.len();
-        
-        println!("Connections before: {}, after: {}", before_count, after_count);
-        
-        // Debug: List all connections after removal
-        println!("After removal - Remaining connections:");
-        for (i, conn) in self.connections.iter().enumerate() {
-            println!("  [{}] {} (ID: {:?})", i, conn.name, conn.id);
-        }
-        
-        // Verify connection was actually removed
-        if before_count == after_count {
-            println!("WARNING: Connection was not removed from memory!");
-            println!("This suggests the connection ID {} was not found in memory", connection_id);
-        } else {
-            println!("SUCCESS: Connection was removed from memory");
-        }
-        
         // Remove from connection pool cache
         self.connection_pools.remove(&connection_id);
-        
-        // Don't refresh here - let the caller handle it
-        println!("✓ Connection remove data operation completed");
-        
+                
         // Set flag to force refresh on next update
         self.needs_refresh = true;
         
-        println!("Memory cleanup completed for connection ID: {}", connection_id);
-        println!("=== REMOVE CONNECTION DEBUG END ===");
     }
 
     // Cache functions for database structure
     fn save_databases_to_cache(&self, connection_id: i64, databases: &[String]) {
-        println!("Saving {} databases to cache for connection_id: {}", databases.len(), connection_id);
         for db_name in databases {
             println!("  - {}", db_name);
         }
@@ -3659,7 +3566,6 @@ impl MyApp {
     }
 
     fn refresh_connection(&mut self, connection_id: i64) {
-        println!("Refreshing connection cache for ID: {}", connection_id);
         
         // Clear all cached data for this connection
         self.clear_connection_cache(connection_id);
@@ -3700,7 +3606,6 @@ impl MyApp {
     }
 
     fn fetch_and_cache_connection_data(&mut self, connection_id: i64) {
-        println!("Fetching fresh data from server for connection_id: {}", connection_id);
         
         // Clone connection info to avoid borrowing issues
         let connection = if let Some(conn) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -3714,14 +3619,12 @@ impl MyApp {
         let databases_result = self.fetch_databases_from_connection(connection_id);
         
         if let Some(databases) = databases_result {
-            println!("Fetched {} databases from server", databases.len());
             
             // Save databases to cache
             self.save_databases_to_cache(connection_id, &databases);
             
             // For each database, fetch tables and columns
             for database_name in &databases {
-                println!("Fetching tables for database: {}", database_name);
                 
                 // Fetch different types of tables based on database type
                 let table_types = match connection.connection_type {
@@ -3758,7 +3661,6 @@ impl MyApp {
                 }
                 
                 if !all_tables.is_empty() {
-                    println!("Fetched {} total items from database {}", all_tables.len(), database_name);
                     
                     // Save tables to cache
                     self.save_tables_to_cache(connection_id, database_name, &all_tables);
@@ -3766,13 +3668,10 @@ impl MyApp {
                     // For each table, fetch columns
                     for (table_name, table_type) in &all_tables {
                         if table_type == "table" { // Only fetch columns for actual tables, not views/procedures
-                            println!("Fetching columns for table: {}.{}", database_name, table_name);
-                            
+
                             let columns_result = self.fetch_columns_from_database(connection_id, database_name, table_name, &connection);
                             
-                            if let Some(columns) = columns_result {
-                                println!("Fetched {} columns from table {}.{}", columns.len(), database_name, table_name);
-                                
+                            if let Some(columns) = columns_result {                                
                                 // Save columns to cache
                                 self.save_columns_to_cache(connection_id, database_name, table_name, &columns);
                             }
@@ -3781,7 +3680,6 @@ impl MyApp {
                 }
             }
             
-            println!("Successfully cached all data for connection_id: {}", connection_id);
         } else {
             println!("Failed to fetch databases from server for connection_id: {}", connection_id);
         }
@@ -3811,7 +3709,6 @@ impl MyApp {
                     .await;
             });
             
-            println!("Cleared cache for connection ID: {}", connection_id);
         }
     }
 
@@ -3822,7 +3719,6 @@ impl MyApp {
         // ALWAYS recreate pool to ensure we use the new Arc<Pool> architecture
         // Remove any existing cached pool first
         self.connection_pools.remove(&connection_id);
-        println!("Force clearing cached pool for connection_id: {}", connection_id);
 
         // Jika belum ada, buat connection pool baru
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -3839,8 +3735,6 @@ impl MyApp {
                     if !helpers::ping_host(&connection.host) {
                         return None;
                     }
-                    
-                    println!("Creating new MySQL connection pool for: {}", connection.name);
                     
                     // Configure MySQL pool with proper settings
                     let pool_result = MySqlPoolOptions::new()
@@ -3877,9 +3771,7 @@ impl MyApp {
                         "postgresql://{}:{}@{}:{}/{}",
                         connection.username, connection.password, connection.host, connection.port, connection.database
                     );
-                    
-                    println!("Creating new PostgreSQL connection pool for: {}", connection.name);
-                    
+                                        
                     // Configure PostgreSQL pool with proper settings
                     let pool_result = PgPoolOptions::new()
                         .max_connections(10)
@@ -3905,8 +3797,6 @@ impl MyApp {
                 },
                 DatabaseType::SQLite => {
                     let connection_string = format!("sqlite:{}", connection.host);
-                    
-                    println!("Creating new SQLite connection pool for: {}", connection.name);
                     
                     // Configure SQLite pool with proper settings
                     let pool_result = SqlitePoolOptions::new()
