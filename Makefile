@@ -8,7 +8,7 @@ all: help
 
 # Variables
 APP_NAME = Tabular
-VERSION = 0.1.0
+VERSION = $(shell grep '^version' Cargo.toml | head -n1 | cut -d'"' -f2)
 RUST_VERSION = stable
 
 # macOS targets
@@ -269,7 +269,7 @@ info:
 	@echo "📋 Project Information"
 	@echo "===================="
 	@echo "Name: $(APP_NAME)"
-	@echo "Version: $(VERSION)"
+	@echo "Version: $(VERSION) (from Cargo.toml)"
 	@echo "Rust Version: $(RUST_VERSION)"
 	@echo ""
 	@echo "🎯 Build Targets:"
