@@ -7230,19 +7230,14 @@ impl MyApp {
         if let Some(pool) = &self.db_pool {
             if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
                 let connection_name = connection.name.clone();
-                // Limit query length to prevent memory issues (max 5000 characters)
-                let query_text = if query.len() > 5000 {
-                    format!("{}...", &query[..5000])
-                } else {
-                    query.to_string()
-                };
+
                 
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
                     let _ = sqlx::query(
                         "INSERT INTO query_history (query_text, connection_id, connection_name) VALUES (?, ?, ?)"
                     )
-                    .bind(&query_text)
+                    .bind(query.to_string())
                     .bind(connection_id)
                     .bind(&connection_name)
                     .execute(pool.as_ref())
@@ -7268,14 +7263,7 @@ impl MyApp {
         self.history_tree.clear();
         
         for item in &self.history_items {
-            // Create a display name with only query preview (no connection name)
-            let query_preview = if item.query.len() > 50 {
-                format!("{}...", &item.query[..50])
-            } else {
-                item.query.clone()
-            };
-            
-            let mut node = TreeNode::new(query_preview, NodeType::HistoryItem);
+            let mut node = TreeNode::new(item.query.clone(), NodeType::HistoryItem);
             node.connection_id = Some(item.connection_id);
             
             self.history_tree.push(node);

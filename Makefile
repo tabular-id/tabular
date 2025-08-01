@@ -128,15 +128,9 @@ build-windows: create-dirs
 	
 	# Build for x86_64
 	@echo "Building for x86_64-pc-windows-gnu..."
-	cross build --release --target $(WINDOWS_X86_TARGET)
+	cargo build --release --target $(WINDOWS_X86_TARGET)
 	cp $(BUILD_DIR)/$(WINDOWS_X86_TARGET)/release/tabular.exe $(WINDOWS_DIR)/tabular-x86_64.exe
 	
-	# Build for aarch64
-	@echo "Building for aarch64-pc-windows-gnu..."
-	cross build --release --target $(WINDOWS_ARM_TARGET)
-	cp $(BUILD_DIR)/$(WINDOWS_ARM_TARGET)/release/tabular.exe $(WINDOWS_DIR)/tabular-aarch64.exe
-	
-	@echo "✅ Windows binaries built successfully!"
 
 # Bundle macOS app
 bundle-macos: build-macos
