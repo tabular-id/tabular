@@ -1,3 +1,4 @@
+use eframe::egui::debug_text::print;
 use eframe::{egui, App, Frame};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqlitePool, MySqlPool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
@@ -507,6 +508,9 @@ impl MyApp {
         connection_id: i64,
         db_pool: &Option<Arc<SqlitePool>>,
     ) -> bool {
+
+        println!("Refreshing connection with ID: {}", connection_id);
+
         // Get connection from database
         if let Some(cache_pool_arc) = db_pool {
             let connection_result = sqlx::query_as::<_, (i64, String, String, String, String, String, String, String)>(
@@ -3830,13 +3834,32 @@ impl MyApp {
     }
 
     fn load_connection_tables(&mut self, connection_id: i64, node: &mut TreeNode) {
+
+        println!("Loading connection tables for ID: {}", connection_id);
+
         // First check if we have cached data
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
+            println!("Found cached databases for connection {}: {:?}", connection_id, databases);
             if !databases.is_empty() {
                 self.build_connection_structure_from_cache(connection_id, node, &databases);
                 node.is_loaded = true;
                 return;
             }
+        }
+
+        println!("🔄 Cache empty or not found, fetching databases from server for connection {}", connection_id);
+        
+        // Try to fetch from actual database server
+        if let Some(fresh_databases) = self.fetch_databases_from_connection(connection_id) {
+            println!("✅ Successfully fetched {} databases from server", fresh_databases.len());
+            // Save to cache for future use
+            self.save_databases_to_cache(connection_id, &fresh_databases);
+            // Build structure from fresh data
+            self.build_connection_structure_from_cache(connection_id, node, &fresh_databases);
+            node.is_loaded = true;
+            return;
+        } else {
+            println!("❌ Failed to fetch databases from server, creating default structure");
         }
 
         
@@ -4832,6 +4855,8 @@ impl MyApp {
     }
 
     fn load_mysql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+
+        println!("Loading MySQL structure for connection ID: {}", connection_id);
         
         // Since we can't use block_on in an async context, we'll create a simple structure
         // and populate it with cached data or show a loading message
