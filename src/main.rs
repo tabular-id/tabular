@@ -1,4 +1,3 @@
-use eframe::egui::debug_text::print;
 use eframe::{egui, App, Frame};
 use serde::{Deserialize, Serialize};
 use sqlx::{SqlitePool, MySqlPool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
