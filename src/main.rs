@@ -58,44 +58,7 @@ fn load_icon() -> Option<egui::IconData> {
 
 
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct HistoryItem {
-    id: Option<i64>,
-    query: String,
-    connection_id: i64,
-    connection_name: String,
-    executed_at: String,
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ConnectionConfig {
-    id: Option<i64>,
-    name: String,
-    host: String,
-    port: String,
-    username: String,
-    password: String,
-    database: String,
-    connection_type: models::enums::DatabaseType,
-    folder: Option<String>, // Custom folder name
-}
-
-
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        Self {
-            id: None,
-            name: String::new(),
-            host: "localhost".to_string(),
-            port: "3306".to_string(),
-            username: String::new(),
-            password: String::new(),
-            database: String::new(),
-            connection_type: models::enums::DatabaseType::MySQL,
-            folder: None, // No custom folder by default
-        }
-    }
-}
 
 
 
@@ -114,16 +77,16 @@ struct MyApp {
     items_tree: Vec<models::structs::TreeNode>,
     queries_tree: Vec<models::structs::TreeNode>,
     history_tree: Vec<models::structs::TreeNode>,
-    history_items: Vec<HistoryItem>, // Actual history data
-    connections: Vec<ConnectionConfig>,
+    history_items: Vec<models::structs::HistoryItem>, // Actual history data
+    connections: Vec<models::structs::ConnectionConfig>,
     show_add_connection: bool,
-    new_connection: ConnectionConfig,
+    new_connection: models::structs::ConnectionConfig,
     db_pool: Option<Arc<SqlitePool>>,
     // Connection cache untuk menghindari membuat koneksi berulang
     connection_pools: HashMap<i64, DatabasePool>,
     // Context menu and edit connection fields
     show_edit_connection: bool,
-    edit_connection: ConnectionConfig,
+    edit_connection: models::structs::ConnectionConfig,
     // UI refresh flag
     needs_refresh: bool,
     // Table data display
@@ -242,11 +205,11 @@ impl MyApp {
             history_items: Vec::new(),
             connections: Vec::new(),
             show_add_connection: false,
-            new_connection: ConnectionConfig::default(),
+            new_connection: models::structs::ConnectionConfig::default(),
             db_pool: None,
             connection_pools: HashMap::new(), // Start with empty cache
             show_edit_connection: false,
-            edit_connection: ConnectionConfig::default(),
+            edit_connection: models::structs::ConnectionConfig::default(),
             needs_refresh: false,
             current_table_data: Vec::new(),
             current_table_headers: Vec::new(),
@@ -365,7 +328,7 @@ impl MyApp {
             .await;
             
             if let Ok(Some((id, name, host, port, username, password, database_name, connection_type))) = connection_result {
-                let connection = ConnectionConfig {
+                let connection = models::structs::ConnectionConfig {
                     id: Some(id),
                     name,
                     host,
@@ -421,7 +384,7 @@ impl MyApp {
         }
     }
 
-    async fn create_database_pool(connection: &ConnectionConfig) -> Option<DatabasePool> {
+    async fn create_database_pool(connection: &models::structs::ConnectionConfig) -> Option<DatabasePool> {
         match connection.connection_type {
             models::enums::DatabaseType::MySQL => {
                 let encoded_username = modules::url_encode(&connection.username);
@@ -511,7 +474,7 @@ impl MyApp {
 
     async fn fetch_and_cache_all_data(
         connection_id: i64,
-        connection: &ConnectionConfig,
+        connection: &models::structs::ConnectionConfig,
         pool: &DatabasePool,
         cache_pool: &SqlitePool,
     ) -> bool {
@@ -896,7 +859,7 @@ impl MyApp {
 
     fn create_connections_folder_structure(&self) -> Vec<models::structs::TreeNode> {
         // Group connections by custom folder first, then by database type
-        let mut folder_groups: std::collections::HashMap<String, Vec<&ConnectionConfig>> = std::collections::HashMap::new();
+        let mut folder_groups: std::collections::HashMap<String, Vec<&models::structs::ConnectionConfig>> = std::collections::HashMap::new();
         
         // Group connections by custom folder
         for conn in &self.connections {
@@ -2529,7 +2492,7 @@ impl MyApp {
                                     self.refresh_connections_tree();
                                 }
                                 
-                                self.new_connection = ConnectionConfig::default();
+                                self.new_connection = models::structs::ConnectionConfig::default();
                                 self.test_connection_status = None;
                                 self.test_connection_in_progress = false;
                                 self.show_add_connection = false;
@@ -2584,7 +2547,7 @@ impl MyApp {
             if is_edit_mode {
                 self.show_edit_connection = false;
             } else {
-                self.new_connection = ConnectionConfig::default();
+                self.new_connection = models::structs::ConnectionConfig::default();
                 self.test_connection_status = None;
                 self.test_connection_in_progress = false;
                 self.show_add_connection = false;
@@ -2616,7 +2579,7 @@ impl MyApp {
             if let Ok(rows) = connections_result {
 
                 self.connections = rows.into_iter().map(|(id, name, host, port, username, password, database_name, connection_type, folder)| {
-                    ConnectionConfig {
+                    models::structs::ConnectionConfig {
                         id: Some(id),
                         name,
                         host,
@@ -2641,7 +2604,7 @@ impl MyApp {
     }
 
 
-    fn save_connection_to_database(&self, connection: &ConnectionConfig) -> bool {
+    fn save_connection_to_database(&self, connection: &models::structs::ConnectionConfig) -> bool {
         if let Some(ref pool) = self.db_pool {
             let pool_clone = pool.clone();
             let connection = connection.clone();
@@ -2990,7 +2953,7 @@ impl MyApp {
         }
     }
 
-    fn test_database_connection(&self, connection: &ConnectionConfig) -> (bool, String) {
+    fn test_database_connection(&self, connection: &models::structs::ConnectionConfig) -> (bool, String) {
 
         // ping the host first
         if !helpers::ping_host(&connection.host) {
@@ -3099,7 +3062,7 @@ impl MyApp {
         })
     }
 
-    fn update_connection_in_database(&self, connection: &ConnectionConfig) -> bool {
+    fn update_connection_in_database(&self, connection: &models::structs::ConnectionConfig) -> bool {
         if let Some(ref pool) = self.db_pool {
             if let Some(id) = connection.id {
                 let pool_clone = pool.clone();
@@ -4566,7 +4529,7 @@ impl MyApp {
         })
     }
 
-    fn fetch_columns_from_database(&self, _connection_id: i64, database_name: &str, table_name: &str, connection: &ConnectionConfig) -> Option<Vec<(String, String)>> {
+    fn fetch_columns_from_database(&self, _connection_id: i64, database_name: &str, table_name: &str, connection: &models::structs::ConnectionConfig) -> Option<Vec<(String, String)>> {
         
         // Create a new runtime for the database query
         let rt = tokio::runtime::Runtime::new().ok()?;
@@ -4701,7 +4664,7 @@ impl MyApp {
         })
     }
 
-    fn load_mysql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode) {
+    fn load_mysql_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
 
         println!("Loading MySQL structure for connection ID: {}", connection_id);
         
@@ -4757,7 +4720,7 @@ impl MyApp {
         // For now, we'll rely on the expansion mechanism to load databases when needed
     }
 
-    fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode) {
+    fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
         
         // Create basic structure for PostgreSQL
         let mut main_children = Vec::new();
@@ -4775,7 +4738,7 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode) {
+    fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
         
         // Create basic structure for SQLite
         let mut main_children = Vec::new();
@@ -4802,7 +4765,7 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_redis_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode) {
+    fn load_redis_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
         // Check if we have cached databases
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
             println!("🔍 Found cached Redis databases: {:?}", databases);
@@ -4872,7 +4835,7 @@ impl MyApp {
         }
     }
 
-    fn load_mysql_folder_content(&mut self, connection_id: i64, connection: &ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
+    fn load_mysql_folder_content(&mut self, connection_id: i64, connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
         // Get database name from node or connection default
         let database_name = node.database_name.as_ref().unwrap_or(&connection.database);
         
@@ -4978,12 +4941,12 @@ impl MyApp {
         println!("Loaded {} {} items for MySQL", node.children.len(), table_type);
     }
 
-    fn load_postgresql_folder_content(&mut self, _connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode, _folder_type: models::enums::NodeType) {
+    fn load_postgresql_folder_content(&mut self, _connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, _folder_type: models::enums::NodeType) {
         // Placeholder for PostgreSQL folder content loading
         node.children = vec![models::structs::TreeNode::new("PostgreSQL folder content not implemented yet".to_string(), models::enums::NodeType::Column)];
     }
 
-    fn load_sqlite_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
+    fn load_sqlite_folder_content(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
         println!("Loading {:?} content for SQLite", folder_type);
         
         // Try to get from cache first
@@ -5073,7 +5036,7 @@ impl MyApp {
         println!("Loaded {} items into {:?} folder for SQLite", node.children.len(), folder_type);
     }
 
-    fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
+    fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
         println!("Loading {:?} content for Redis", folder_type);
         
         // Redis doesn't have traditional folder structures like SQL databases
@@ -5128,7 +5091,7 @@ impl MyApp {
         println!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
     }
 
-    fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &ConnectionConfig, database_name: &str) -> Vec<models::structs::TreeNode> {
+    fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &models::structs::ConnectionConfig, database_name: &str) -> Vec<models::structs::TreeNode> {
         // First try to get from cache
         if let Some(cached_columns) = self.get_columns_from_cache(connection_id, database_name, table_name) {
             if !cached_columns.is_empty() {
@@ -5742,7 +5705,7 @@ impl MyApp {
         }
     }
 
-    fn execute_table_query_sync(&mut self, connection_id: i64, _connection: &ConnectionConfig, query: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    fn execute_table_query_sync(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, query: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
         println!("Executing query synchronously: {}", query);
         
         // Create a new runtime specifically for this query execution
@@ -7052,7 +7015,7 @@ impl MyApp {
                     Ok(rows) => {
                         let mut history_items = Vec::new();
                         for row in rows {
-                            history_items.push(HistoryItem {
+                            history_items.push(models::structs::HistoryItem {
                                 id: Some(row.0),
                                 query: row.1,
                                 connection_id: row.2,

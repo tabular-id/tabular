@@ -1,4 +1,6 @@
-use crate::models::enums::NodeType;
+use serde::{Deserialize, Serialize};
+
+use crate::models::{self, enums::NodeType};
 
 
 #[derive(Clone)]
@@ -107,3 +109,43 @@ impl Default for AdvancedEditor {
 }
 
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HistoryItem {
+    pub id: Option<i64>,
+    pub query: String,
+    pub connection_id: i64,
+    pub connection_name: String,
+    pub executed_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConnectionConfig {
+    pub id: Option<i64>,
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub username: String,
+    pub password: String,
+    pub database: String,
+    pub connection_type: models::enums::DatabaseType,
+    pub folder: Option<String>, // Custom folder name
+}
+
+
+
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            host: "localhost".to_string(),
+            port: "3306".to_string(),
+            username: String::new(),
+            password: String::new(),
+            database: String::new(),
+            connection_type: models::enums::DatabaseType::MySQL,
+            folder: None, // No custom folder by default
+        }
+    }
+}
