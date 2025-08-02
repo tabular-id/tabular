@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum NodeType {
     #[allow(dead_code)]
@@ -5,7 +7,7 @@ pub enum NodeType {
     Table,
     Column,
     Query,
-    HistoryItem,
+    QueryHistItem,
     Connection,
     DatabasesFolder,
     TablesFolder,
@@ -30,4 +32,23 @@ pub enum NodeType {
     RedisFolder,       // Folder untuk koneksi Redis
     CustomFolder,      // Folder custom yang bisa dinamai user
     QueryFolder,       // Folder untuk mengelompokkan query files
+}
+
+#[derive(Debug, Clone)]
+pub enum BackgroundTask {
+    RefreshConnection { connection_id: i64 },
+}
+
+#[derive(Debug, Clone)]
+pub enum BackgroundResult {
+    RefreshComplete { connection_id: i64, success: bool },
+}
+
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+pub enum DatabaseType {
+    MySQL,
+    PostgreSQL,
+    SQLite,
+    Redis,
 }

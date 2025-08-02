@@ -12,6 +12,7 @@ mod helpers;
 mod sqlite;
 mod export;
 mod models;
+mod modules;
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
@@ -57,15 +58,6 @@ fn load_icon() -> Option<egui::IconData> {
 
 
 
-#[derive(Clone, Debug)]
-struct QueryTab {
-    title: String,
-    content: String,
-    file_path: Option<String>,
-    is_saved: bool,
-    is_modified: bool,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HistoryItem {
     id: Option<i64>,
@@ -84,17 +76,10 @@ struct ConnectionConfig {
     username: String,
     password: String,
     database: String,
-    connection_type: DatabaseType,
+    connection_type: models::enums::DatabaseType,
     folder: Option<String>, // Custom folder name
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
-enum DatabaseType {
-    MySQL,
-    PostgreSQL,
-    SQLite,
-    Redis,
-}
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
@@ -106,7 +91,7 @@ impl Default for ConnectionConfig {
             username: String::new(),
             password: String::new(),
             database: String::new(),
-            connection_type: DatabaseType::MySQL,
+            connection_type: models::enums::DatabaseType::MySQL,
             folder: None, // No custom folder by default
         }
     }
@@ -121,44 +106,6 @@ enum DatabasePool {
     PostgreSQL(Arc<PgPool>),
     SQLite(Arc<SqlitePool>),
     Redis(Arc<ConnectionManager>),
-}
-
-#[derive(Clone)]
-struct AdvancedEditor {
-    show_line_numbers: bool,
-    theme: egui_code_editor::ColorTheme,
-    font_size: f32,
-    #[allow(dead_code)]
-    tab_size: usize,
-    #[allow(dead_code)]
-    auto_indent: bool,
-    #[allow(dead_code)]
-    show_whitespace: bool,
-    word_wrap: bool,
-    find_text: String,
-    replace_text: String,
-    show_find_replace: bool,
-    case_sensitive: bool,
-    use_regex: bool,
-}
-
-impl Default for AdvancedEditor {
-    fn default() -> Self {
-        Self {
-            show_line_numbers: true,
-            theme: egui_code_editor::ColorTheme::GITHUB_DARK,
-            font_size: 14.0,
-            tab_size: 4,
-            auto_indent: true,
-            show_whitespace: false,
-            word_wrap: false,
-            find_text: String::new(),
-            replace_text: String::new(),
-            show_find_replace: false,
-            case_sensitive: false,
-            use_regex: false,
-        }
-    }
 }
 
 struct MyApp {
@@ -198,12 +145,12 @@ struct MyApp {
     test_connection_status: Option<(bool, String)>, // (success, message)
     test_connection_in_progress: bool,
     // Background processing channels
-    background_sender: Option<Sender<BackgroundTask>>,
-    background_receiver: Option<Receiver<BackgroundResult>>,
+    background_sender: Option<Sender<models::enums::BackgroundTask>>,
+    background_receiver: Option<Receiver<models::enums::BackgroundResult>>,
     // Background refresh status tracking
     refreshing_connections: std::collections::HashSet<i64>,
     // Query tab system
-    query_tabs: Vec<QueryTab>,
+    query_tabs: Vec<models::structs::QueryTab>,
     active_tab_index: usize,
     next_tab_id: usize,
     // Save dialog
@@ -217,7 +164,7 @@ struct MyApp {
     error_message: String,
     show_error_message: bool,
     // Advanced Editor Configuration
-    advanced_editor: AdvancedEditor,
+    advanced_editor: models::structs::AdvancedEditor,
     // Selected text for executing only selected queries
     selected_text: String,
     // Command Palette
@@ -251,15 +198,7 @@ struct ExpansionRequest {
     database_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-enum BackgroundTask {
-    RefreshConnection { connection_id: i64 },
-}
 
-#[derive(Debug, Clone)]
-enum BackgroundResult {
-    RefreshComplete { connection_id: i64, success: bool },
-}
 
 impl MyApp {
     fn get_app_data_dir() -> std::path::PathBuf {
@@ -288,24 +227,11 @@ impl MyApp {
         Ok(())
     }
 
-    fn url_encode(input: &str) -> String {
-        input
-            .replace("%", "%25")  // Must be first
-            .replace("#", "%23")
-            .replace("&", "%26")
-            .replace("@", "%40")
-            .replace("?", "%3F")
-            .replace("=", "%3D")
-            .replace("+", "%2B")
-            .replace(" ", "%20")
-            .replace(":", "%3A")
-            .replace("/", "%2F")
-    }
 
     fn new() -> Self {
         // Create background processing channels
-        let (background_sender, background_receiver) = mpsc::channel::<BackgroundTask>();
-        let (result_sender, result_receiver) = mpsc::channel::<BackgroundResult>();
+        let (background_sender, background_receiver) = mpsc::channel::<models::enums::BackgroundTask>();
+        let (result_sender, result_receiver) = mpsc::channel::<models::enums::BackgroundResult>();
 
         let mut app = Self {
             editor_text: String::new(),
@@ -348,7 +274,7 @@ impl MyApp {
             auto_execute_after_connection: false,
             error_message: String::new(),
             show_error_message: false,
-            advanced_editor: AdvancedEditor::default(),
+            advanced_editor: models::structs::AdvancedEditor::default(),
             selected_text: String::new(),
             show_command_palette: false,
             command_palette_input: String::new(),
@@ -391,7 +317,7 @@ impl MyApp {
         app
     }
 
-    fn start_background_worker(&self, task_receiver: Receiver<BackgroundTask>, result_sender: Sender<BackgroundResult>) {
+    fn start_background_worker(&self, task_receiver: Receiver<models::enums::BackgroundTask>, result_sender: Sender<models::enums::BackgroundResult>) {
         // Get the current db_pool for cache operations
         let db_pool = self.db_pool.clone();
         
@@ -404,7 +330,7 @@ impl MyApp {
             
             while let Ok(task) = task_receiver.recv() {
                 match task {
-                    BackgroundTask::RefreshConnection { connection_id } => {
+                    models::enums::BackgroundTask::RefreshConnection { connection_id } => {
                         let success = rt.block_on(async {
                             Self::refresh_connection_background_async(
                                 connection_id,
@@ -412,7 +338,7 @@ impl MyApp {
                             ).await
                         });
                         
-                        let _ = result_sender.send(BackgroundResult::RefreshComplete {
+                        let _ = result_sender.send(models::enums::BackgroundResult::RefreshComplete {
                             connection_id,
                             success,
                         });
@@ -448,10 +374,10 @@ impl MyApp {
                     password,
                     database: database_name,
                     connection_type: match connection_type.as_str() {
-                        "MySQL" => DatabaseType::MySQL,
-                        "PostgreSQL" => DatabaseType::PostgreSQL,
-                        "Redis" => DatabaseType::Redis,
-                        _ => DatabaseType::SQLite,
+                        "MySQL" => models::enums::DatabaseType::MySQL,
+                        "PostgreSQL" => models::enums::DatabaseType::PostgreSQL,
+                        "Redis" => models::enums::DatabaseType::Redis,
+                        _ => models::enums::DatabaseType::SQLite,
                     },
                     folder: None, // Will be loaded from database later
                 };
@@ -497,9 +423,9 @@ impl MyApp {
 
     async fn create_database_pool(connection: &ConnectionConfig) -> Option<DatabasePool> {
         match connection.connection_type {
-            DatabaseType::MySQL => {
-                let encoded_username = Self::url_encode(&connection.username);
-                let encoded_password = Self::url_encode(&connection.password);
+            models::enums::DatabaseType::MySQL => {
+                let encoded_username = modules::url_encode(&connection.username);
+                let encoded_password = modules::url_encode(&connection.password);
                 let connection_string = format!(
                     "mysql://{}:{}@{}:{}/{}",
                     encoded_username, encoded_password, connection.host, connection.port, connection.database
@@ -521,7 +447,7 @@ impl MyApp {
                     }
                 }
             }
-            DatabaseType::PostgreSQL => {
+            models::enums::DatabaseType::PostgreSQL => {
                 let connection_string = format!(
                     "postgresql://{}:{}@{}:{}/{}",
                     connection.username, connection.password, connection.host, connection.port, connection.database
@@ -543,7 +469,7 @@ impl MyApp {
                     }
                 }
             }
-            DatabaseType::SQLite => {
+            models::enums::DatabaseType::SQLite => {
                 let connection_string = format!("sqlite:{}", connection.host);
                 
                 
@@ -563,7 +489,7 @@ impl MyApp {
                     }
                 }
             }
-            DatabaseType::Redis => {
+            models::enums::DatabaseType::Redis => {
                 let connection_string = if connection.password.is_empty() {
                     format!("redis://{}:{}", connection.host, connection.port)
                 } else {
@@ -590,28 +516,28 @@ impl MyApp {
         cache_pool: &SqlitePool,
     ) -> bool {
         match &connection.connection_type {
-            DatabaseType::MySQL => {
+            models::enums::DatabaseType::MySQL => {
                 if let DatabasePool::MySQL(mysql_pool) = pool {
                     Self::fetch_mysql_data(connection_id, mysql_pool, cache_pool).await
                 } else {
                     false
                 }
             }
-            DatabaseType::SQLite => {
+            models::enums::DatabaseType::SQLite => {
                 if let DatabasePool::SQLite(sqlite_pool) = pool {
                     sqlite::fetch_data(connection_id, sqlite_pool, cache_pool).await
                 } else {
                     false
                 }
             }
-            DatabaseType::PostgreSQL => {
+            models::enums::DatabaseType::PostgreSQL => {
                 if let DatabasePool::PostgreSQL(postgres_pool) = pool {
                     Self::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
                 } else {
                     false
                 }
             }
-            DatabaseType::Redis => {
+            models::enums::DatabaseType::Redis => {
                 if let DatabasePool::Redis(redis_manager) = pool {
                     Self::fetch_redis_data(connection_id, redis_manager, cache_pool).await
                 } else {
@@ -1000,16 +926,16 @@ impl MyApp {
                 if let Some(id) = conn.id {
                     let node = models::structs::TreeNode::new_connection(conn.name.clone(), id);
                     match conn.connection_type {
-                        DatabaseType::MySQL => {
+                        models::enums::DatabaseType::MySQL => {
                             mysql_connections.push(node);
                         },
-                        DatabaseType::PostgreSQL => {
+                        models::enums::DatabaseType::PostgreSQL => {
                             postgresql_connections.push(node);
                         },
-                        DatabaseType::SQLite => {
+                        models::enums::DatabaseType::SQLite => {
                             sqlite_connections.push(node);
                         },
-                        DatabaseType::Redis => {
+                        models::enums::DatabaseType::Redis => {
                             redis_connections.push(node);
                         },
                     }
@@ -1080,7 +1006,7 @@ impl MyApp {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         
-        let new_tab = QueryTab {
+        let new_tab = models::structs::QueryTab {
             title,
             content: content.clone(),
             file_path: None,
@@ -1425,10 +1351,10 @@ impl MyApp {
                                 let connection_text = format!("{} ({})", 
                                     connection.name, 
                                     match connection.connection_type {
-                                        DatabaseType::MySQL => "MySQL",
-                                        DatabaseType::PostgreSQL => "PostgreSQL",
-                                        DatabaseType::SQLite => "SQLite",
-                                        DatabaseType::Redis => "Redis",
+                                        models::enums::DatabaseType::MySQL => "MySQL",
+                                        models::enums::DatabaseType::PostgreSQL => "PostgreSQL",
+                                        models::enums::DatabaseType::SQLite => "SQLite",
+                                        models::enums::DatabaseType::Redis => "Redis",
                                     }
                                 );
                                 
@@ -1622,7 +1548,7 @@ impl MyApp {
         }
         
         // Create new tab for the file
-        let new_tab = QueryTab {
+        let new_tab = models::structs::QueryTab {
             title: filename,
             content: content.clone(),
             file_path: Some(file_path.to_string()),
@@ -1733,7 +1659,7 @@ impl MyApp {
                     if let Some(connection) = self.connections.iter().find(|c| c.id == Some(expansion_req.connection_id)) {
                         println!("✅ Found connection: {} (type: {:?})", connection.name, connection.connection_type);
                         
-                        if connection.connection_type == DatabaseType::Redis {
+                        if connection.connection_type == models::enums::DatabaseType::Redis {
                             println!("🔑 Processing Redis database expansion");
                             
                             // Find the database node and load its keys
@@ -1811,7 +1737,7 @@ impl MyApp {
                 .map(|conn| &conn.connection_type);
             
             match connection_type {
-                Some(DatabaseType::Redis) => {
+                Some(models::enums::DatabaseType::Redis) => {
                     
                     // Check if this is a Redis key (has specific Redis data types in the tree structure)
                     // For Redis keys, we need to find which database they belong to
@@ -2106,7 +2032,7 @@ impl MyApp {
                     models::enums::NodeType::Table => "📋",
                     models::enums::NodeType::Column => "📄",
                     models::enums::NodeType::Query => "🔍",
-                    models::enums::NodeType::HistoryItem => "📜",
+                    models::enums::NodeType::QueryHistItem => "📜",
                     models::enums::NodeType::Connection => "", // Icon already included in name
                     models::enums::NodeType::DatabasesFolder => "📁",
                     models::enums::NodeType::TablesFolder => "📋",
@@ -2384,7 +2310,7 @@ impl MyApp {
                     models::enums::NodeType::Table => "📋",
                     models::enums::NodeType::Column => "📄",
                     models::enums::NodeType::Query => "🔍",
-                    models::enums::NodeType::HistoryItem => "📜",
+                    models::enums::NodeType::QueryHistItem => "📜",
                     models::enums::NodeType::Connection => "🔗",
                     models::enums::NodeType::DatabasesFolder => "📁",
                     models::enums::NodeType::TablesFolder => "📋",
@@ -2436,7 +2362,7 @@ impl MyApp {
                                 *editor_text = format!("-- {}\nSELECT * FROM table_name;", node.name);
                             }
                         },
-                        models::enums::NodeType::HistoryItem => {
+                        models::enums::NodeType::QueryHistItem => {
                             // Store the display name for processing later
                             *editor_text = node.name.clone();
                         },
@@ -2518,16 +2444,16 @@ impl MyApp {
                             ui.label("Database Type:");
                             egui::ComboBox::from_label("")
                                 .selected_text(match connection_data.connection_type {
-                                    DatabaseType::MySQL => "MySQL",
-                                    DatabaseType::PostgreSQL => "PostgreSQL",
-                                    DatabaseType::SQLite => "SQLite",
-                                    DatabaseType::Redis => "Redis",
+                                    models::enums::DatabaseType::MySQL => "MySQL",
+                                    models::enums::DatabaseType::PostgreSQL => "PostgreSQL",
+                                    models::enums::DatabaseType::SQLite => "SQLite",
+                                    models::enums::DatabaseType::Redis => "Redis",
                                 })
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut connection_data.connection_type, DatabaseType::MySQL, "MySQL");
-                                    ui.selectable_value(&mut connection_data.connection_type, DatabaseType::PostgreSQL, "PostgreSQL");
-                                    ui.selectable_value(&mut connection_data.connection_type, DatabaseType::SQLite, "SQLite");
-                                    ui.selectable_value(&mut connection_data.connection_type, DatabaseType::Redis, "Redis");
+                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::MySQL, "MySQL");
+                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::PostgreSQL, "PostgreSQL");
+                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::SQLite, "SQLite");
+                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::Redis, "Redis");
                                 });
                             ui.end_row();
 
@@ -2699,10 +2625,10 @@ impl MyApp {
                         password,
                         database: database_name,
                         connection_type: match connection_type.as_str() {
-                            "MySQL" => DatabaseType::MySQL,
-                            "PostgreSQL" => DatabaseType::PostgreSQL,
-                            "Redis" => DatabaseType::Redis,
-                            _ => DatabaseType::SQLite,
+                            "MySQL" => models::enums::DatabaseType::MySQL,
+                            "PostgreSQL" => models::enums::DatabaseType::PostgreSQL,
+                            "Redis" => models::enums::DatabaseType::Redis,
+                            _ => models::enums::DatabaseType::SQLite,
                         },
                         folder,
                     }
@@ -2904,10 +2830,10 @@ impl MyApp {
             if let Some(table_name) = self.find_selected_table_name(connection_id) {
                 // Generate ALTER TABLE template based on database type
                 let alter_template = match connection.connection_type {
-                    DatabaseType::MySQL => self.generate_mysql_alter_table_template(&table_name),
-                    DatabaseType::PostgreSQL => self.generate_postgresql_alter_table_template(&table_name),
-                    DatabaseType::SQLite => self.generate_sqlite_alter_table_template(&table_name),
-                    DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database".to_string(),
+                    models::enums::DatabaseType::MySQL => self.generate_mysql_alter_table_template(&table_name),
+                    models::enums::DatabaseType::PostgreSQL => self.generate_postgresql_alter_table_template(&table_name),
+                    models::enums::DatabaseType::SQLite => self.generate_sqlite_alter_table_template(&table_name),
+                    models::enums::DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database".to_string(),
                 };
                 
                 // Set the ALTER TABLE template in the editor
@@ -2917,10 +2843,10 @@ impl MyApp {
             } else {
                 // If no specific table is selected, show a generic template
                 let alter_template = match connection.connection_type {
-                    DatabaseType::MySQL => "-- MySQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  MODIFY COLUMN existing_column INT,\n  DROP COLUMN old_column;".to_string(),
-                    DatabaseType::PostgreSQL => "-- PostgreSQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  ALTER COLUMN existing_column TYPE INTEGER,\n  DROP COLUMN old_column;".to_string(),
-                    DatabaseType::SQLite => "-- SQLite ALTER TABLE template\n-- Note: SQLite has limited ALTER TABLE support\nALTER TABLE your_table_name\n  ADD COLUMN new_column TEXT;".to_string(),
-                    DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database\n-- Use Redis commands like SET, GET, HSET, etc.".to_string(),
+                    models::enums::DatabaseType::MySQL => "-- MySQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  MODIFY COLUMN existing_column INT,\n  DROP COLUMN old_column;".to_string(),
+                    models::enums::DatabaseType::PostgreSQL => "-- PostgreSQL ALTER TABLE template\nALTER TABLE your_table_name\n  ADD COLUMN new_column VARCHAR(255),\n  ALTER COLUMN existing_column TYPE INTEGER,\n  DROP COLUMN old_column;".to_string(),
+                    models::enums::DatabaseType::SQLite => "-- SQLite ALTER TABLE template\n-- Note: SQLite has limited ALTER TABLE support\nALTER TABLE your_table_name\n  ADD COLUMN new_column TEXT;".to_string(),
+                    models::enums::DatabaseType::Redis => "-- Redis does not support ALTER TABLE operations\n-- Redis is a key-value store, not a relational database\n-- Use Redis commands like SET, GET, HSET, etc.".to_string(),
                 };
                 
                 self.editor_text = alter_template;
@@ -3075,9 +3001,9 @@ impl MyApp {
         
         rt.block_on(async {
             match connection.connection_type {
-                DatabaseType::MySQL => {
-                    let encoded_username = Self::url_encode(&connection.username);
-                    let encoded_password = Self::url_encode(&connection.password);
+                models::enums::DatabaseType::MySQL => {
+                    let encoded_username = modules::url_encode(&connection.username);
+                    let encoded_password = modules::url_encode(&connection.password);
                     let connection_string = format!(
                         "mysql://{}:{}@{}:{}/{}",
                         encoded_username, encoded_password, connection.host, connection.port, connection.database
@@ -3099,7 +3025,7 @@ impl MyApp {
                         Err(e) => (false, format!("MySQL connection failed: {}", e)),
                     }
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     let connection_string = format!(
                         "postgresql://{}:{}@{}:{}/{}",
                         connection.username, connection.password, connection.host, connection.port, connection.database
@@ -3121,7 +3047,7 @@ impl MyApp {
                         Err(e) => (false, format!("PostgreSQL connection failed: {}", e)),
                     }
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     let connection_string = format!("sqlite:{}", connection.host);
                     
                     match SqlitePoolOptions::new()
@@ -3140,7 +3066,7 @@ impl MyApp {
                         Err(e) => (false, format!("SQLite connection failed: {}", e)),
                     }
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     let connection_string = if connection.password.is_empty() {
                         format!("redis://{}:{}", connection.host, connection.port)
                     } else {
@@ -3492,7 +3418,7 @@ impl MyApp {
         
         // Send background task instead of blocking refresh
         if let Some(sender) = &self.background_sender {
-            if let Err(e) = sender.send(BackgroundTask::RefreshConnection { connection_id }) {
+            if let Err(e) = sender.send(models::enums::BackgroundTask::RefreshConnection { connection_id }) {
                 println!("Failed to send background refresh task: {}", e);
                 // Fallback to synchronous refresh if background thread is not available
                 self.refreshing_connections.remove(&connection_id);
@@ -3530,27 +3456,27 @@ impl MyApp {
                 
                 // Fetch different types of tables based on database type
                 let table_types = match connection.connection_type {
-                    DatabaseType::MySQL => vec!["table", "view", "procedure", "function", "trigger", "event"],
-                    DatabaseType::PostgreSQL => vec!["table", "view"], // Add PostgreSQL support later
-                    DatabaseType::SQLite => vec!["table", "view"],
-                    DatabaseType::Redis => vec!["info_section", "redis_keys"], // Redis specific types
+                    models::enums::DatabaseType::MySQL => vec!["table", "view", "procedure", "function", "trigger", "event"],
+                    models::enums::DatabaseType::PostgreSQL => vec!["table", "view"], // Add PostgreSQL support later
+                    models::enums::DatabaseType::SQLite => vec!["table", "view"],
+                    models::enums::DatabaseType::Redis => vec!["info_section", "redis_keys"], // Redis specific types
                 };
                 
                 let mut all_tables = Vec::new();
                 
                 for table_type in table_types {
                     let tables_result = match connection.connection_type {
-                        DatabaseType::MySQL => {
+                        models::enums::DatabaseType::MySQL => {
                             self.fetch_tables_from_mysql_connection(connection_id, database_name, table_type)
                         },
-                        DatabaseType::SQLite => {
+                        models::enums::DatabaseType::SQLite => {
                             self.fetch_tables_from_sqlite_connection(connection_id, table_type)
                         },
-                        DatabaseType::PostgreSQL => {
+                        models::enums::DatabaseType::PostgreSQL => {
                             // TODO: Add PostgreSQL support
                             None
                         },
-                        DatabaseType::Redis => {
+                        models::enums::DatabaseType::Redis => {
                             self.fetch_tables_from_redis_connection(connection_id, database_name, table_type)
                         },
                     };
@@ -3627,9 +3553,9 @@ impl MyApp {
         // If not cached, create a new connection pool
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             match connection.connection_type {
-                DatabaseType::MySQL => {
-                    let encoded_username = Self::url_encode(&connection.username);
-                    let encoded_password = Self::url_encode(&connection.password);
+                models::enums::DatabaseType::MySQL => {
+                    let encoded_username = modules::url_encode(&connection.username);
+                    let encoded_password = modules::url_encode(&connection.password);
                     let connection_string = format!(
                         "mysql://{}:{}@{}:{}/{}",
                         encoded_username, encoded_password, connection.host, connection.port, connection.database
@@ -3665,7 +3591,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     let connection_string = format!(
                         "postgresql://{}:{}@{}:{}/{}",
                         connection.username, connection.password, connection.host, connection.port, connection.database
@@ -3694,7 +3620,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     let connection_string = format!("sqlite:{}", connection.host);
                     
                     // Configure SQLite pool with proper settings
@@ -3720,7 +3646,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     let connection_string = if connection.password.is_empty() {
                         format!("redis://{}:{}", connection.host, connection.port)
                     } else {
@@ -3790,16 +3716,16 @@ impl MyApp {
             
             // Create the main structure based on database type
             match connection.connection_type {
-                DatabaseType::MySQL => {
+                models::enums::DatabaseType::MySQL => {
                     self.load_mysql_structure(connection_id, &connection, node);
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     self.load_postgresql_structure(connection_id, &connection, node);
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     self.load_sqlite_structure(connection_id, &connection, node);
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     self.load_redis_structure(connection_id, &connection, node);
                 }
             }
@@ -3814,7 +3740,7 @@ impl MyApp {
             let mut main_children = Vec::new();
             
             match connection.connection_type {
-                DatabaseType::MySQL => {
+                models::enums::DatabaseType::MySQL => {
                     // 1. Databases folder
                     let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
                     databases_folder.connection_id = Some(connection_id);
@@ -3907,7 +3833,7 @@ impl MyApp {
                     main_children.push(databases_folder);
                     main_children.push(dba_folder);
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     // Similar structure for PostgreSQL
                     let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
                     databases_folder.connection_id = Some(connection_id);
@@ -3936,7 +3862,7 @@ impl MyApp {
                     
                     main_children.push(databases_folder);
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     // SQLite structure - single database
                     let mut tables_folder = models::structs::TreeNode::new("Tables".to_string(), models::enums::NodeType::TablesFolder);
                     tables_folder.connection_id = Some(connection_id);
@@ -3950,7 +3876,7 @@ impl MyApp {
                     
                     main_children = vec![tables_folder, views_folder];
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     // Redis structure with databases
                     self.build_redis_structure_from_cache(connection_id, node, databases);
                     return;
@@ -4041,7 +3967,7 @@ impl MyApp {
     fn load_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut models::structs::TreeNode) {
         // Check connection type to handle Redis differently
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-            if connection.connection_type == DatabaseType::Redis {
+            if connection.connection_type == models::enums::DatabaseType::Redis {
                 self.load_redis_databases_for_folder(connection_id, databases_folder);
                 return;
             }
@@ -4144,10 +4070,10 @@ impl MyApp {
         // Find the connection to determine type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let sample_databases = match connection.connection_type {
-                DatabaseType::MySQL => vec!["information_schema".to_string(), "sakila".to_string(), "world".to_string(), "test".to_string()],
-                DatabaseType::PostgreSQL => vec!["postgres".to_string(), "template1".to_string(), "dvdrental".to_string()],
-                DatabaseType::SQLite => vec!["main".to_string()],
-                DatabaseType::Redis => vec!["redis".to_string(), "info".to_string()],
+                models::enums::DatabaseType::MySQL => vec!["information_schema".to_string(), "sakila".to_string(), "world".to_string(), "test".to_string()],
+                models::enums::DatabaseType::PostgreSQL => vec!["postgres".to_string(), "template1".to_string(), "dvdrental".to_string()],
+                models::enums::DatabaseType::SQLite => vec!["main".to_string()],
+                models::enums::DatabaseType::Redis => vec!["redis".to_string(), "info".to_string()],
             };
             
             // Clear loading message
@@ -4156,7 +4082,7 @@ impl MyApp {
             // Add sample databases
             for db_name in sample_databases {
                 // Skip system databases for display
-                if matches!(connection.connection_type, DatabaseType::MySQL) && 
+                if matches!(connection.connection_type, models::enums::DatabaseType::MySQL) && 
                    ["information_schema", "performance_schema", "mysql", "sys"].contains(&db_name.as_str()) {
                     continue;
                 }
@@ -4183,7 +4109,7 @@ impl MyApp {
                 views_folder.is_loaded = false;
                 db_children.push(views_folder);
                 
-                if matches!(connection.connection_type, DatabaseType::MySQL) {
+                if matches!(connection.connection_type, models::enums::DatabaseType::MySQL) {
                     // Stored Procedures folder
                     let mut sp_folder = models::structs::TreeNode::new("Stored Procedures".to_string(), models::enums::NodeType::StoredProceduresFolder);
                     sp_folder.connection_id = Some(connection_id);
@@ -4652,10 +4578,10 @@ impl MyApp {
         
         rt.block_on(async {
             match connection_clone.connection_type {
-                DatabaseType::MySQL => {
+                models::enums::DatabaseType::MySQL => {
                     // Create MySQL connection
-                    let encoded_username = MyApp::url_encode(&connection_clone.username);
-                    let encoded_password = MyApp::url_encode(&connection_clone.password);
+                    let encoded_username = modules::url_encode(&connection_clone.username);
+                    let encoded_password = modules::url_encode(&connection_clone.password);
                     let connection_string = format!(
                         "mysql://{}:{}@{}:{}/{}",
                         encoded_username, encoded_password, connection_clone.host, connection_clone.port, database_name
@@ -4691,7 +4617,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     // Create SQLite connection
                     let connection_string = format!("sqlite:{}", connection_clone.host);
                     
@@ -4725,7 +4651,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     // Create PostgreSQL connection
                     let connection_string = format!(
                         "postgresql://{}:{}@{}:{}/{}",
@@ -4761,7 +4687,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     // Redis doesn't have traditional tables/columns
                     // Return some generic "columns" for Redis key-value structure
                     Some(vec![
@@ -4926,16 +4852,16 @@ impl MyApp {
             
             
             match connection.connection_type {
-                DatabaseType::MySQL => {
+                models::enums::DatabaseType::MySQL => {
                     self.load_mysql_folder_content(connection_id, &connection, node, folder_type);
                 },
-                DatabaseType::PostgreSQL => {
+                models::enums::DatabaseType::PostgreSQL => {
                     self.load_postgresql_folder_content(connection_id, &connection, node, folder_type);
                 },
-                DatabaseType::SQLite => {
+                models::enums::DatabaseType::SQLite => {
                     self.load_sqlite_folder_content(connection_id, &connection, node, folder_type);
                 },
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     self.load_redis_folder_content(connection_id, &connection, node, folder_type);
                 }
             }
@@ -5457,10 +5383,10 @@ impl MyApp {
             
         if let Some(conn_type) = connection_type {
             match conn_type {
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     self.search_redis_keys(connection_id, search_text);
                 }
-                DatabaseType::MySQL | DatabaseType::PostgreSQL | DatabaseType::SQLite => {
+                models::enums::DatabaseType::MySQL | models::enums::DatabaseType::PostgreSQL | models::enums::DatabaseType::SQLite => {
                     self.search_sql_tables(connection_id, search_text, &conn_type);
                 }
             }
@@ -5578,7 +5504,7 @@ impl MyApp {
         }
     }
     
-    fn search_sql_tables(&mut self, connection_id: i64, search_text: &str, db_type: &DatabaseType) {
+    fn search_sql_tables(&mut self, connection_id: i64, search_text: &str, db_type: &models::enums::DatabaseType) {
         // Search through cached table data first
         if let Some(ref pool) = self.db_pool {
             let pool_clone = pool.clone();
@@ -5587,7 +5513,7 @@ impl MyApp {
             
             let search_results = rt.block_on(async {
                 let query = match db_type {
-                    DatabaseType::SQLite => {
+                    models::enums::DatabaseType::SQLite => {
                         "SELECT table_name, database_name, table_type FROM table_cache WHERE connection_id = ? AND table_name LIKE ? ORDER BY table_name"
                     }
                     _ => {
@@ -5657,7 +5583,7 @@ impl MyApp {
             
             // Generate appropriate query based on database type
             let query = match connection.connection_type {
-                DatabaseType::Redis => {
+                models::enums::DatabaseType::Redis => {
                     // Create safe Redis commands using SCAN instead of KEYS for production safety
                     match table_name {
                         "hashes" => "SCAN 0 MATCH hash:* COUNT 100".to_string(),  // Scan hash keys safely
@@ -7185,7 +7111,7 @@ impl MyApp {
         self.history_tree.clear();
         
         for item in &self.history_items {
-            let mut node = models::structs::TreeNode::new(item.query.clone(), models::enums::NodeType::HistoryItem);
+            let mut node = models::structs::TreeNode::new(item.query.clone(), models::enums::NodeType::QueryHistItem);
             node.connection_id = Some(item.connection_id);
             
             self.history_tree.push(node);
@@ -7704,7 +7630,7 @@ impl App for MyApp {
         if let Some(receiver) = &self.background_receiver {
             while let Ok(result) = receiver.try_recv() {
                 match result {
-                    BackgroundResult::RefreshComplete { connection_id, success } => {
+                    models::enums::BackgroundResult::RefreshComplete { connection_id, success } => {
                         // Remove from refreshing set
                         self.refreshing_connections.remove(&connection_id);
                         

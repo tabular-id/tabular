@@ -54,3 +54,56 @@ impl TreeNode {
         }
     }
 }
+
+
+
+#[derive(Clone, Debug)]
+pub struct QueryTab {
+    pub title: String,
+    pub content: String,
+    pub file_path: Option<String>,
+    pub is_saved: bool,
+    pub is_modified: bool,
+}
+
+
+
+#[derive(Clone)]
+pub struct AdvancedEditor {
+    pub show_line_numbers: bool,
+    pub theme: egui_code_editor::ColorTheme,
+    pub font_size: f32,
+    #[allow(dead_code)]
+    pub tab_size: usize,
+    #[allow(dead_code)]
+    pub auto_indent: bool,
+    #[allow(dead_code)]
+    pub show_whitespace: bool,
+    pub word_wrap: bool,
+    pub find_text: String,
+    pub replace_text: String,
+    pub show_find_replace: bool,
+    pub case_sensitive: bool,
+    pub use_regex: bool,
+}
+
+impl Default for AdvancedEditor {
+    fn default() -> Self {
+        Self {
+            show_line_numbers: true,
+            theme: egui_code_editor::ColorTheme::GITHUB_DARK,
+            font_size: 14.0,
+            tab_size: 4,
+            auto_indent: true,
+            show_whitespace: false,
+            word_wrap: false,
+            find_text: String::new(),
+            replace_text: String::new(),
+            show_find_replace: false,
+            case_sensitive: false,
+            use_regex: false,
+        }
+    }
+}
+
+
