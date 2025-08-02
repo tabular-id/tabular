@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 mod helpers;
 mod sqlite;
 mod export;
+mod models;
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
@@ -52,51 +53,9 @@ fn load_icon() -> Option<egui::IconData> {
 }
 
 
-#[derive(Clone)]
-struct TreeNode {
-    name: String,
-    children: Vec<TreeNode>,
-    is_expanded: bool,
-    node_type: NodeType,
-    connection_id: Option<i64>, // For connection nodes
-    is_loaded: bool, // For tracking if tables/columns are loaded
-    database_name: Option<String>, // For storing database context
-    file_path: Option<String>, // For query files
-}
 
-#[derive(Clone, PartialEq, Debug)]
-enum NodeType {
-    #[allow(dead_code)]
-    Database,
-    Table,
-    Column,
-    Query,
-    HistoryItem,
-    Connection,
-    DatabasesFolder,
-    TablesFolder,
-    ViewsFolder,
-    StoredProceduresFolder,
-    UserFunctionsFolder,
-    TriggersFolder,
-    EventsFolder,
-    DBAViewsFolder,
-    UsersFolder,
-    PrivilegesFolder,
-    ProcessesFolder,
-    StatusFolder,
-    View,
-    StoredProcedure,
-    UserFunction,
-    Trigger,
-    Event,
-    MySQLFolder,       // Folder untuk koneksi MySQL
-    PostgreSQLFolder,  // Folder untuk koneksi PostgreSQL
-    SQLiteFolder,      // Folder untuk koneksi SQLite
-    RedisFolder,       // Folder untuk koneksi Redis
-    CustomFolder,      // Folder custom yang bisa dinamai user
-    QueryFolder,       // Folder untuk mengelompokkan query files
-}
+
+
 
 #[derive(Clone, Debug)]
 struct QueryTab {
@@ -153,47 +112,7 @@ impl Default for ConnectionConfig {
     }
 }
 
-impl TreeNode {
-    fn new(name: String, node_type: NodeType) -> Self {
-        Self {
-            name,
-            children: Vec::new(),
-            is_expanded: false,
-            node_type,
-            connection_id: None,
-            is_loaded: true, // Regular nodes are always loaded
-            database_name: None,
-            file_path: None,
-        }
-    }
 
-    #[allow(dead_code)]
-    fn with_children(name: String, node_type: NodeType, children: Vec<TreeNode>) -> Self {
-        Self {
-            name,
-            children,
-            is_expanded: false,
-            node_type,
-            connection_id: None,
-            is_loaded: true,
-            database_name: None,
-            file_path: None,
-        }
-    }
-
-    fn new_connection(name: String, connection_id: i64) -> Self {
-        Self {
-            name,
-            children: Vec::new(),
-            is_expanded: false,
-            node_type: NodeType::Connection,
-            connection_id: Some(connection_id),
-            is_loaded: false, // Connection nodes need to load tables
-            database_name: None,
-            file_path: None,
-        }
-    }
-}
 
 // Enum untuk berbagai jenis database pool - sqlx pools are already thread-safe
 #[derive(Clone)]
@@ -245,9 +164,9 @@ impl Default for AdvancedEditor {
 struct MyApp {
     editor_text: String,
     selected_menu: String,
-    items_tree: Vec<TreeNode>,
-    queries_tree: Vec<TreeNode>,
-    history_tree: Vec<TreeNode>,
+    items_tree: Vec<models::TreeNode>,
+    queries_tree: Vec<models::TreeNode>,
+    history_tree: Vec<models::TreeNode>,
     history_items: Vec<HistoryItem>, // Actual history data
     connections: Vec<ConnectionConfig>,
     show_add_connection: bool,
@@ -312,7 +231,7 @@ struct MyApp {
     request_theme_selector: bool,
     // Database search functionality
     database_search_text: String,
-    filtered_items_tree: Vec<TreeNode>,
+    filtered_items_tree: Vec<models::TreeNode>,
     show_search_results: bool,
     // Query folder management
     show_create_folder_dialog: bool,
@@ -327,7 +246,7 @@ struct MyApp {
 
 #[derive(Debug, Clone)]
 struct ExpansionRequest {
-    node_type: NodeType,
+    node_type: models::NodeType,
     connection_id: i64,
     database_name: Option<String>,
 }
@@ -1049,7 +968,7 @@ impl MyApp {
         
     }
 
-    fn create_connections_folder_structure(&self) -> Vec<TreeNode> {
+    fn create_connections_folder_structure(&self) -> Vec<models::TreeNode> {
         // Group connections by custom folder first, then by database type
         let mut folder_groups: std::collections::HashMap<String, Vec<&ConnectionConfig>> = std::collections::HashMap::new();
         
@@ -1068,7 +987,7 @@ impl MyApp {
             }
             
             // Create custom folder node
-            let mut custom_folder = TreeNode::new(folder_name.clone(), NodeType::CustomFolder);
+            let mut custom_folder = models::TreeNode::new(folder_name.clone(), models::NodeType::CustomFolder);
             custom_folder.is_expanded = true; // Expand by default
             
             // Within each custom folder, group by database type
@@ -1079,7 +998,7 @@ impl MyApp {
             
             for conn in connections {
                 if let Some(id) = conn.id {
-                    let node = TreeNode::new_connection(conn.name.clone(), id);
+                    let node = models::TreeNode::new_connection(conn.name.clone(), id);
                     match conn.connection_type {
                         DatabaseType::MySQL => {
                             mysql_connections.push(node);
@@ -1104,7 +1023,7 @@ impl MyApp {
                         
             if !mysql_connections.is_empty() {
                 let _ = mysql_connections.len();
-                let mut mysql_folder = TreeNode::new("MySQL".to_string(), NodeType::MySQLFolder);
+                let mut mysql_folder = models::TreeNode::new("MySQL".to_string(), models::NodeType::MySQLFolder);
                 mysql_folder.children = mysql_connections;
                 mysql_folder.is_expanded = true;
                 db_type_folders.push(mysql_folder);
@@ -1112,7 +1031,7 @@ impl MyApp {
             
             if !postgresql_connections.is_empty() {
                 let _ = postgresql_connections.len();
-                let mut postgresql_folder = TreeNode::new("PostgreSQL".to_string(), NodeType::PostgreSQLFolder);
+                let mut postgresql_folder = models::TreeNode::new("PostgreSQL".to_string(), models::NodeType::PostgreSQLFolder);
                 postgresql_folder.children = postgresql_connections;
                 postgresql_folder.is_expanded = true;
                 db_type_folders.push(postgresql_folder);
@@ -1120,7 +1039,7 @@ impl MyApp {
             
             if !sqlite_connections.is_empty() {
                 let _ = sqlite_connections.len();
-                let mut sqlite_folder = TreeNode::new("SQLite".to_string(), NodeType::SQLiteFolder);
+                let mut sqlite_folder = models::TreeNode::new("SQLite".to_string(), models::NodeType::SQLiteFolder);
                 sqlite_folder.children = sqlite_connections;
                 sqlite_folder.is_expanded = true;
                 db_type_folders.push(sqlite_folder);
@@ -1128,7 +1047,7 @@ impl MyApp {
             
             if !redis_connections.is_empty() {
                 let _ = redis_connections.len();
-                let mut redis_folder = TreeNode::new("Redis".to_string(), NodeType::RedisFolder);
+                let mut redis_folder = models::TreeNode::new("Redis".to_string(), models::NodeType::RedisFolder);
                 redis_folder.children = redis_connections;
                 redis_folder.is_expanded = true;
                 db_type_folders.push(redis_folder);
@@ -1298,14 +1217,14 @@ impl MyApp {
         // Sort folders and files alphabetically
         self.queries_tree.sort_by(|a, b| {
             match (&a.node_type, &b.node_type) {
-                (NodeType::QueryFolder, NodeType::Query) => std::cmp::Ordering::Less, // Folders first
-                (NodeType::Query, NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
+                (models::NodeType::QueryFolder, models::NodeType::Query) => std::cmp::Ordering::Less, // Folders first
+                (models::NodeType::Query, models::NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
                 _ => a.name.cmp(&b.name), // Alphabetical within same type
             }
         });
     }
 
-    fn load_directory_recursive(dir_path: &std::path::Path) -> Vec<TreeNode> {
+    fn load_directory_recursive(dir_path: &std::path::Path) -> Vec<models::TreeNode> {
         let mut items = Vec::new();
         
         if let Ok(entries) = std::fs::read_dir(dir_path) {
@@ -1319,7 +1238,7 @@ impl MyApp {
                             // Recursively load the folder contents
                             let folder_contents = Self::load_directory_recursive(&folder_path);
                             
-                            let mut folder_node = TreeNode::new(folder_name.to_string(), NodeType::QueryFolder);
+                            let mut folder_node = models::TreeNode::new(folder_name.to_string(), models::NodeType::QueryFolder);
                             folder_node.children = folder_contents;
                             folder_node.is_expanded = true;
                             folder_node.file_path = Some(folder_path.to_string_lossy().to_string());
@@ -1329,7 +1248,7 @@ impl MyApp {
                         // This is a file
                         if let Some(file_name) = entry.file_name().to_str() {
                             if file_name.ends_with(".sql") {
-                                let mut node = TreeNode::new(file_name.to_string(), NodeType::Query);
+                                let mut node = models::TreeNode::new(file_name.to_string(), models::NodeType::Query);
                                 node.file_path = Some(entry.path().to_string_lossy().to_string());
                                 items.push(node);
                             }
@@ -1342,8 +1261,8 @@ impl MyApp {
         // Sort the items: folders first, then files, all alphabetically
         items.sort_by(|a, b| {
             match (&a.node_type, &b.node_type) {
-                (NodeType::QueryFolder, NodeType::Query) => std::cmp::Ordering::Less, // Folders first
-                (NodeType::Query, NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
+                (models::NodeType::QueryFolder, models::NodeType::Query) => std::cmp::Ordering::Less, // Folders first
+                (models::NodeType::Query, models::NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
                 _ => a.name.cmp(&b.name), // Alphabetical within same type
             }
         });
@@ -1731,7 +1650,7 @@ impl MyApp {
         }
     }
 
-    fn render_tree(&mut self, ui: &mut egui::Ui, nodes: &mut [TreeNode]) -> Vec<(String, String, String)> {
+    fn render_tree(&mut self, ui: &mut egui::Ui, nodes: &mut [models::TreeNode]) -> Vec<(String, String, String)> {
         let mut expansion_requests = Vec::new();
         let mut tables_to_expand = Vec::new();
         let mut context_menu_requests = Vec::new();
@@ -1781,7 +1700,7 @@ impl MyApp {
         for expansion_req in expansion_requests {
             
             match expansion_req.node_type {
-                NodeType::Connection => {
+                models::NodeType::Connection => {
                     // Find Connection node recursively and load if not already loaded
                     if let Some(connection_node) = Self::find_connection_node_recursive(nodes, expansion_req.connection_id) {
                         if !connection_node.is_loaded {
@@ -1791,13 +1710,13 @@ impl MyApp {
                         println!("Connection node not found for ID: {}", expansion_req.connection_id);
                     }
                 },
-                NodeType::DatabasesFolder => {
+                models::NodeType::DatabasesFolder => {
                     // Handle DatabasesFolder expansion - load actual databases from server
                     for node in nodes.iter_mut() {
-                        if node.node_type == NodeType::Connection && node.connection_id == Some(expansion_req.connection_id) {
+                        if node.node_type == models::NodeType::Connection && node.connection_id == Some(expansion_req.connection_id) {
                             // Find the DatabasesFolder within this connection
                             for child in &mut node.children {
-                                if child.node_type == NodeType::DatabasesFolder && !child.is_loaded {
+                                if child.node_type == models::NodeType::DatabasesFolder && !child.is_loaded {
                                     self.load_databases_for_folder(expansion_req.connection_id, child);
                                     break;
                                 }
@@ -1806,7 +1725,7 @@ impl MyApp {
                         }
                     }
                 },
-                NodeType::Database => {
+                models::NodeType::Database => {
                     println!("🔍 Database expansion request received for connection_id: {}, database_name: {:?}", 
                              expansion_req.connection_id, expansion_req.database_name);
                     
@@ -1847,8 +1766,8 @@ impl MyApp {
                         println!("❌ Connection not found for ID: {}", expansion_req.connection_id);
                     }
                 },
-                NodeType::TablesFolder | NodeType::ViewsFolder | NodeType::StoredProceduresFolder |
-                NodeType::UserFunctionsFolder | NodeType::TriggersFolder | NodeType::EventsFolder => {
+                models::NodeType::TablesFolder | models::NodeType::ViewsFolder | models::NodeType::StoredProceduresFolder |
+                models::NodeType::UserFunctionsFolder | models::NodeType::TriggersFolder | models::NodeType::EventsFolder => {
                     // Find the specific folder node and load if not already loaded
                     
                     // We need to find the exact folder node in the tree
@@ -2093,7 +2012,7 @@ impl MyApp {
     }
 
     fn render_tree_node_with_table_expansion(
-            ui: &mut egui::Ui, node: &mut TreeNode, 
+            ui: &mut egui::Ui, node: &mut models::TreeNode, 
             editor_text: &mut String, node_index: usize, 
             refreshing_connections: &std::collections::HashSet<i64>
         ) -> (
@@ -2113,17 +2032,17 @@ impl MyApp {
         let mut folder_name_for_removal = None;
         let mut parent_folder_for_creation = None;
         
-        if has_children || node.node_type == NodeType::Connection || node.node_type == NodeType::Table || 
-           node.node_type == NodeType::DatabasesFolder || node.node_type == NodeType::TablesFolder ||
-           node.node_type == NodeType::ViewsFolder || node.node_type == NodeType::StoredProceduresFolder ||
-           node.node_type == NodeType::UserFunctionsFolder || node.node_type == NodeType::TriggersFolder ||
-           node.node_type == NodeType::EventsFolder || node.node_type == NodeType::DBAViewsFolder ||
-           node.node_type == NodeType::UsersFolder || node.node_type == NodeType::PrivilegesFolder ||
-           node.node_type == NodeType::ProcessesFolder || node.node_type == NodeType::StatusFolder ||
-           node.node_type == NodeType::Database || node.node_type == NodeType::QueryFolder {
+        if has_children || node.node_type == models::NodeType::Connection || node.node_type == models::NodeType::Table || 
+           node.node_type == models::NodeType::DatabasesFolder || node.node_type == models::NodeType::TablesFolder ||
+           node.node_type == models::NodeType::ViewsFolder || node.node_type == models::NodeType::StoredProceduresFolder ||
+           node.node_type == models::NodeType::UserFunctionsFolder || node.node_type == models::NodeType::TriggersFolder ||
+           node.node_type == models::NodeType::EventsFolder || node.node_type == models::NodeType::DBAViewsFolder ||
+           node.node_type == models::NodeType::UsersFolder || node.node_type == models::NodeType::PrivilegesFolder ||
+           node.node_type == models::NodeType::ProcessesFolder || node.node_type == models::NodeType::StatusFolder ||
+           node.node_type == models::NodeType::Database || node.node_type == models::NodeType::QueryFolder {
             // Use more unique ID including connection_id for connections
             let unique_id = match node.node_type {
-                NodeType::Connection => format!("conn_{}_{}", node_index, node.connection_id.unwrap_or(0)),
+                models::NodeType::Connection => format!("conn_{}_{}", node_index, node.connection_id.unwrap_or(0)),
                 _ => format!("node_{}_{:?}", node_index, node.node_type),
             };
             let id = egui::Id::new(&unique_id);
@@ -2133,10 +2052,10 @@ impl MyApp {
                     node.is_expanded = !node.is_expanded;
                     
                     // If this is a connection node and not loaded, request expansion
-                    if node.node_type == NodeType::Connection && !node.is_loaded && node.is_expanded {
+                    if node.node_type == models::NodeType::Connection && !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
                             expansion_request = Some(ExpansionRequest {
-                                node_type: NodeType::Connection,
+                                node_type: models::NodeType::Connection,
                                 connection_id: conn_id,
                                 database_name: None,
                             });
@@ -2146,20 +2065,20 @@ impl MyApp {
                     }
                     
                     // If this is a table node and not loaded, request table column expansion
-                    if node.node_type == NodeType::Table && !node.is_loaded && node.is_expanded {
+                    if node.node_type == models::NodeType::Table && !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
                             table_expansion = Some((node_index, conn_id, node.name.clone()));
                         }
                     }
                     
                     // If this is a folder node and not loaded, request folder content expansion
-                    if (node.node_type == NodeType::DatabasesFolder ||
-                        node.node_type == NodeType::TablesFolder || 
-                        node.node_type == NodeType::ViewsFolder ||
-                        node.node_type == NodeType::StoredProceduresFolder ||
-                        node.node_type == NodeType::UserFunctionsFolder ||
-                        node.node_type == NodeType::TriggersFolder ||
-                        node.node_type == NodeType::EventsFolder) && 
+                    if (node.node_type == models::NodeType::DatabasesFolder ||
+                        node.node_type == models::NodeType::TablesFolder || 
+                        node.node_type == models::NodeType::ViewsFolder ||
+                        node.node_type == models::NodeType::StoredProceduresFolder ||
+                        node.node_type == models::NodeType::UserFunctionsFolder ||
+                        node.node_type == models::NodeType::TriggersFolder ||
+                        node.node_type == models::NodeType::EventsFolder) && 
                        !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
                             expansion_request = Some(ExpansionRequest {
@@ -2171,10 +2090,10 @@ impl MyApp {
                     }
                     
                     // If this is a Database node and not loaded, request database expansion (for Redis keys)
-                    if node.node_type == NodeType::Database && !node.is_loaded && node.is_expanded {
+                    if node.node_type == models::NodeType::Database && !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
                             expansion_request = Some(ExpansionRequest {
-                                node_type: NodeType::Database,
+                                node_type: models::NodeType::Database,
                                 connection_id: conn_id,
                                 database_name: node.database_name.clone(),
                             });
@@ -2183,40 +2102,40 @@ impl MyApp {
                 }
                 
                 let icon = match node.node_type {
-                    NodeType::Database => "🗄",
-                    NodeType::Table => "📋",
-                    NodeType::Column => "📄",
-                    NodeType::Query => "🔍",
-                    NodeType::HistoryItem => "📜",
-                    NodeType::Connection => "", // Icon already included in name
-                    NodeType::DatabasesFolder => "📁",
-                    NodeType::TablesFolder => "📋",
-                    NodeType::ViewsFolder => "👁",
-                    NodeType::StoredProceduresFolder => "⚙️",
-                    NodeType::UserFunctionsFolder => "🔧",
-                    NodeType::TriggersFolder => "⚡",
-                    NodeType::EventsFolder => "📅",
-                    NodeType::DBAViewsFolder => "👨‍💼",
-                    NodeType::UsersFolder => "👥",
-                    NodeType::PrivilegesFolder => "🔒",
-                    NodeType::ProcessesFolder => "⚡",
-                    NodeType::StatusFolder => "📊",
-                    NodeType::View => "👁",
-                    NodeType::StoredProcedure => "⚙️",
-                    NodeType::UserFunction => "🔧",
-                    NodeType::Trigger => "⚡",
-                    NodeType::Event => "📅",
-                    NodeType::MySQLFolder => "🐬",
-                    NodeType::PostgreSQLFolder => "🐘",
-                    NodeType::SQLiteFolder => "📄",
-                    NodeType::RedisFolder => "🔴",
-                    NodeType::CustomFolder => "📁",
-                    NodeType::QueryFolder => "📂",
+                    models::NodeType::Database => "🗄",
+                    models::NodeType::Table => "📋",
+                    models::NodeType::Column => "📄",
+                    models::NodeType::Query => "🔍",
+                    models::NodeType::HistoryItem => "📜",
+                    models::NodeType::Connection => "", // Icon already included in name
+                    models::NodeType::DatabasesFolder => "📁",
+                    models::NodeType::TablesFolder => "📋",
+                    models::NodeType::ViewsFolder => "👁",
+                    models::NodeType::StoredProceduresFolder => "⚙️",
+                    models::NodeType::UserFunctionsFolder => "🔧",
+                    models::NodeType::TriggersFolder => "⚡",
+                    models::NodeType::EventsFolder => "📅",
+                    models::NodeType::DBAViewsFolder => "👨‍💼",
+                    models::NodeType::UsersFolder => "👥",
+                    models::NodeType::PrivilegesFolder => "🔒",
+                    models::NodeType::ProcessesFolder => "⚡",
+                    models::NodeType::StatusFolder => "📊",
+                    models::NodeType::View => "👁",
+                    models::NodeType::StoredProcedure => "⚙️",
+                    models::NodeType::UserFunction => "🔧",
+                    models::NodeType::Trigger => "⚡",
+                    models::NodeType::Event => "📅",
+                    models::NodeType::MySQLFolder => "🐬",
+                    models::NodeType::PostgreSQLFolder => "🐘",
+                    models::NodeType::SQLiteFolder => "📄",
+                    models::NodeType::RedisFolder => "🔴",
+                    models::NodeType::CustomFolder => "📁",
+                    models::NodeType::QueryFolder => "📂",
                 };
                 
                 let label_text = if icon.is_empty() { 
                     // For connection nodes, add loading indicator if refreshing
-                    if node.node_type == NodeType::Connection {
+                    if node.node_type == models::NodeType::Connection {
                         if let Some(conn_id) = node.connection_id {
                             if refreshing_connections.contains(&conn_id) {
                                 format!("{} 🔄", node.name) // Add refresh spinner
@@ -2232,7 +2151,7 @@ impl MyApp {
                 } else { 
                     format!("{} {}", icon, node.name) 
                 };
-                let response = if node.node_type == NodeType::Connection {
+                let response = if node.node_type == models::NodeType::Connection {
                     // Use button for connections to make them more clickable
                     ui.button(&label_text)
                 } else {
@@ -2240,14 +2159,14 @@ impl MyApp {
                 };
                 
                 // Handle clicks on connection labels to set active connection
-                if node.node_type == NodeType::Connection && response.clicked() {
+                if node.node_type == models::NodeType::Connection && response.clicked() {
                     if let Some(conn_id) = node.connection_id {
                         connection_click_request = Some(conn_id);
                     }
                 }
                 
                 // Handle clicks on table labels to load table data - open in new tab
-                if node.node_type == NodeType::Table && response.clicked() {
+                if node.node_type == models::NodeType::Table && response.clicked() {
                     // Don't modify current editor_text, we'll create a new tab instead
                     // Still trigger table data loading
                     if let Some(conn_id) = node.connection_id {
@@ -2256,7 +2175,7 @@ impl MyApp {
                 }
                 
                 // Add context menu for connection nodes
-                if node.node_type == NodeType::Connection {
+                if node.node_type == models::NodeType::Connection {
                     response.context_menu(|ui| {
                         if ui.button("Copy Connection").clicked() {
                             if let Some(conn_id) = node.connection_id {
@@ -2286,7 +2205,7 @@ impl MyApp {
                 }
                 
                 // Add context menu for folder nodes
-                if node.node_type == NodeType::QueryFolder {
+                if node.node_type == models::NodeType::QueryFolder {
                     response.context_menu(|ui| {
                         if ui.button("📁 Create New Folder").clicked() {
                             // Store the parent folder name for creation
@@ -2331,7 +2250,7 @@ impl MyApp {
                 }
                 
                 // Add context menu for table nodes
-                if node.node_type == NodeType::Table {
+                if node.node_type == models::NodeType::Table {
                     response.context_menu(|ui| {
                         if ui.button("📊 View Data").clicked() {
                             if let Some(conn_id) = node.connection_id {
@@ -2369,7 +2288,7 @@ impl MyApp {
                 }
                 
                 // Add context menu for view nodes
-                if node.node_type == NodeType::View {
+                if node.node_type == models::NodeType::View {
                     response.context_menu(|ui| {
                         if ui.button("📊 View Data").clicked() {
                             if let Some(conn_id) = node.connection_id {
@@ -2461,35 +2380,35 @@ impl MyApp {
                 ui.add_space(16.0); // Indent for leaf nodes
                 
                 let icon = match node.node_type {
-                    NodeType::Database => "🗄",
-                    NodeType::Table => "📋",
-                    NodeType::Column => "📄",
-                    NodeType::Query => "🔍",
-                    NodeType::HistoryItem => "📜",
-                    NodeType::Connection => "🔗",
-                    NodeType::DatabasesFolder => "📁",
-                    NodeType::TablesFolder => "📋",
-                    NodeType::ViewsFolder => "👁",
-                    NodeType::StoredProceduresFolder => "⚙️",
-                    NodeType::UserFunctionsFolder => "🔧",
-                    NodeType::TriggersFolder => "⚡",
-                    NodeType::EventsFolder => "📅",
-                    NodeType::DBAViewsFolder => "👨‍💼",
-                    NodeType::UsersFolder => "👥",
-                    NodeType::PrivilegesFolder => "🔒",
-                    NodeType::ProcessesFolder => "⚡",
-                    NodeType::StatusFolder => "📊",
-                    NodeType::View => "👁",
-                    NodeType::StoredProcedure => "⚙️",
-                    NodeType::UserFunction => "🔧",
-                    NodeType::Trigger => "⚡",
-                    NodeType::Event => "📅",
-                    NodeType::MySQLFolder => "🐬",
-                    NodeType::PostgreSQLFolder => "🐘",
-                    NodeType::SQLiteFolder => "📄",
-                    NodeType::RedisFolder => "🔴",
-                    NodeType::CustomFolder => "📁",
-                    NodeType::QueryFolder => "📂",
+                    models::NodeType::Database => "🗄",
+                    models::NodeType::Table => "📋",
+                    models::NodeType::Column => "📄",
+                    models::NodeType::Query => "🔍",
+                    models::NodeType::HistoryItem => "📜",
+                    models::NodeType::Connection => "🔗",
+                    models::NodeType::DatabasesFolder => "📁",
+                    models::NodeType::TablesFolder => "📋",
+                    models::NodeType::ViewsFolder => "👁",
+                    models::NodeType::StoredProceduresFolder => "⚙️",
+                    models::NodeType::UserFunctionsFolder => "🔧",
+                    models::NodeType::TriggersFolder => "⚡",
+                    models::NodeType::EventsFolder => "📅",
+                    models::NodeType::DBAViewsFolder => "👨‍💼",
+                    models::NodeType::UsersFolder => "👥",
+                    models::NodeType::PrivilegesFolder => "🔒",
+                    models::NodeType::ProcessesFolder => "⚡",
+                    models::NodeType::StatusFolder => "📊",
+                    models::NodeType::View => "👁",
+                    models::NodeType::StoredProcedure => "⚙️",
+                    models::NodeType::UserFunction => "🔧",
+                    models::NodeType::Trigger => "⚡",
+                    models::NodeType::Event => "📅",
+                    models::NodeType::MySQLFolder => "🐬",
+                    models::NodeType::PostgreSQLFolder => "🐘",
+                    models::NodeType::SQLiteFolder => "📄",
+                    models::NodeType::RedisFolder => "🔴",
+                    models::NodeType::CustomFolder => "📁",
+                    models::NodeType::QueryFolder => "📂",
                 };
                 
                 let response = ui.button(format!("{} {}", icon, node.name));
@@ -2497,14 +2416,14 @@ impl MyApp {
                 if response.clicked() {
                     // Handle node selection
                     match node.node_type {
-                        NodeType::Table => {
+                        models::NodeType::Table => {
                             // Don't modify current editor_text, we'll create a new tab
                             // Just trigger table data loading 
                             if let Some(conn_id) = node.connection_id {
                                 table_click_request = Some((conn_id, node.name.clone()));
                             }
                         },
-                        NodeType::Query => {
+                        models::NodeType::Query => {
                             // Load query file content
                             if let Some(file_path) = &node.file_path {
                                 if let Ok(content) = std::fs::read_to_string(file_path) {
@@ -2517,7 +2436,7 @@ impl MyApp {
                                 *editor_text = format!("-- {}\nSELECT * FROM table_name;", node.name);
                             }
                         },
-                        NodeType::HistoryItem => {
+                        models::NodeType::HistoryItem => {
                             // Store the display name for processing later
                             *editor_text = node.name.clone();
                         },
@@ -2526,7 +2445,7 @@ impl MyApp {
                 }
                 
                 // Add context menu for query nodes
-                if node.node_type == NodeType::Query {
+                if node.node_type == models::NodeType::Query {
                     response.context_menu(|ui| {
                         if ui.button("Edit Query").clicked() {
                             if let Some(file_path) = &node.file_path {
@@ -3530,10 +3449,10 @@ impl MyApp {
         }
     }
 
-    fn find_connection_node_recursive(nodes: &mut [TreeNode], connection_id: i64) -> Option<&mut TreeNode> {
+    fn find_connection_node_recursive(nodes: &mut [models::TreeNode], connection_id: i64) -> Option<&mut models::TreeNode> {
         for node in nodes.iter_mut() {
             // Check if this is the connection node we're looking for
-            if node.node_type == NodeType::Connection && 
+            if node.node_type == models::NodeType::Connection && 
                node.connection_id == Some(connection_id) {
                 return Some(node);
             }
@@ -3561,7 +3480,7 @@ impl MyApp {
         
         // Find the connection node in the tree and reset its loaded state
         for node in &mut self.items_tree {
-            if node.node_type == NodeType::Connection && node.connection_id == Some(connection_id) {
+            if node.node_type == models::NodeType::Connection && node.connection_id == Some(connection_id) {
                 // Reset the connection node
                 node.is_loaded = false;
                 node.is_expanded = false;
@@ -3835,7 +3754,7 @@ impl MyApp {
         }
     }
 
-    fn load_connection_tables(&mut self, connection_id: i64, node: &mut TreeNode) {
+    fn load_connection_tables(&mut self, connection_id: i64, node: &mut models::TreeNode) {
 
         println!("Loading connection tables for ID: {}", connection_id);
 
@@ -3889,7 +3808,7 @@ impl MyApp {
         }
     }
 
-    fn build_connection_structure_from_cache(&mut self, connection_id: i64, node: &mut TreeNode, databases: &[String]) {
+    fn build_connection_structure_from_cache(&mut self, connection_id: i64, node: &mut models::TreeNode, databases: &[String]) {
         // Find the connection to get its type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let mut main_children = Vec::new();
@@ -3897,45 +3816,45 @@ impl MyApp {
             match connection.connection_type {
                 DatabaseType::MySQL => {
                     // 1. Databases folder
-                    let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+                    let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
                     databases_folder.connection_id = Some(connection_id);
                     
                     // Add each database from cache
                     for db_name in databases {
                         // Skip system databases for cleaner view
                         if !["information_schema", "performance_schema", "mysql", "sys"].contains(&db_name.as_str()) {
-                            let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                            let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                             db_node.connection_id = Some(connection_id);
                             db_node.database_name = Some(db_name.clone());
                             db_node.is_loaded = false; // Will be loaded when expanded
                             
                             // Create folder structure but don't load content yet
-                            let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                            let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                             tables_folder.connection_id = Some(connection_id);
                             tables_folder.database_name = Some(db_name.clone());
                             tables_folder.is_loaded = false;
                             
-                            let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                            let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                             views_folder.connection_id = Some(connection_id);
                             views_folder.database_name = Some(db_name.clone());
                             views_folder.is_loaded = false;
                             
-                            let mut procedures_folder = TreeNode::new("Stored Procedures".to_string(), NodeType::StoredProceduresFolder);
+                            let mut procedures_folder = models::TreeNode::new("Stored Procedures".to_string(), models::NodeType::StoredProceduresFolder);
                             procedures_folder.connection_id = Some(connection_id);
                             procedures_folder.database_name = Some(db_name.clone());
                             procedures_folder.is_loaded = false;
                             
-                            let mut functions_folder = TreeNode::new("Functions".to_string(), NodeType::UserFunctionsFolder);
+                            let mut functions_folder = models::TreeNode::new("Functions".to_string(), models::NodeType::UserFunctionsFolder);
                             functions_folder.connection_id = Some(connection_id);
                             functions_folder.database_name = Some(db_name.clone());
                             functions_folder.is_loaded = false;
                             
-                            let mut triggers_folder = TreeNode::new("Triggers".to_string(), NodeType::TriggersFolder);
+                            let mut triggers_folder = models::TreeNode::new("Triggers".to_string(), models::NodeType::TriggersFolder);
                             triggers_folder.connection_id = Some(connection_id);
                             triggers_folder.database_name = Some(db_name.clone());
                             triggers_folder.is_loaded = false;
                             
-                            let mut events_folder = TreeNode::new("Events".to_string(), NodeType::EventsFolder);
+                            let mut events_folder = models::TreeNode::new("Events".to_string(), models::NodeType::EventsFolder);
                             events_folder.connection_id = Some(connection_id);
                             events_folder.database_name = Some(db_name.clone());
                             events_folder.is_loaded = false;
@@ -3954,31 +3873,31 @@ impl MyApp {
                     }
                     
                     // 2. DBA Views folder
-                    let mut dba_folder = TreeNode::new("DBA Views".to_string(), NodeType::DBAViewsFolder);
+                    let mut dba_folder = models::TreeNode::new("DBA Views".to_string(), models::NodeType::DBAViewsFolder);
                     dba_folder.connection_id = Some(connection_id);
                     
                     let mut dba_children = Vec::new();
                     
                     // Users
-                    let mut users_folder = TreeNode::new("Users".to_string(), NodeType::UsersFolder);
+                    let mut users_folder = models::TreeNode::new("Users".to_string(), models::NodeType::UsersFolder);
                     users_folder.connection_id = Some(connection_id);
                     users_folder.is_loaded = false;
                     dba_children.push(users_folder);
                     
                     // Privileges
-                    let mut priv_folder = TreeNode::new("Privileges".to_string(), NodeType::PrivilegesFolder);
+                    let mut priv_folder = models::TreeNode::new("Privileges".to_string(), models::NodeType::PrivilegesFolder);
                     priv_folder.connection_id = Some(connection_id);
                     priv_folder.is_loaded = false;
                     dba_children.push(priv_folder);
                     
                     // Processes
-                    let mut proc_folder = TreeNode::new("Processes".to_string(), NodeType::ProcessesFolder);
+                    let mut proc_folder = models::TreeNode::new("Processes".to_string(), models::NodeType::ProcessesFolder);
                     proc_folder.connection_id = Some(connection_id);
                     proc_folder.is_loaded = false;
                     dba_children.push(proc_folder);
                     
                     // Status
-                    let mut status_folder = TreeNode::new("Status".to_string(), NodeType::StatusFolder);
+                    let mut status_folder = models::TreeNode::new("Status".to_string(), models::NodeType::StatusFolder);
                     status_folder.connection_id = Some(connection_id);
                     status_folder.is_loaded = false;
                     dba_children.push(status_folder);
@@ -3990,22 +3909,22 @@ impl MyApp {
                 },
                 DatabaseType::PostgreSQL => {
                     // Similar structure for PostgreSQL
-                    let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+                    let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
                     databases_folder.connection_id = Some(connection_id);
                     
                     for db_name in databases {
                         if !["template0", "template1", "postgres"].contains(&db_name.as_str()) {
-                            let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                            let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                             db_node.connection_id = Some(connection_id);
                             db_node.database_name = Some(db_name.clone());
                             db_node.is_loaded = false;
                             
-                            let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                            let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                             tables_folder.connection_id = Some(connection_id);
                             tables_folder.database_name = Some(db_name.clone());
                             tables_folder.is_loaded = false;
                             
-                            let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                            let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                             views_folder.connection_id = Some(connection_id);
                             views_folder.database_name = Some(db_name.clone());
                             views_folder.is_loaded = false;
@@ -4019,12 +3938,12 @@ impl MyApp {
                 },
                 DatabaseType::SQLite => {
                     // SQLite structure - single database
-                    let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                    let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                     tables_folder.connection_id = Some(connection_id);
                     tables_folder.database_name = Some("main".to_string());
                     tables_folder.is_loaded = false;
                     
-                    let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                    let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                     views_folder.connection_id = Some(connection_id);
                     views_folder.database_name = Some("main".to_string());
                     views_folder.is_loaded = false;
@@ -4042,11 +3961,11 @@ impl MyApp {
         }
     }
 
-    fn build_redis_structure_from_cache(&mut self, connection_id: i64, node: &mut TreeNode, databases: &[String]) {
+    fn build_redis_structure_from_cache(&mut self, connection_id: i64, node: &mut models::TreeNode, databases: &[String]) {
         let mut main_children = Vec::new();
         
         // Create databases folder for Redis
-        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
         databases_folder.connection_id = Some(connection_id);
         databases_folder.is_expanded = true;
         databases_folder.is_loaded = true;
@@ -4054,7 +3973,7 @@ impl MyApp {
         // Add each Redis database from cache (db0, db1, etc.)
         for db_name in databases {
             if db_name.starts_with("db") {
-                let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                 db_node.connection_id = Some(connection_id);
                 db_node.database_name = Some(db_name.clone());
                 db_node.is_loaded = false; // Keys will be loaded when clicked
@@ -4063,7 +3982,7 @@ impl MyApp {
                 let has_keys = self.check_redis_database_has_keys(connection_id, db_name);
                 if has_keys {
                     // Add a placeholder for keys that will be loaded on expansion
-                    let loading_node = TreeNode::new("Loading keys...".to_string(), NodeType::Table);
+                    let loading_node = models::TreeNode::new("Loading keys...".to_string(), models::NodeType::Table);
                     db_node.children.push(loading_node);
                 }
                 
@@ -4099,7 +4018,7 @@ impl MyApp {
     }
 
     // More specific function to find folder node with exact type and database name
-    fn find_specific_folder_node<'a>(node: &'a mut TreeNode, connection_id: i64, folder_type: &NodeType, database_name: &Option<String>) -> Option<&'a mut TreeNode> {
+    fn find_specific_folder_node<'a>(node: &'a mut models::TreeNode, connection_id: i64, folder_type: &models::NodeType, database_name: &Option<String>) -> Option<&'a mut models::TreeNode> {
         // Check if this node is the folder we're looking for
         if node.node_type == *folder_type && 
            node.connection_id == Some(connection_id) && 
@@ -4119,7 +4038,7 @@ impl MyApp {
         None
     }
 
-    fn load_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
+    fn load_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut models::TreeNode) {
         // Check connection type to handle Redis differently
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             if connection.connection_type == DatabaseType::Redis {
@@ -4136,7 +4055,7 @@ impl MyApp {
             if !cached_databases.is_empty() {
                 
                 for db_name in cached_databases {
-                    let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                    let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                     db_node.connection_id = Some(connection_id);
                     db_node.database_name = Some(db_name.clone());
                     db_node.is_loaded = false;
@@ -4145,21 +4064,21 @@ impl MyApp {
                     let mut db_children = Vec::new();
                     
                     // Tables folder
-                    let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                    let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                     tables_folder.connection_id = Some(connection_id);
                     tables_folder.database_name = Some(db_name.clone());
                     tables_folder.is_loaded = false;
                     db_children.push(tables_folder);
                     
                     // Views folder
-                    let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                    let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                     views_folder.connection_id = Some(connection_id);
                     views_folder.database_name = Some(db_name.clone());
                     views_folder.is_loaded = false;
                     db_children.push(views_folder);
                     
                     // Stored Procedures folder
-                    let mut sp_folder = TreeNode::new("Stored Procedures".to_string(), NodeType::StoredProceduresFolder);
+                    let mut sp_folder = models::TreeNode::new("Stored Procedures".to_string(), models::NodeType::StoredProceduresFolder);
                     sp_folder.connection_id = Some(connection_id);
                     sp_folder.database_name = Some(db_name.clone());
                     sp_folder.is_loaded = false;
@@ -4182,7 +4101,7 @@ impl MyApp {
             
             // Create tree nodes from fetched data
             for db_name in real_databases {
-                let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                 db_node.connection_id = Some(connection_id);
                 db_node.database_name = Some(db_name.clone());
                 db_node.is_loaded = false;
@@ -4191,21 +4110,21 @@ impl MyApp {
                 let mut db_children = Vec::new();
                 
                 // Tables folder
-                let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                 tables_folder.connection_id = Some(connection_id);
                 tables_folder.database_name = Some(db_name.clone());
                 tables_folder.is_loaded = false;
                 db_children.push(tables_folder);
                 
                 // Views folder
-                let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                 views_folder.connection_id = Some(connection_id);
                 views_folder.database_name = Some(db_name.clone());
                 views_folder.is_loaded = false;
                 db_children.push(views_folder);
                 
                 // Stored Procedures folder
-                let mut sp_folder = TreeNode::new("Stored Procedures".to_string(), NodeType::StoredProceduresFolder);
+                let mut sp_folder = models::TreeNode::new("Stored Procedures".to_string(), models::NodeType::StoredProceduresFolder);
                 sp_folder.connection_id = Some(connection_id);
                 sp_folder.database_name = Some(db_name.clone());
                 sp_folder.is_loaded = false;
@@ -4221,7 +4140,7 @@ impl MyApp {
         }
     }
     
-    fn populate_sample_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
+    fn populate_sample_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut models::TreeNode) {
         // Find the connection to determine type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let sample_databases = match connection.connection_type {
@@ -4242,7 +4161,7 @@ impl MyApp {
                     continue;
                 }
                 
-                let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                 db_node.connection_id = Some(connection_id);
                 db_node.database_name = Some(db_name.clone());
                 db_node.is_loaded = false;
@@ -4251,14 +4170,14 @@ impl MyApp {
                 let mut db_children = Vec::new();
                 
                 // Tables folder
-                let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+                let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
                 tables_folder.connection_id = Some(connection_id);
                 tables_folder.database_name = Some(db_name.clone());
                 tables_folder.is_loaded = false;
                 db_children.push(tables_folder);
                 
                 // Views folder  
-                let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+                let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
                 views_folder.connection_id = Some(connection_id);
                 views_folder.database_name = Some(db_name.clone());
                 views_folder.is_loaded = false;
@@ -4266,28 +4185,28 @@ impl MyApp {
                 
                 if matches!(connection.connection_type, DatabaseType::MySQL) {
                     // Stored Procedures folder
-                    let mut sp_folder = TreeNode::new("Stored Procedures".to_string(), NodeType::StoredProceduresFolder);
+                    let mut sp_folder = models::TreeNode::new("Stored Procedures".to_string(), models::NodeType::StoredProceduresFolder);
                     sp_folder.connection_id = Some(connection_id);
                     sp_folder.database_name = Some(db_name.clone());
                     sp_folder.is_loaded = false;
                     db_children.push(sp_folder);
                     
                     // User Functions folder
-                    let mut uf_folder = TreeNode::new("User Functions".to_string(), NodeType::UserFunctionsFolder);
+                    let mut uf_folder = models::TreeNode::new("User Functions".to_string(), models::NodeType::UserFunctionsFolder);
                     uf_folder.connection_id = Some(connection_id);
                     uf_folder.database_name = Some(db_name.clone());
                     uf_folder.is_loaded = false;
                     db_children.push(uf_folder);
                     
                     // Triggers folder
-                    let mut triggers_folder = TreeNode::new("Triggers".to_string(), NodeType::TriggersFolder);
+                    let mut triggers_folder = models::TreeNode::new("Triggers".to_string(), models::NodeType::TriggersFolder);
                     triggers_folder.connection_id = Some(connection_id);
                     triggers_folder.database_name = Some(db_name.clone());
                     triggers_folder.is_loaded = false;
                     db_children.push(triggers_folder);
                     
                     // Events folder
-                    let mut events_folder = TreeNode::new("Events".to_string(), NodeType::EventsFolder);
+                    let mut events_folder = models::TreeNode::new("Events".to_string(), models::NodeType::EventsFolder);
                     events_folder.connection_id = Some(connection_id);
                     events_folder.database_name = Some(db_name.clone());
                     events_folder.is_loaded = false;
@@ -4301,7 +4220,7 @@ impl MyApp {
         }
     }
     
-    fn load_redis_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut TreeNode) {
+    fn load_redis_databases_for_folder(&mut self, connection_id: i64, databases_folder: &mut models::TreeNode) {
         // Clear loading placeholders
         databases_folder.children.clear();
 
@@ -4309,13 +4228,13 @@ impl MyApp {
         if let Some(cached_databases) = self.get_databases_from_cache(connection_id) {
             for db_name in cached_databases {
                 if db_name.starts_with("db") {
-                    let mut db_node = TreeNode::new(db_name.clone(), NodeType::Database);
+                    let mut db_node = models::TreeNode::new(db_name.clone(), models::NodeType::Database);
                     db_node.connection_id = Some(connection_id);
                     db_node.database_name = Some(db_name.clone());
                     db_node.is_loaded = false;
 
                     // Tambahkan node child untuk key, akan di-load saat node db di-expand
-                    let loading_keys_node = TreeNode::new("Loading keys...".to_string(), NodeType::Table);
+                    let loading_keys_node = models::TreeNode::new("Loading keys...".to_string(), models::NodeType::Table);
                     db_node.children.push(loading_keys_node);
 
                     databases_folder.children.push(db_node);
@@ -4325,10 +4244,10 @@ impl MyApp {
         }
     }
 
-    fn find_redis_database_node<'a>(node: &'a mut TreeNode, connection_id: i64, database_name: &Option<String>) -> Option<&'a mut TreeNode> {
+    fn find_redis_database_node<'a>(node: &'a mut models::TreeNode, connection_id: i64, database_name: &Option<String>) -> Option<&'a mut models::TreeNode> {
         // Check if this is the database node we're looking for
         if node.connection_id == Some(connection_id) && 
-           node.node_type == NodeType::Database && 
+           node.node_type == models::NodeType::Database && 
            node.database_name == *database_name {
             return Some(node);
         }
@@ -4343,7 +4262,7 @@ impl MyApp {
         None
     }
 
-    fn load_redis_keys_for_database(&mut self, connection_id: i64, database_name: &str, db_node: &mut TreeNode) {
+    fn load_redis_keys_for_database(&mut self, connection_id: i64, database_name: &str, db_node: &mut models::TreeNode) {
         
         // Clear existing children and mark as loading
         db_node.children.clear();
@@ -4435,7 +4354,7 @@ impl MyApp {
                 _ => &data_type,
             };
             
-            let mut type_folder = TreeNode::new(format!("{} ({})", folder_name, keys.len()), NodeType::TablesFolder);
+            let mut type_folder = models::TreeNode::new(format!("{} ({})", folder_name, keys.len()), models::NodeType::TablesFolder);
             type_folder.connection_id = Some(connection_id);
             type_folder.database_name = Some(database_name.to_string());
             type_folder.is_expanded = true;
@@ -4443,7 +4362,7 @@ impl MyApp {
             
             // Add keys of this type to the folder
             for (key, _key_type) in keys {
-                let mut key_node = TreeNode::new(key.clone(), NodeType::Table);
+                let mut key_node = models::TreeNode::new(key.clone(), models::NodeType::Table);
                 key_node.connection_id = Some(connection_id);
                 key_node.database_name = Some(database_name.to_string());
                 type_folder.children.push(key_node);
@@ -4856,7 +4775,7 @@ impl MyApp {
         })
     }
 
-    fn load_mysql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+    fn load_mysql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode) {
 
         println!("Loading MySQL structure for connection ID: {}", connection_id);
         
@@ -4867,36 +4786,36 @@ impl MyApp {
         let mut main_children = Vec::new();
         
         // 1. Databases folder
-        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
         databases_folder.connection_id = Some(connection_id);
         databases_folder.is_loaded = false; // Will be loaded when expanded
         
         // 2. DBA Views folder
-        let mut dba_folder = TreeNode::new("DBA Views".to_string(), NodeType::DBAViewsFolder);
+        let mut dba_folder = models::TreeNode::new("DBA Views".to_string(), models::NodeType::DBAViewsFolder);
         dba_folder.connection_id = Some(connection_id);
         
         let mut dba_children = Vec::new();
         
         // Users
-        let mut users_folder = TreeNode::new("Users".to_string(), NodeType::UsersFolder);
+        let mut users_folder = models::TreeNode::new("Users".to_string(), models::NodeType::UsersFolder);
         users_folder.connection_id = Some(connection_id);
         users_folder.is_loaded = false;
         dba_children.push(users_folder);
         
         // Privileges
-        let mut priv_folder = TreeNode::new("Privileges".to_string(), NodeType::PrivilegesFolder);
+        let mut priv_folder = models::TreeNode::new("Privileges".to_string(), models::NodeType::PrivilegesFolder);
         priv_folder.connection_id = Some(connection_id);
         priv_folder.is_loaded = false;
         dba_children.push(priv_folder);
         
         // Processes
-        let mut proc_folder = TreeNode::new("Processes".to_string(), NodeType::ProcessesFolder);
+        let mut proc_folder = models::TreeNode::new("Processes".to_string(), models::NodeType::ProcessesFolder);
         proc_folder.connection_id = Some(connection_id);
         proc_folder.is_loaded = false;
         dba_children.push(proc_folder);
         
         // Status
-        let mut status_folder = TreeNode::new("Status".to_string(), NodeType::StatusFolder);
+        let mut status_folder = models::TreeNode::new("Status".to_string(), models::NodeType::StatusFolder);
         status_folder.connection_id = Some(connection_id);
         status_folder.is_loaded = false;
         dba_children.push(status_folder);
@@ -4912,17 +4831,17 @@ impl MyApp {
         // For now, we'll rely on the expansion mechanism to load databases when needed
     }
 
-    fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+    fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode) {
         
         // Create basic structure for PostgreSQL
         let mut main_children = Vec::new();
         
         // Databases folder
-        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
         databases_folder.connection_id = Some(connection_id);
         
         // Add a loading indicator
-        let loading_node = TreeNode::new("Loading databases...".to_string(), NodeType::Database);
+        let loading_node = models::TreeNode::new("Loading databases...".to_string(), models::NodeType::Database);
         databases_folder.children.push(loading_node);
         
         main_children.push(databases_folder);
@@ -4930,25 +4849,25 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+    fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode) {
         
         // Create basic structure for SQLite
         let mut main_children = Vec::new();
         
         // Tables folder
-        let mut tables_folder = TreeNode::new("Tables".to_string(), NodeType::TablesFolder);
+        let mut tables_folder = models::TreeNode::new("Tables".to_string(), models::NodeType::TablesFolder);
         tables_folder.connection_id = Some(connection_id);
         tables_folder.database_name = Some("main".to_string());
         tables_folder.is_loaded = false;
         
         // Add a loading indicator
-        let loading_node = TreeNode::new("Loading tables...".to_string(), NodeType::Table);
+        let loading_node = models::TreeNode::new("Loading tables...".to_string(), models::NodeType::Table);
         tables_folder.children.push(loading_node);
         
         main_children.push(tables_folder);
         
         // Views folder
-        let mut views_folder = TreeNode::new("Views".to_string(), NodeType::ViewsFolder);
+        let mut views_folder = models::TreeNode::new("Views".to_string(), models::NodeType::ViewsFolder);
         views_folder.connection_id = Some(connection_id);
         views_folder.database_name = Some("main".to_string());
         views_folder.is_loaded = false;
@@ -4957,7 +4876,7 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_redis_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode) {
+    fn load_redis_structure(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode) {
         // Check if we have cached databases
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
             println!("🔍 Found cached Redis databases: {:?}", databases);
@@ -4987,12 +4906,12 @@ impl MyApp {
         let mut main_children = Vec::new();
         
         // Add databases folder for Redis
-        let mut databases_folder = TreeNode::new("Databases".to_string(), NodeType::DatabasesFolder);
+        let mut databases_folder = models::TreeNode::new("Databases".to_string(), models::NodeType::DatabasesFolder);
         databases_folder.connection_id = Some(connection_id);
         databases_folder.is_loaded = false;
         
         // Add a loading indicator
-        let loading_node = TreeNode::new("Loading databases...".to_string(), NodeType::Database);
+        let loading_node = models::TreeNode::new("Loading databases...".to_string(), models::NodeType::Database);
         databases_folder.children.push(loading_node);
         
         main_children.push(databases_folder);
@@ -5000,7 +4919,7 @@ impl MyApp {
         node.children = main_children;
     }
 
-    fn load_folder_content(&mut self, connection_id: i64, node: &mut TreeNode, folder_type: NodeType) {        
+    fn load_folder_content(&mut self, connection_id: i64, node: &mut models::TreeNode, folder_type: models::NodeType) {        
         // Find the connection by ID
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let connection = connection.clone();
@@ -5027,18 +4946,18 @@ impl MyApp {
         }
     }
 
-    fn load_mysql_folder_content(&mut self, connection_id: i64, connection: &ConnectionConfig, node: &mut TreeNode, folder_type: NodeType) {
+    fn load_mysql_folder_content(&mut self, connection_id: i64, connection: &ConnectionConfig, node: &mut models::TreeNode, folder_type: models::NodeType) {
         // Get database name from node or connection default
         let database_name = node.database_name.as_ref().unwrap_or(&connection.database);
         
         // Map folder type to cache table type
         let table_type = match folder_type {
-            NodeType::TablesFolder => "table",
-            NodeType::ViewsFolder => "view",
-            NodeType::StoredProceduresFolder => "procedure",
-            NodeType::UserFunctionsFolder => "function",
-            NodeType::TriggersFolder => "trigger",
-            NodeType::EventsFolder => "event",
+            models::NodeType::TablesFolder => "table",
+            models::NodeType::ViewsFolder => "view",
+            models::NodeType::StoredProceduresFolder => "procedure",
+            models::NodeType::UserFunctionsFolder => "function",
+            models::NodeType::TriggersFolder => "trigger",
+            models::NodeType::EventsFolder => "event",
             _ => {
                 println!("Unsupported folder type: {:?}", folder_type);
                 return;
@@ -5049,15 +4968,15 @@ impl MyApp {
         if let Some(cached_items) = self.get_tables_from_cache(connection_id, database_name, table_type) {
             if !cached_items.is_empty() {                
                 // Create tree nodes from cached data
-                let child_nodes: Vec<TreeNode> = cached_items.into_iter().map(|item_name| {
-                    let mut child_node = TreeNode::new(item_name.clone(), match folder_type {
-                        NodeType::TablesFolder => NodeType::Table,
-                        NodeType::ViewsFolder => NodeType::View,
-                        NodeType::StoredProceduresFolder => NodeType::StoredProcedure,
-                        NodeType::UserFunctionsFolder => NodeType::UserFunction,
-                        NodeType::TriggersFolder => NodeType::Trigger,
-                        NodeType::EventsFolder => NodeType::Event,
-                        _ => NodeType::Table,
+                let child_nodes: Vec<models::TreeNode> = cached_items.into_iter().map(|item_name| {
+                    let mut child_node = models::TreeNode::new(item_name.clone(), match folder_type {
+                        models::NodeType::TablesFolder => models::NodeType::Table,
+                        models::NodeType::ViewsFolder => models::NodeType::View,
+                        models::NodeType::StoredProceduresFolder => models::NodeType::StoredProcedure,
+                        models::NodeType::UserFunctionsFolder => models::NodeType::UserFunction,
+                        models::NodeType::TriggersFolder => models::NodeType::Trigger,
+                        models::NodeType::EventsFolder => models::NodeType::Event,
+                        _ => models::NodeType::Table,
                     });
                     child_node.connection_id = Some(connection_id);
                     child_node.database_name = Some(database_name.clone());
@@ -5079,15 +4998,15 @@ impl MyApp {
             self.save_tables_to_cache(connection_id, database_name, &table_data);
             
             // Create tree nodes from fetched data
-            let child_nodes: Vec<TreeNode> = real_items.into_iter().map(|item_name| {
-                let mut child_node = TreeNode::new(item_name.clone(), match folder_type {
-                    NodeType::TablesFolder => NodeType::Table,
-                    NodeType::ViewsFolder => NodeType::View,
-                    NodeType::StoredProceduresFolder => NodeType::StoredProcedure,
-                    NodeType::UserFunctionsFolder => NodeType::UserFunction,
-                    NodeType::TriggersFolder => NodeType::Trigger,
-                    NodeType::EventsFolder => NodeType::Event,
-                    _ => NodeType::Table,
+            let child_nodes: Vec<models::TreeNode> = real_items.into_iter().map(|item_name| {
+                let mut child_node = models::TreeNode::new(item_name.clone(), match folder_type {
+                    models::NodeType::TablesFolder => models::NodeType::Table,
+                    models::NodeType::ViewsFolder => models::NodeType::View,
+                    models::NodeType::StoredProceduresFolder => models::NodeType::StoredProcedure,
+                    models::NodeType::UserFunctionsFolder => models::NodeType::UserFunction,
+                    models::NodeType::TriggersFolder => models::NodeType::Trigger,
+                    models::NodeType::EventsFolder => models::NodeType::Event,
+                    _ => models::NodeType::Table,
                 });
                 child_node.connection_id = Some(connection_id);
                 child_node.database_name = Some(database_name.clone());
@@ -5101,25 +5020,25 @@ impl MyApp {
             println!("Failed to fetch from MySQL, using sample {} data", table_type);
             
             let sample_items = match folder_type {
-                NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string()],
-                NodeType::ViewsFolder => vec!["user_orders_view".to_string(), "product_summary_view".to_string()],
-                NodeType::StoredProceduresFolder => vec!["sp_get_user".to_string(), "sp_create_order".to_string()],
-                NodeType::UserFunctionsFolder => vec!["fn_calculate_total".to_string()],
-                NodeType::TriggersFolder => vec!["tr_update_timestamp".to_string()],
-                NodeType::EventsFolder => vec!["ev_cleanup".to_string()],
+                models::NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string()],
+                models::NodeType::ViewsFolder => vec!["user_orders_view".to_string(), "product_summary_view".to_string()],
+                models::NodeType::StoredProceduresFolder => vec!["sp_get_user".to_string(), "sp_create_order".to_string()],
+                models::NodeType::UserFunctionsFolder => vec!["fn_calculate_total".to_string()],
+                models::NodeType::TriggersFolder => vec!["tr_update_timestamp".to_string()],
+                models::NodeType::EventsFolder => vec!["ev_cleanup".to_string()],
                 _ => vec![],
             };
             
             // Create tree nodes
-            let child_nodes: Vec<TreeNode> = sample_items.into_iter().map(|item_name| {
-                let mut child_node = TreeNode::new(item_name.clone(), match folder_type {
-                    NodeType::TablesFolder => NodeType::Table,
-                    NodeType::ViewsFolder => NodeType::View,
-                    NodeType::StoredProceduresFolder => NodeType::StoredProcedure,
-                    NodeType::UserFunctionsFolder => NodeType::UserFunction,
-                    NodeType::TriggersFolder => NodeType::Trigger,
-                    NodeType::EventsFolder => NodeType::Event,
-                    _ => NodeType::Table,
+            let child_nodes: Vec<models::TreeNode> = sample_items.into_iter().map(|item_name| {
+                let mut child_node = models::TreeNode::new(item_name.clone(), match folder_type {
+                    models::NodeType::TablesFolder => models::NodeType::Table,
+                    models::NodeType::ViewsFolder => models::NodeType::View,
+                    models::NodeType::StoredProceduresFolder => models::NodeType::StoredProcedure,
+                    models::NodeType::UserFunctionsFolder => models::NodeType::UserFunction,
+                    models::NodeType::TriggersFolder => models::NodeType::Trigger,
+                    models::NodeType::EventsFolder => models::NodeType::Event,
+                    _ => models::NodeType::Table,
                 });
                 child_node.connection_id = Some(connection_id);
                 child_node.database_name = Some(database_name.clone());
@@ -5133,21 +5052,21 @@ impl MyApp {
         println!("Loaded {} {} items for MySQL", node.children.len(), table_type);
     }
 
-    fn load_postgresql_folder_content(&mut self, _connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode, _folder_type: NodeType) {
+    fn load_postgresql_folder_content(&mut self, _connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode, _folder_type: models::NodeType) {
         // Placeholder for PostgreSQL folder content loading
-        node.children = vec![TreeNode::new("PostgreSQL folder content not implemented yet".to_string(), NodeType::Column)];
+        node.children = vec![models::TreeNode::new("PostgreSQL folder content not implemented yet".to_string(), models::NodeType::Column)];
     }
 
-    fn load_sqlite_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode, folder_type: NodeType) {
+    fn load_sqlite_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode, folder_type: models::NodeType) {
         println!("Loading {:?} content for SQLite", folder_type);
         
         // Try to get from cache first
         let table_type = match folder_type {
-            NodeType::TablesFolder => "table",
-            NodeType::ViewsFolder => "view",
+            models::NodeType::TablesFolder => "table",
+            models::NodeType::ViewsFolder => "view",
             _ => {
                 // For other folder types, return empty for now
-                node.children = vec![TreeNode::new("Not supported for SQLite".to_string(), NodeType::Column)];
+                node.children = vec![models::TreeNode::new("Not supported for SQLite".to_string(), models::NodeType::Column)];
                 return;
             }
         };
@@ -5158,12 +5077,12 @@ impl MyApp {
                 
                 node.children = cached_items.into_iter().map(|item_name| {
                     let node_type = match folder_type {
-                        NodeType::TablesFolder => NodeType::Table,
-                        NodeType::ViewsFolder => NodeType::View,
-                        _ => NodeType::Table,
+                        models::NodeType::TablesFolder => models::NodeType::Table,
+                        models::NodeType::ViewsFolder => models::NodeType::View,
+                        _ => models::NodeType::Table,
                     };
                     
-                    let mut item_node = TreeNode::new(item_name, node_type);
+                    let mut item_node = models::TreeNode::new(item_name, node_type);
                     item_node.connection_id = Some(connection_id);
                     item_node.database_name = Some("main".to_string());
                     item_node.is_loaded = false; // Will load columns on expansion if it's a table
@@ -5185,14 +5104,14 @@ impl MyApp {
             self.save_tables_to_cache(connection_id, "main", &table_data);
             
             // Create tree nodes from fetched data
-            let child_nodes: Vec<TreeNode> = real_items.into_iter().map(|item_name| {
+            let child_nodes: Vec<models::TreeNode> = real_items.into_iter().map(|item_name| {
                 let node_type = match folder_type {
-                    NodeType::TablesFolder => NodeType::Table,
-                    NodeType::ViewsFolder => NodeType::View,
-                    _ => NodeType::Table,
+                    models::NodeType::TablesFolder => models::NodeType::Table,
+                    models::NodeType::ViewsFolder => models::NodeType::View,
+                    _ => models::NodeType::Table,
                 };
                 
-                let mut item_node = TreeNode::new(item_name, node_type);
+                let mut item_node = models::TreeNode::new(item_name, node_type);
                 item_node.connection_id = Some(connection_id);
                 item_node.database_name = Some("main".to_string());
                 item_node.is_loaded = false; // Will load columns on expansion if it's a table
@@ -5205,19 +5124,19 @@ impl MyApp {
             println!("Failed to fetch from SQLite, using sample {} data", table_type);
             
             let sample_items = match folder_type {
-                NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string(), "categories".to_string()],
-                NodeType::ViewsFolder => vec!["user_summary".to_string(), "order_details".to_string()],
+                models::NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string(), "categories".to_string()],
+                models::NodeType::ViewsFolder => vec!["user_summary".to_string(), "order_details".to_string()],
                 _ => vec![],
             };
             
             let item_type = match folder_type {
-                NodeType::TablesFolder => NodeType::Table,
-                NodeType::ViewsFolder => NodeType::View,
-                _ => NodeType::Column, // fallback
+                models::NodeType::TablesFolder => models::NodeType::Table,
+                models::NodeType::ViewsFolder => models::NodeType::View,
+                _ => models::NodeType::Column, // fallback
             };
             
             node.children = sample_items.into_iter().map(|item_name| {
-                let mut item_node = TreeNode::new(item_name.clone(), item_type.clone());
+                let mut item_node = models::TreeNode::new(item_name.clone(), item_type.clone());
                 item_node.connection_id = Some(connection_id);
                 item_node.database_name = Some("main".to_string());
                 item_node.is_loaded = false;
@@ -5228,13 +5147,13 @@ impl MyApp {
         println!("Loaded {} items into {:?} folder for SQLite", node.children.len(), folder_type);
     }
 
-    fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut TreeNode, folder_type: NodeType) {
+    fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &ConnectionConfig, node: &mut models::TreeNode, folder_type: models::NodeType) {
         println!("Loading {:?} content for Redis", folder_type);
         
         // Redis doesn't have traditional folder structures like SQL databases
         // We'll create a simplified structure based on Redis concepts
         match folder_type {
-            NodeType::TablesFolder => {
+            models::NodeType::TablesFolder => {
                 // For Redis, "tables" could be key patterns or data structures
                 let redis_structures = vec![
                     "strings".to_string(),
@@ -5246,14 +5165,14 @@ impl MyApp {
                 ];
                 
                 node.children = redis_structures.into_iter().map(|structure_name| {
-                    let mut structure_node = TreeNode::new(structure_name, NodeType::Table);
+                    let mut structure_node = models::TreeNode::new(structure_name, models::NodeType::Table);
                     structure_node.connection_id = Some(connection_id);
                     structure_node.database_name = Some("redis".to_string());
                     structure_node.is_loaded = false;
                     structure_node
                 }).collect();
             },
-            NodeType::ViewsFolder => {
+            models::NodeType::ViewsFolder => {
                 // For Redis, "views" could be info sections
                 let info_sections = vec![
                     "server".to_string(),
@@ -5267,7 +5186,7 @@ impl MyApp {
                 ];
                 
                 node.children = info_sections.into_iter().map(|section_name| {
-                    let mut section_node = TreeNode::new(section_name, NodeType::View);
+                    let mut section_node = models::TreeNode::new(section_name, models::NodeType::View);
                     section_node.connection_id = Some(connection_id);
                     section_node.database_name = Some("info".to_string());
                     section_node.is_loaded = false;
@@ -5276,19 +5195,19 @@ impl MyApp {
             },
             _ => {
                 // Other folder types not supported for Redis
-                node.children = vec![TreeNode::new("Not supported for Redis".to_string(), NodeType::Column)];
+                node.children = vec![models::TreeNode::new("Not supported for Redis".to_string(), models::NodeType::Column)];
             }
         }
         
         println!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
     }
 
-    fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &ConnectionConfig, database_name: &str) -> Vec<TreeNode> {
+    fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &ConnectionConfig, database_name: &str) -> Vec<models::TreeNode> {
         // First try to get from cache
         if let Some(cached_columns) = self.get_columns_from_cache(connection_id, database_name, table_name) {
             if !cached_columns.is_empty() {
                 return cached_columns.into_iter().map(|(column_name, data_type)| {
-                    TreeNode::new(format!("{} ({})", column_name, data_type), NodeType::Column)
+                    models::TreeNode::new(format!("{} ({})", column_name, data_type), models::NodeType::Column)
                 }).collect();
             }
         }
@@ -5298,21 +5217,21 @@ impl MyApp {
             // Save to cache for future use
             self.save_columns_to_cache(connection_id, database_name, table_name, &real_columns);
             
-            // Convert to TreeNode
+            // Convert to models::TreeNode
             real_columns.into_iter().map(|(column_name, data_type)| {
-                TreeNode::new(format!("{} ({})", column_name, data_type), NodeType::Column)
+                models::TreeNode::new(format!("{} ({})", column_name, data_type), models::NodeType::Column)
             }).collect()
         } else {
             // If database fetch fails, return sample columns
             vec![
-                TreeNode::new("id (INTEGER)".to_string(), NodeType::Column),
-                TreeNode::new("name (VARCHAR)".to_string(), NodeType::Column),
-                TreeNode::new("created_at (TIMESTAMP)".to_string(), NodeType::Column),
+                models::TreeNode::new("id (INTEGER)".to_string(), models::NodeType::Column),
+                models::TreeNode::new("name (VARCHAR)".to_string(), models::NodeType::Column),
+                models::TreeNode::new("created_at (TIMESTAMP)".to_string(), models::NodeType::Column),
             ]
         }
     }
 
-    fn load_table_columns_for_node(&mut self, connection_id: i64, table_name: &str, nodes: &mut [TreeNode], _table_index: usize) {
+    fn load_table_columns_for_node(&mut self, connection_id: i64, table_name: &str, nodes: &mut [models::TreeNode], _table_index: usize) {
         // Find the connection by ID
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             let connection = connection.clone();
@@ -5333,10 +5252,10 @@ impl MyApp {
         }
     }
 
-    fn find_table_database_name(&self, nodes: &[TreeNode], table_name: &str, connection_id: i64) -> Option<String> {
+    fn find_table_database_name(&self, nodes: &[models::TreeNode], table_name: &str, connection_id: i64) -> Option<String> {
         for node in nodes {
             // If this is the table node we're looking for
-            if node.node_type == NodeType::Table && 
+            if node.node_type == models::NodeType::Table && 
                node.name == table_name && 
                node.connection_id == Some(connection_id) {
                 return node.database_name.clone();
@@ -5350,10 +5269,10 @@ impl MyApp {
         None
     }
 
-    fn update_table_node_with_columns_recursive(&mut self, nodes: &mut [TreeNode], table_name: &str, columns: Vec<TreeNode>, connection_id: i64) -> bool {
+    fn update_table_node_with_columns_recursive(&mut self, nodes: &mut [models::TreeNode], table_name: &str, columns: Vec<models::TreeNode>, connection_id: i64) -> bool {
         for node in nodes.iter_mut() {
             // If this is the table node we're looking for
-            if node.node_type == NodeType::Table && 
+            if node.node_type == models::NodeType::Table && 
                node.name == table_name && 
                node.connection_id == Some(connection_id) {
                 node.children = columns;
@@ -5499,7 +5418,7 @@ impl MyApp {
         // Users can select a specific connection to search within it
     }
     
-    fn filter_node_with_like_search(&self, node: &TreeNode, search_text: &str) -> Option<TreeNode> {
+    fn filter_node_with_like_search(&self, node: &models::TreeNode, search_text: &str) -> Option<models::TreeNode> {
         let mut matches = false;
         let mut filtered_children = Vec::new();
         
@@ -5641,16 +5560,16 @@ impl MyApp {
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| "Unknown Connection".to_string());
                 
-            let mut search_result_node = TreeNode::new(
+            let mut search_result_node = models::TreeNode::new(
                 format!("🔍 Search Results in {} ({} keys)", connection_name, search_results.len()), 
-                NodeType::CustomFolder
+                models::NodeType::CustomFolder
             );
             search_result_node.connection_id = Some(connection_id);
             search_result_node.is_expanded = true;
             
             // Add found keys as children
             for key in search_results {
-                let mut key_node = TreeNode::new(key.clone(), NodeType::Table);
+                let mut key_node = models::TreeNode::new(key.clone(), models::NodeType::Table);
                 key_node.connection_id = Some(connection_id);
                 search_result_node.children.push(key_node);
             }
@@ -5698,25 +5617,25 @@ impl MyApp {
                     .unwrap_or_else(|| "Unknown Connection".to_string());
                 
                 let total_tables: usize = results_by_db.values().map(|v| v.len()).sum();
-                let mut search_result_node = TreeNode::new(
+                let mut search_result_node = models::TreeNode::new(
                     format!("🔍 Search Results in {} ({} tables)", connection_name, total_tables), 
-                    NodeType::CustomFolder
+                    models::NodeType::CustomFolder
                 );
                 search_result_node.connection_id = Some(connection_id);
                 search_result_node.is_expanded = true;
                 
                 // Add databases and their tables
                 for (database_name, tables) in results_by_db {
-                    let mut db_node = TreeNode::new(
+                    let mut db_node = models::TreeNode::new(
                         format!("📁 {} ({} tables)", database_name, tables.len()),
-                        NodeType::Database
+                        models::NodeType::Database
                     );
                     db_node.connection_id = Some(connection_id);
                     db_node.database_name = Some(database_name.clone());
                     db_node.is_expanded = true;
                     
                     for table_name in tables {
-                        let mut table_node = TreeNode::new(table_name.clone(), NodeType::Table);
+                        let mut table_node = models::TreeNode::new(table_name.clone(), models::NodeType::Table);
                         table_node.connection_id = Some(connection_id);
                         table_node.database_name = Some(database_name.clone());
                         db_node.children.push(table_node);
@@ -5787,9 +5706,9 @@ impl MyApp {
         }
     }
 
-    fn find_redis_key_info(&self, node: &TreeNode, key_name: &str) -> Option<(String, String)> {
+    fn find_redis_key_info(&self, node: &models::TreeNode, key_name: &str) -> Option<(String, String)> {
         // Check if this node is a type folder (like "Strings (5)")
-        if node.node_type == NodeType::TablesFolder {            
+        if node.node_type == models::NodeType::TablesFolder {            
             // Extract the type from folder name
             let folder_type = if node.name.starts_with("Strings") {
                 "string"
@@ -5812,7 +5731,7 @@ impl MyApp {
             // Search for the key in this folder's children
             for child in &node.children {
                 println!("🔍 Checking child: '{}' (type: {:?})", child.name, child.node_type);
-                if child.node_type == NodeType::Table && child.name == key_name {
+                if child.node_type == models::NodeType::Table && child.name == key_name {
                     if let Some(db_name) = &child.database_name {
                         return Some((db_name.clone(), folder_type.to_string()));
                     }
@@ -7266,7 +7185,7 @@ impl MyApp {
         self.history_tree.clear();
         
         for item in &self.history_items {
-            let mut node = TreeNode::new(item.query.clone(), NodeType::HistoryItem);
+            let mut node = models::TreeNode::new(item.query.clone(), models::NodeType::HistoryItem);
             node.connection_id = Some(item.connection_id);
             
             self.history_tree.push(node);
@@ -7793,7 +7712,7 @@ impl App for MyApp {
                             println!("Background refresh completed successfully for connection {}", connection_id);
                             // Re-expand connection node to show fresh data
                             for node in &mut self.items_tree {
-                                if node.node_type == NodeType::Connection && node.connection_id == Some(connection_id) {
+                                if node.node_type == models::NodeType::Connection && node.connection_id == Some(connection_id) {
                                     node.is_loaded = false; // Force reload from cache
                                     node.is_expanded = true; // Expand to show databases
                                     break;
