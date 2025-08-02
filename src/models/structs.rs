@@ -1,36 +1,5 @@
-#[derive(Clone, PartialEq, Debug)]
-pub enum NodeType {
-    #[allow(dead_code)]
-    Database,
-    Table,
-    Column,
-    Query,
-    HistoryItem,
-    Connection,
-    DatabasesFolder,
-    TablesFolder,
-    ViewsFolder,
-    StoredProceduresFolder,
-    UserFunctionsFolder,
-    TriggersFolder,
-    EventsFolder,
-    DBAViewsFolder,
-    UsersFolder,
-    PrivilegesFolder,
-    ProcessesFolder,
-    StatusFolder,
-    View,
-    StoredProcedure,
-    UserFunction,
-    Trigger,
-    Event,
-    MySQLFolder,       // Folder untuk koneksi MySQL
-    PostgreSQLFolder,  // Folder untuk koneksi PostgreSQL
-    SQLiteFolder,      // Folder untuk koneksi SQLite
-    RedisFolder,       // Folder untuk koneksi Redis
-    CustomFolder,      // Folder custom yang bisa dinamai user
-    QueryFolder,       // Folder untuk mengelompokkan query files
-}
+use crate::models::enums::NodeType;
+
 
 #[derive(Clone)]
 pub struct TreeNode {
