@@ -29,7 +29,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Tabular",
         options,
-        Box::new(|_cc| Ok(Box::new(MyApp::new()))),
+        Box::new(|_cc| Ok(Box::new(Tabular::new()))),
     )
 }
 
@@ -62,16 +62,7 @@ fn load_icon() -> Option<egui::IconData> {
 
 
 
-// Enum untuk berbagai jenis database pool - sqlx pools are already thread-safe
-#[derive(Clone)]
-enum DatabasePool {
-    MySQL(Arc<MySqlPool>),
-    PostgreSQL(Arc<PgPool>),
-    SQLite(Arc<SqlitePool>),
-    Redis(Arc<ConnectionManager>),
-}
-
-struct MyApp {
+struct Tabular {
     editor_text: String,
     selected_menu: String,
     items_tree: Vec<models::structs::TreeNode>,
@@ -83,7 +74,7 @@ struct MyApp {
     new_connection: models::structs::ConnectionConfig,
     db_pool: Option<Arc<SqlitePool>>,
     // Connection cache untuk menghindari membuat koneksi berulang
-    connection_pools: HashMap<i64, DatabasePool>,
+    connection_pools: HashMap<i64, models::enums::DatabasePool>,
     // Context menu and edit connection fields
     show_edit_connection: bool,
     edit_connection: models::structs::ConnectionConfig,
@@ -154,16 +145,10 @@ struct MyApp {
     folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
 }
 
-#[derive(Debug, Clone)]
-struct ExpansionRequest {
-    node_type: models::enums::NodeType,
-    connection_id: i64,
-    database_name: Option<String>,
-}
 
 
 
-impl MyApp {
+impl Tabular {
     fn get_app_data_dir() -> std::path::PathBuf {
         let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         home_dir.join(".tabular")
@@ -384,7 +369,7 @@ impl MyApp {
         }
     }
 
-    async fn create_database_pool(connection: &models::structs::ConnectionConfig) -> Option<DatabasePool> {
+    async fn create_database_pool(connection: &models::structs::ConnectionConfig) -> Option<models::enums::DatabasePool> {
         match connection.connection_type {
             models::enums::DatabaseType::MySQL => {
                 let encoded_username = modules::url_encode(&connection.username);
@@ -403,7 +388,7 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        Some(DatabasePool::MySQL(Arc::new(pool)))
+                        Some(models::enums::DatabasePool::MySQL(Arc::new(pool)))
                     }
                     Err(_e) => {
                         None
@@ -425,7 +410,7 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        Some(DatabasePool::PostgreSQL(Arc::new(pool)))
+                        Some(models::enums::DatabasePool::PostgreSQL(Arc::new(pool)))
                     }
                     Err(_e) => {
                         None
@@ -445,7 +430,7 @@ impl MyApp {
                     .await
                 {
                     Ok(pool) => {
-                        Some(DatabasePool::SQLite(Arc::new(pool)))
+                        Some(models::enums::DatabasePool::SQLite(Arc::new(pool)))
                     }
                     Err(_e) => {
                         None
@@ -462,7 +447,7 @@ impl MyApp {
                 match Client::open(connection_string) {
                     Ok(client) => {
                         match ConnectionManager::new(client).await {
-                            Ok(manager) => Some(DatabasePool::Redis(Arc::new(manager))),
+                            Ok(manager) => Some(models::enums::DatabasePool::Redis(Arc::new(manager))),
                             Err(_e) => None,
                         }
                     }
@@ -475,33 +460,33 @@ impl MyApp {
     async fn fetch_and_cache_all_data(
         connection_id: i64,
         connection: &models::structs::ConnectionConfig,
-        pool: &DatabasePool,
+        pool: &models::enums::DatabasePool,
         cache_pool: &SqlitePool,
     ) -> bool {
         match &connection.connection_type {
             models::enums::DatabaseType::MySQL => {
-                if let DatabasePool::MySQL(mysql_pool) = pool {
+                if let models::enums::DatabasePool::MySQL(mysql_pool) = pool {
                     Self::fetch_mysql_data(connection_id, mysql_pool, cache_pool).await
                 } else {
                     false
                 }
             }
             models::enums::DatabaseType::SQLite => {
-                if let DatabasePool::SQLite(sqlite_pool) = pool {
+                if let models::enums::DatabasePool::SQLite(sqlite_pool) = pool {
                     sqlite::fetch_data(connection_id, sqlite_pool, cache_pool).await
                 } else {
                     false
                 }
             }
             models::enums::DatabaseType::PostgreSQL => {
-                if let DatabasePool::PostgreSQL(postgres_pool) = pool {
+                if let models::enums::DatabasePool::PostgreSQL(postgres_pool) = pool {
                     Self::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
                 } else {
                     false
                 }
             }
             models::enums::DatabaseType::Redis => {
-                if let DatabasePool::Redis(redis_manager) = pool {
+                if let models::enums::DatabasePool::Redis(redis_manager) = pool {
                     Self::fetch_redis_data(connection_id, redis_manager, cache_pool).await
                 } else {
                     false
@@ -1905,7 +1890,7 @@ impl MyApp {
             editor_text: &mut String, node_index: usize, 
             refreshing_connections: &std::collections::HashSet<i64>
         ) -> (
-            Option<ExpansionRequest>, Option<(usize, i64, String)>, 
+            Option<models::structs::ExpansionRequest>, Option<(usize, i64, String)>, 
             Option<i64>, Option<(i64, String)>, Option<i64>, 
             Option<(String, String, String)>, Option<String>, Option<String>, // Add parent folder for creation
             Option<(i64, String)> // Add mapping for folder removal: (hash, folder_path)
@@ -1943,7 +1928,7 @@ impl MyApp {
                     // If this is a connection node and not loaded, request expansion
                     if node.node_type == models::enums::NodeType::Connection && !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
-                            expansion_request = Some(ExpansionRequest {
+                            expansion_request = Some(models::structs::ExpansionRequest {
                                 node_type: models::enums::NodeType::Connection,
                                 connection_id: conn_id,
                                 database_name: None,
@@ -1970,7 +1955,7 @@ impl MyApp {
                         node.node_type == models::enums::NodeType::EventsFolder) && 
                        !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
-                            expansion_request = Some(ExpansionRequest {
+                            expansion_request = Some(models::structs::ExpansionRequest {
                                 node_type: node.node_type.clone(),
                                 connection_id: conn_id,
                                 database_name: node.database_name.clone(),
@@ -1981,7 +1966,7 @@ impl MyApp {
                     // If this is a Database node and not loaded, request database expansion (for Redis keys)
                     if node.node_type == models::enums::NodeType::Database && !node.is_loaded && node.is_expanded {
                         if let Some(conn_id) = node.connection_id {
-                            expansion_request = Some(ExpansionRequest {
+                            expansion_request = Some(models::structs::ExpansionRequest {
                                 node_type: models::enums::NodeType::Database,
                                 connection_id: conn_id,
                                 database_name: node.database_name.clone(),
@@ -3504,7 +3489,7 @@ impl MyApp {
     }
 
     // Helper function untuk mendapatkan atau membuat connection pool
-    async fn get_or_create_connection_pool(&mut self, connection_id: i64) -> Option<DatabasePool> {
+    async fn get_or_create_connection_pool(&mut self, connection_id: i64) -> Option<models::enums::DatabasePool> {
         // First check if we already have a cached connection pool for this connection
         if let Some(cached_pool) = self.connection_pools.get(&connection_id) {
             println!("✅ Using cached connection pool for connection {}", connection_id);
@@ -3543,7 +3528,7 @@ impl MyApp {
                     
                     match pool_result {
                         Ok(pool) => {
-                            let database_pool = DatabasePool::MySQL(Arc::new(pool));
+                            let database_pool = models::enums::DatabasePool::MySQL(Arc::new(pool));
                             self.connection_pools.insert(connection_id, database_pool.clone());
                             println!("✅ Created MySQL connection pool for connection {}", connection_id);
                             Some(database_pool)
@@ -3573,7 +3558,7 @@ impl MyApp {
                     
                     match pool_result {
                         Ok(pool) => {
-                            let database_pool = DatabasePool::PostgreSQL(Arc::new(pool));
+                            let database_pool = models::enums::DatabasePool::PostgreSQL(Arc::new(pool));
                             self.connection_pools.insert(connection_id, database_pool.clone());
                             Some(database_pool)
                         },
@@ -3599,7 +3584,7 @@ impl MyApp {
                     
                     match pool_result {
                         Ok(pool) => {
-                            let database_pool = DatabasePool::SQLite(Arc::new(pool));
+                            let database_pool = models::enums::DatabasePool::SQLite(Arc::new(pool));
                             self.connection_pools.insert(connection_id, database_pool.clone());
                             Some(database_pool)
                         },
@@ -3621,7 +3606,7 @@ impl MyApp {
                         Ok(client) => {
                             match ConnectionManager::new(client).await {
                                 Ok(manager) => {
-                                    let database_pool = DatabasePool::Redis(Arc::new(manager));
+                                    let database_pool = models::enums::DatabasePool::Redis(Arc::new(manager));
                                     self.connection_pools.insert(connection_id, database_pool.clone());
                                     Some(database_pool)
                                 },
@@ -4167,7 +4152,7 @@ impl MyApp {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let keys_result = rt.block_on(async {
             if let Some(pool) = self.get_or_create_connection_pool(connection_id).await {
-                if let DatabasePool::Redis(redis_manager) = pool {
+                if let models::enums::DatabasePool::Redis(redis_manager) = pool {
                     let mut conn = redis_manager.as_ref().clone();
                     
                     // Select the specific database
@@ -4277,7 +4262,7 @@ impl MyApp {
             let pool = self.get_or_create_connection_pool(connection_id).await?;
             
             match pool {
-                DatabasePool::MySQL(mysql_pool) => {
+                models::enums::DatabasePool::MySQL(mysql_pool) => {
                     let result = sqlx::query_as::<_, (String,)>("SHOW DATABASES")
                         .fetch_all(mysql_pool.as_ref())
                         .await;
@@ -4296,7 +4281,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabasePool::PostgreSQL(pg_pool) => {
+                models::enums::DatabasePool::PostgreSQL(pg_pool) => {
                     let result = sqlx::query_as::<_, (String,)>(
                         "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1')"
                     )
@@ -4314,7 +4299,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabasePool::SQLite(sqlite_pool) => {
+                models::enums::DatabasePool::SQLite(sqlite_pool) => {
                     // For SQLite, we'll query the actual database for table information
                     let result = sqlx::query_as::<_, (String,)>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
                         .fetch_all(sqlite_pool.as_ref())
@@ -4337,7 +4322,7 @@ impl MyApp {
                         }
                     }
                 },
-                DatabasePool::Redis(redis_manager) => {
+                models::enums::DatabasePool::Redis(redis_manager) => {
                     // For Redis, get actual databases (db0, db1, etc.)
                     let mut conn = redis_manager.as_ref().clone();
                     
@@ -4375,7 +4360,7 @@ impl MyApp {
             let pool = self.get_or_create_connection_pool(connection_id).await?;
             
             match pool {
-                DatabasePool::MySQL(mysql_pool) => {
+                models::enums::DatabasePool::MySQL(mysql_pool) => {
                     let query = match table_type {
                         "table" => format!("SHOW TABLES FROM `{}`", database_name),
                         "view" => format!("SELECT table_name FROM information_schema.views WHERE table_schema = '{}'", database_name),
@@ -4422,7 +4407,7 @@ impl MyApp {
             let pool = self.get_or_create_connection_pool(connection_id).await?;
             
             match pool {
-                DatabasePool::SQLite(sqlite_pool) => {
+                models::enums::DatabasePool::SQLite(sqlite_pool) => {
                     let query = match table_type {
                         "table" => "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                         "view" => "SELECT name FROM sqlite_master WHERE type='view'",
@@ -4465,7 +4450,7 @@ impl MyApp {
             let pool = self.get_or_create_connection_pool(connection_id).await?;
             
             match pool {
-                DatabasePool::Redis(redis_manager) => {
+                models::enums::DatabasePool::Redis(redis_manager) => {
                     let mut conn = redis_manager.as_ref().clone();
                     match table_type {
                                 "info_section" => {
@@ -5362,7 +5347,7 @@ impl MyApp {
         
         let search_results = rt.block_on(async {
             if let Some(pool) = self.get_or_create_connection_pool(connection_id).await {
-                if let DatabasePool::Redis(redis_manager) = pool {
+                if let models::enums::DatabasePool::Redis(redis_manager) = pool {
                     let mut conn = redis_manager.as_ref().clone();
                     
                     // Use flexible pattern for LIKE search - search text can appear anywhere
@@ -5721,7 +5706,7 @@ impl MyApp {
             match self.get_or_create_connection_pool(connection_id).await {
                 Some(pool) => {
                     match pool {
-                        DatabasePool::MySQL(mysql_pool) => {
+                        models::enums::DatabasePool::MySQL(mysql_pool) => {
                             println!("Executing MySQL query: {}", query);
                             match sqlx::query(query).fetch_all(mysql_pool.as_ref()).await {
                                 Ok(rows) => {
@@ -5750,7 +5735,7 @@ impl MyApp {
                                 }
                             }
                         },
-                        DatabasePool::PostgreSQL(pg_pool) => {
+                        models::enums::DatabasePool::PostgreSQL(pg_pool) => {
                             println!("Executing PostgreSQL query: {}", query);
                             match sqlx::query(query).fetch_all(pg_pool.as_ref()).await {
                                 Ok(rows) => {
@@ -5783,7 +5768,7 @@ impl MyApp {
                                 }
                             }
                         },
-                        DatabasePool::SQLite(sqlite_pool) => {
+                        models::enums::DatabasePool::SQLite(sqlite_pool) => {
                             println!("Executing SQLite query: {}", query);
                             match sqlx::query(query).fetch_all(sqlite_pool.as_ref()).await {
                                 Ok(rows) => {
@@ -5810,7 +5795,7 @@ impl MyApp {
                                 }
                             }
                         },
-                        DatabasePool::Redis(redis_manager) => {
+                        models::enums::DatabasePool::Redis(redis_manager) => {
                             println!("Executing Redis command: {}", query);
                             
                             // For Redis, we need to handle commands differently
@@ -7513,7 +7498,7 @@ impl MyApp {
     }
 }
 
-impl App for MyApp {
+impl App for Tabular {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         // Handle forced refresh flag
         if self.needs_refresh {

@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
+use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
+use sqlx::{MySqlPool, PgPool, SqlitePool};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum NodeType {
@@ -51,4 +55,14 @@ pub enum DatabaseType {
     PostgreSQL,
     SQLite,
     Redis,
+}
+
+
+// Enum untuk berbagai jenis database pool - sqlx pools are already thread-safe
+#[derive(Clone)]
+pub enum DatabasePool {
+    MySQL(Arc<MySqlPool>),
+    PostgreSQL(Arc<PgPool>),
+    SQLite(Arc<SqlitePool>),
+    Redis(Arc<ConnectionManager>),
 }

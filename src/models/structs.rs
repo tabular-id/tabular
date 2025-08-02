@@ -1,4 +1,10 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
+
+
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 
 use crate::models::{self, enums::NodeType};
 
@@ -148,4 +154,13 @@ impl Default for ConnectionConfig {
             folder: None, // No custom folder by default
         }
     }
+}
+
+
+
+#[derive(Debug, Clone)]
+pub struct ExpansionRequest {
+    pub node_type: models::enums::NodeType,
+    pub connection_id: i64,
+    pub database_name: Option<String>,
 }
