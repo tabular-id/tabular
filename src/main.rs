@@ -1031,12 +1031,8 @@ impl MyApp {
         // Initialize with connections as root nodes
         self.refresh_connections_tree();
 
-        // Sample queries
-        self.queries_tree = vec![
-            TreeNode::new("Get all users".to_string(), NodeType::Query),
-            TreeNode::new("Recent orders".to_string(), NodeType::Query),
-            TreeNode::new("Product statistics".to_string(), NodeType::Query),
-        ];
+        // Don't add sample queries - let load_queries_from_directory handle the real structure
+        // self.queries_tree will be populated by load_queries_from_directory()
 
         // Initialize empty history tree (will be loaded from database)
         self.refresh_history_tree();
@@ -1986,33 +1982,41 @@ impl MyApp {
         let mut needs_full_refresh = false;
                 
         for context_id in context_menu_requests {
+            println!("🔍 Processing context_id: {}", context_id);
+            
             if context_id >= 50000 {
                 // ID >= 50000 means create folder in folder operation
                 let hash = context_id - 50000;
+                println!("📁 Create folder operation with hash: {}", hash);
                 self.handle_create_folder_in_folder_request(hash);
                 // Force immediate UI repaint after create folder request
                 ui.ctx().request_repaint();
             } else if context_id >= 40000 {
                 // ID >= 40000 means move query to folder operation
                 let hash = context_id - 40000;
+                println!("📦 Move query operation with hash: {}", hash);
                 self.handle_query_move_request(hash);
             } else if context_id >= 30000 {
                 // ID >= 30000 means alter table operation
                 let connection_id = context_id - 30000;
+                println!("🔧 Alter table operation for connection: {}", connection_id);
                 self.handle_alter_table_request(connection_id);
             } else if context_id >= 20000 {
                 // ID >= 20000 means query edit operation
                 let hash = context_id - 20000;
+                println!("✏️ Query edit operation with hash: {}", hash);
                 self.handle_query_edit_request(hash);
             } else if context_id <= -50000 {
                 // ID <= -50000 means remove folder operation
                 let hash = (-context_id) - 50000;
+                println!("🗑️ Remove folder operation with hash: {}", hash);
                 self.handle_remove_folder_request(hash);
                 // Force immediate UI repaint after folder removal
                 ui.ctx().request_repaint();
             } else if context_id <= -20000 {
                 // ID <= -20000 means query removal operation  
                 let hash = (-context_id) - 20000;
+                println!("🗑️ Remove query operation with hash: {}", hash);
                 if self.handle_query_remove_request_by_hash(hash) {
                     // Force refresh of queries tree if removal was successful
                     self.load_queries_from_directory();
@@ -2027,6 +2031,7 @@ impl MyApp {
             } else if context_id > 10000 {
                 // ID > 10000 means copy connection (connection_id = context_id - 10000)
                 let connection_id = context_id - 10000;
+                println!("📋 Copy connection operation for connection: {}", connection_id);
                 self.copy_connection(connection_id);
                 
                 // Force immediate tree refresh and UI update
@@ -2037,9 +2042,10 @@ impl MyApp {
                 
                 // Break early to prevent further processing
                 break;
-            } else if context_id > 1000 {
-                // ID > 1000 means refresh connection (connection_id = context_id / 1000)
-                let connection_id = context_id / 1000;
+            } else if (1000..10000).contains(&context_id) {
+                // ID 1000-9999 means refresh connection (connection_id = context_id - 1000)
+                let connection_id = context_id - 1000;
+                println!("🔄 Refresh connection operation for connection: {}", connection_id);
                 if !processed_refreshes.contains(&connection_id) {
                     processed_refreshes.insert(connection_id);
                     self.refresh_connection(connection_id);
@@ -2272,7 +2278,7 @@ impl MyApp {
                         }
                         if ui.button("Refresh").clicked() {
                             if let Some(conn_id) = node.connection_id {
-                                context_menu_request = Some(conn_id * 1000); // Use multiplication to indicate refresh
+                                context_menu_request = Some(1000 + conn_id); // Add to 1000 base for refresh (range 1001-9999)
                             }
                             ui.close_menu();
                         }
@@ -2971,6 +2977,7 @@ impl MyApp {
     }
 
     fn handle_alter_table_request(&mut self, connection_id: i64) {
+        println!("🔍 handle_alter_table_request called with connection_id: {}", connection_id);
         
         // Find the connection by ID to determine database type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -3034,15 +3041,14 @@ impl MyApp {
         )
     }
 
-    fn handle_create_folder_in_folder_request(&mut self, hash: i64) {
-        
+    fn handle_create_folder_in_folder_request(&mut self, _hash: i64) {
+        println!("🔍 handle_create_folder_in_folder_request called with hash: {}", _hash);
         // Parent folder should already be set when context menu was clicked
         if self.parent_folder_for_creation.is_some() {
             // Show the create folder dialog
             self.show_create_folder_dialog = true;
         } else {
             println!("❌ No parent folder set for creation! This should not happen.");
-            println!("❌ Debug: Hash was {}, showing error", hash);
             self.error_message = "No parent folder selected for creation".to_string();
             self.show_error_message = true;
         }
@@ -3691,13 +3697,15 @@ impl MyApp {
 
     // Helper function untuk mendapatkan atau membuat connection pool
     async fn get_or_create_connection_pool(&mut self, connection_id: i64) -> Option<DatabasePool> {
+        // First check if we already have a cached connection pool for this connection
+        if let Some(cached_pool) = self.connection_pools.get(&connection_id) {
+            println!("✅ Using cached connection pool for connection {}", connection_id);
+            return Some(cached_pool.clone());
+        }
 
+        println!("🔄 Creating new connection pool for connection {}", connection_id);
 
-        // ALWAYS recreate pool to ensure we use the new Arc<Pool> architecture
-        // Remove any existing cached pool first
-        self.connection_pools.remove(&connection_id);
-
-        // Jika belum ada, buat connection pool baru
+        // If not cached, create a new connection pool
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             match connection.connection_type {
                 DatabaseType::MySQL => {
@@ -3710,24 +3718,18 @@ impl MyApp {
 
                     // ping the host first
                     if !helpers::ping_host(&connection.host) {
+                        println!("❌ Cannot ping host: {}", connection.host);
                         return None;
                     }
                     
                     // Configure MySQL pool with proper settings
                     let pool_result = MySqlPoolOptions::new()
-                        .max_connections(15)  // Increase max connections further
-                        .min_connections(3)   // Keep more minimum connections alive
-                        .acquire_timeout(std::time::Duration::from_secs(45))  // Even longer timeout
-                        .idle_timeout(std::time::Duration::from_secs(1800))   // 30 minute idle timeout
-                        .max_lifetime(std::time::Duration::from_secs(7200))   // 2 hour max lifetime
+                        .max_connections(10)  // Reduce connections for better stability
+                        .min_connections(2)   // Fewer minimum connections
+                        .acquire_timeout(std::time::Duration::from_secs(30))  // Reasonable timeout
+                        .idle_timeout(std::time::Duration::from_secs(600))    // 10 minute idle timeout
+                        .max_lifetime(std::time::Duration::from_secs(3600))   // 1 hour max lifetime
                         .test_before_acquire(true)  // Test connections before use
-                        .after_connect(|conn, _meta| {
-                            Box::pin(async move {
-                                // Set connection timeout and other MySQL specific settings
-                                sqlx::query("SET SESSION wait_timeout = 28800, interactive_timeout = 28800").execute(conn).await?;
-                                Ok(())
-                            })
-                        })
                         .connect(&connection_string)
                         .await;
                     
@@ -3735,10 +3737,11 @@ impl MyApp {
                         Ok(pool) => {
                             let database_pool = DatabasePool::MySQL(Arc::new(pool));
                             self.connection_pools.insert(connection_id, database_pool.clone());
+                            println!("✅ Created MySQL connection pool for connection {}", connection_id);
                             Some(database_pool)
                         },
                         Err(e) => {
-                            println!("Failed to create MySQL pool: {}", e);
+                            println!("❌ Failed to create MySQL pool for connection {}: {}", connection_id, e);
                             None
                         }
                     }
