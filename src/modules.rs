@@ -1,3 +1,5 @@
+use eframe::egui;
+
 pub fn url_encode(input: &str) -> String {
        input
        .replace("%", "%25")  // Must be first
@@ -11,3 +13,26 @@ pub fn url_encode(input: &str) -> String {
        .replace(":", "%3A")
        .replace("/", "%2F")
 }
+
+
+pub fn load_icon() -> Option<egui::IconData> {
+    let icon_bytes = include_bytes!("../assets/logo.png");
+    
+    match image::load_from_memory(icon_bytes) {
+        Ok(image) => {
+            let rgba = image.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            Some(egui::IconData {
+                rgba: rgba.into_raw(),
+                width,
+                height,
+            })
+        }
+        Err(e) => {
+            eprintln!("Failed to load icon: {}", e);
+            None
+        }
+    }
+}
+
+
