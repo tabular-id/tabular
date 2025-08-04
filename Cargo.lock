@@ -4256,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "tabular"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "colorful",

@@ -8,93 +8,93 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{export, helpers, models, modules, driver_sqlite, driver_mysql};
+use crate::{cache_data, driver_mysql, driver_sqlite, export, helpers, models, modules};
 
 
 
 
 
 pub struct Tabular {
-    editor_text: String,
-    selected_menu: String,
-    items_tree: Vec<models::structs::TreeNode>,
-    queries_tree: Vec<models::structs::TreeNode>,
-    history_tree: Vec<models::structs::TreeNode>,
-    history_items: Vec<models::structs::HistoryItem>, // Actual history data
-    connections: Vec<models::structs::ConnectionConfig>,
-    show_add_connection: bool,
-    new_connection: models::structs::ConnectionConfig,
-    db_pool: Option<Arc<SqlitePool>>,
+    pub editor_text: String,
+    pub selected_menu: String,
+    pub items_tree: Vec<models::structs::TreeNode>,
+    pub queries_tree: Vec<models::structs::TreeNode>,
+    pub history_tree: Vec<models::structs::TreeNode>,
+    pub history_items: Vec<models::structs::HistoryItem>, // Actual history data
+    pub connections: Vec<models::structs::ConnectionConfig>,
+    pub show_add_connection: bool,
+    pub new_connection: models::structs::ConnectionConfig,
+    pub db_pool: Option<Arc<SqlitePool>>,
     // Connection cache untuk menghindari membuat koneksi berulang
-    connection_pools: HashMap<i64, models::enums::DatabasePool>,
+    pub connection_pools: HashMap<i64, models::enums::DatabasePool>,
     // Context menu and edit connection fields
-    show_edit_connection: bool,
-    edit_connection: models::structs::ConnectionConfig,
+    pub show_edit_connection: bool,
+    pub edit_connection: models::structs::ConnectionConfig,
     // UI refresh flag
-    needs_refresh: bool,
+    pub needs_refresh: bool,
     // Table data display
-    current_table_data: Vec<Vec<String>>,
-    current_table_headers: Vec<String>,
-    current_table_name: String,
-    current_connection_id: Option<i64>,
+    pub current_table_data: Vec<Vec<String>>,
+    pub current_table_headers: Vec<String>,
+    pub current_table_name: String,
+    pub current_connection_id: Option<i64>,
     // Pagination
-    current_page: usize,
-    page_size: usize,
-    total_rows: usize,
-    all_table_data: Vec<Vec<String>>, // Store all data for pagination
+    pub current_page: usize,
+    pub page_size: usize,
+    pub total_rows: usize,
+    pub all_table_data: Vec<Vec<String>>, // Store all data for pagination
     // Splitter position for resizable table view (0.0 to 1.0)
-    table_split_ratio: f32,
+    pub table_split_ratio: f32,
     // Table sorting state
-    sort_column: Option<usize>,
-    sort_ascending: bool,
+    pub sort_column: Option<usize>,
+    pub sort_ascending: bool,
     // Test connection status
-    test_connection_status: Option<(bool, String)>, // (success, message)
-    test_connection_in_progress: bool,
+    pub test_connection_status: Option<(bool, String)>, // (success, message)
+    pub test_connection_in_progress: bool,
     // Background processing channels
-    background_sender: Option<Sender<models::enums::BackgroundTask>>,
-    background_receiver: Option<Receiver<models::enums::BackgroundResult>>,
+    pub background_sender: Option<Sender<models::enums::BackgroundTask>>,
+    pub background_receiver: Option<Receiver<models::enums::BackgroundResult>>,
     // Background refresh status tracking
-    refreshing_connections: std::collections::HashSet<i64>,
+    pub refreshing_connections: std::collections::HashSet<i64>,
     // Query tab system
-    query_tabs: Vec<models::structs::QueryTab>,
-    active_tab_index: usize,
-    next_tab_id: usize,
+    pub query_tabs: Vec<models::structs::QueryTab>,
+    pub active_tab_index: usize,
+    pub next_tab_id: usize,
     // Save dialog
-    show_save_dialog: bool,
-    save_filename: String,
+    pub show_save_dialog: bool,
+    pub save_filename: String,
     // Connection selection dialog
-    show_connection_selector: bool,
-    pending_query: String, // Store query to execute after connection is selected
-    auto_execute_after_connection: bool, // Flag to auto-execute after connection selected
+    pub show_connection_selector: bool,
+    pub pending_query: String, // Store query to execute after connection is selected
+    pub auto_execute_after_connection: bool, // Flag to auto-execute after connection selected
     // Error message display
-    error_message: String,
-    show_error_message: bool,
+    pub error_message: String,
+    pub show_error_message: bool,
     // Advanced Editor Configuration
-    advanced_editor: models::structs::AdvancedEditor,
+    pub advanced_editor: models::structs::AdvancedEditor,
     // Selected text for executing only selected queries
-    selected_text: String,
+    pub selected_text: String,
     // Command Palette
-    show_command_palette: bool,
-    command_palette_input: String,
-    show_theme_selector: bool,
-    command_palette_items: Vec<String>,
-    command_palette_selected_index: usize,
-    theme_selector_selected_index: usize,
+    pub show_command_palette: bool,
+    pub command_palette_input: String,
+    pub show_theme_selector: bool,
+    pub command_palette_items: Vec<String>,
+    pub command_palette_selected_index: usize,
+    pub theme_selector_selected_index: usize,
     // Flag to request theme selector on next frame
-    request_theme_selector: bool,
+    pub request_theme_selector: bool,
     // Database search functionality
-    database_search_text: String,
-    filtered_items_tree: Vec<models::structs::TreeNode>,
-    show_search_results: bool,
+    pub database_search_text: String,
+    pub filtered_items_tree: Vec<models::structs::TreeNode>,
+    pub show_search_results: bool,
     // Query folder management
-    show_create_folder_dialog: bool,
-    new_folder_name: String,
-    selected_query_for_move: Option<String>,
-    show_move_to_folder_dialog: bool,
-    target_folder_name: String,
-    parent_folder_for_creation: Option<String>,
-    selected_folder_for_removal: Option<String>,
-    folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
+    pub show_create_folder_dialog: bool,
+    pub new_folder_name: String,
+    pub selected_query_for_move: Option<String>,
+    pub show_move_to_folder_dialog: bool,
+    pub target_folder_name: String,
+    pub parent_folder_for_creation: Option<String>,
+    pub selected_folder_for_removal: Option<String>,
+    pub folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
 }
 
 
@@ -3173,29 +3173,6 @@ impl Tabular {
         }
     }
 
-    fn get_tables_from_cache(&self, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result = rt.block_on(async {
-                sqlx::query_as::<_, (String,)>("SELECT table_name FROM table_cache WHERE connection_id = ? AND database_name = ? AND table_type = ? ORDER BY table_name")
-                    .bind(connection_id)
-                    .bind(database_name)
-                    .bind(table_type)
-                    .fetch_all(pool_clone.as_ref())
-                    .await
-            });
-            
-            match result {
-                Ok(rows) => Some(rows.into_iter().map(|(name,)| name).collect()),
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
-    }
-
     fn save_columns_to_cache(&self, connection_id: i64, database_name: &str, table_name: &str, columns: &[(String, String)]) {
         if let Some(ref pool) = self.db_pool {
             let pool_clone = pool.clone();
@@ -4768,7 +4745,7 @@ impl Tabular {
         };
         
         // First try to get from cache
-        if let Some(cached_items) = self.get_tables_from_cache(connection_id, database_name, table_type) {
+        if let Some(cached_items) = cache_data::get_tables_from_cache(self, connection_id, database_name, table_type) {
             if !cached_items.is_empty() {                
                 // Create tree nodes from cached data
                 let child_nodes: Vec<models::structs::TreeNode> = cached_items.into_iter().map(|item_name| {
@@ -4874,7 +4851,7 @@ impl Tabular {
             }
         };
         
-        if let Some(cached_items) = self.get_tables_from_cache(connection_id, "main", table_type) {
+        if let Some(cached_items) = cache_data::get_tables_from_cache(self, connection_id, "main", table_type) {
             if !cached_items.is_empty() {
                 println!("Loading {} {} from cache for SQLite", cached_items.len(), table_type);
                 
