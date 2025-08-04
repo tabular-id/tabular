@@ -1,3 +1,253 @@
-pub fn test() {
-       println!("This is a test function in driver_mysql.rs");
+
+// Helper function for final fallback when all type-specific conversions fail
+fn get_value_as_string_fallback(row: &sqlx::mysql::MySqlRow, column_name: &str, type_name: &str) -> String {
+       use sqlx::{Row, Column};
+       
+       println!("Fallback for column '{}' with type '{}'", column_name, type_name);
+       
+       // Simple fallback: try string conversion with both column name and index
+       // Try column index instead of name (more reliable)
+       let column_index = match row.columns().iter().position(|col| col.name() == column_name) {
+       Some(idx) => idx,
+       None => {
+              println!("Column '{}' not found in row", column_name);
+              return format!("[COLUMN_NOT_FOUND:{}]", column_name);
+       }
+       };
+       
+       // Try with column index first
+       if let Ok(Some(val)) = row.try_get::<Option<String>, _>(column_index) {
+       return val;
+       }
+       if let Ok(val) = row.try_get::<String, _>(column_index) {
+       return val;
+       }
+       
+       // Try with column name as fallback
+       match row.try_get::<Option<String>, _>(column_name) {
+       Ok(Some(val)) => val,
+       Ok(None) => "NULL".to_string(),
+       Err(_) => format!("[CONVERSION_ERROR:{}]", type_name)
+       }
 }
+
+
+
+// Helper function to convert MySQL rows to Vec<Vec<String>> with proper type checking
+pub(crate) fn convert_mysql_rows_to_table_data(rows: Vec<sqlx::mysql::MySqlRow>) -> Vec<Vec<String>> {
+       use sqlx::{Row, Column, TypeInfo};
+       
+       let mut table_data = Vec::new();
+       
+       for row in &rows {
+       let mut row_data = Vec::new();
+       let columns = row.columns();
+       
+       for column in columns.iter() {
+              let column_name = column.name();
+              let type_info = column.type_info();
+              let type_name = type_info.name();
+              
+              // Convert value based on MySQL type
+              let value_str = match type_name {
+              // Integer types
+              "TINYINT" => {
+                     match row.try_get::<Option<i8>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "SMALLINT" => {
+                     match row.try_get::<Option<i16>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "MEDIUMINT" | "INT" => {
+                     match row.try_get::<Option<i32>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "BIGINT" => {
+                     match row.try_get::<Option<i64>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Unsigned integer types
+              "TINYINT UNSIGNED" => {
+                     match row.try_get::<Option<u8>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "SMALLINT UNSIGNED" => {
+                     match row.try_get::<Option<u16>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "MEDIUMINT UNSIGNED" | "INT UNSIGNED" => {
+                     match row.try_get::<Option<u32>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "BIGINT UNSIGNED" => {
+                     match row.try_get::<Option<u64>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Floating point types
+              "FLOAT" => {
+                     match row.try_get::<Option<f32>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              "DOUBLE" => {
+                     match row.try_get::<Option<f64>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Decimal types - use rust_decimal for proper handling
+              "DECIMAL" | "NUMERIC" => {
+                     // Method 1: Try rust_decimal::Decimal first (best for precision)
+                     if let Ok(Some(val)) = row.try_get::<Option<rust_decimal::Decimal>, _>(column_name) {
+                     val.to_string()
+                     } else if let Ok(val) = row.try_get::<rust_decimal::Decimal, _>(column_name) {
+                     val.to_string()
+                     }
+                     // Method 2: Try as string (fallback)
+                     else if let Ok(Some(val)) = row.try_get::<Option<String>, _>(column_name) {
+                     val
+                     } else if let Ok(val) = row.try_get::<String, _>(column_name) {
+                     val
+                     }
+                     // Method 3: Try as f64 (last resort)
+                     else if let Ok(Some(val)) = row.try_get::<Option<f64>, _>(column_name) {
+                     val.to_string()
+                     } else if let Ok(val) = row.try_get::<f64, _>(column_name) {
+                     val.to_string()
+                     }
+                     // Method 4: Final fallback
+                     else {
+                     get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // String types
+              "VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => {
+                     match row.try_get::<Option<String>, _>(column_name) {
+                     Ok(Some(val)) => val,
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Binary types
+              "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => {
+                     match row.try_get::<Option<Vec<u8>>, _>(column_name) {
+                     Ok(Some(val)) => format!("[BINARY:{} bytes]", val.len()),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Date and time types - try proper types first, then fallback to string
+              "DATE" => {
+                     // Try chrono::NaiveDate first - single read
+                     match row.try_get::<Option<chrono::NaiveDate>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => {
+                            // Fallback to string
+                            match row.try_get::<Option<String>, _>(column_name) {
+                                   Ok(Some(val)) => val,
+                                   Ok(None) => "NULL".to_string(),
+                                   Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                            }
+                     }
+                     }
+              },
+              "TIME" => {
+                     // Try chrono::NaiveTime first - single read
+                     match row.try_get::<Option<chrono::NaiveTime>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => {
+                            // Fallback to string
+                            match row.try_get::<Option<String>, _>(column_name) {
+                                   Ok(Some(val)) => val,
+                                   Ok(None) => "NULL".to_string(),
+                                   Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                            }
+                     }
+                     }
+              },
+              "DATETIME" | "TIMESTAMP" => {
+                     // Try chrono::NaiveDateTime first - single read
+                     match row.try_get::<Option<chrono::NaiveDateTime>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => {
+                            // Fallback to string
+                            match row.try_get::<Option<String>, _>(column_name) {
+                                   Ok(Some(val)) => val,
+                                   Ok(None) => "NULL".to_string(),
+                                   Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                            }
+                     }
+                     }
+              },
+              // Boolean type
+              "BOOLEAN" | "BOOL" => {
+                     match row.try_get::<Option<bool>, _>(column_name) {
+                     Ok(Some(val)) => val.to_string(),
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => {
+                            // Try as tinyint (MySQL stores BOOL as TINYINT)
+                            match row.try_get::<Option<i8>, _>(column_name) {
+                                   Ok(Some(val)) => (val != 0).to_string(),
+                                   Ok(None) => "NULL".to_string(),
+                                   Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                            }
+                     }
+                     }
+              },
+              // JSON type - fallback to string
+              "JSON" => {
+                     match row.try_get::<Option<String>, _>(column_name) {
+                     Ok(Some(val)) => val,
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              },
+              // Default case: try string first, then generic fallback
+              _ => {
+                     match row.try_get::<Option<String>, _>(column_name) {
+                     Ok(Some(val)) => val,
+                     Ok(None) => "NULL".to_string(),
+                     Err(_) => get_value_as_string_fallback(row, column_name, type_name)
+                     }
+              }
+              };
+              
+              row_data.push(value_str);
+       }
+       table_data.push(row_data);
+       }
+       
+       table_data
+}
+

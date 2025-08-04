@@ -6,6 +6,7 @@ mod export;
 mod models;
 mod modules;
 mod window_egui;
+mod driver_mysql;
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
