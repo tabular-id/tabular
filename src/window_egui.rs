@@ -1,14 +1,13 @@
 
 use eframe::{egui, App, Frame};
-use sqlx::MySqlPool;
-use sqlx::{SqlitePool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::{SqlitePool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use redis::{Client, aio::ConnectionManager};
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{cache_data, driver_mysql, driver_postgres, driver_redis, driver_sqlite, export, helpers, models, modules};
+use crate::{cache_data, directory, driver_mysql, driver_postgres, driver_redis, driver_sqlite, export, helpers, models, modules};
 
 
 
@@ -425,7 +424,7 @@ impl Tabular {
 
     fn initialize_database(&mut self) {
         // Ensure app directories exist
-        if let Err(e) = modules::ensure_app_directories() {
+        if let Err(e) = directory::ensure_app_directories() {
             println!("Failed to create app directories: {}", e);
             return;
         }
@@ -434,7 +433,7 @@ impl Tabular {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool_result = rt.block_on(async {
             // Get the data directory path
-            let data_dir = modules::get_data_dir();
+            let data_dir = directory::get_data_dir();
             let db_path = data_dir.join("connections.db");
                         
             // Convert path to string and use file:// prefix for SQLite
@@ -804,7 +803,7 @@ impl Tabular {
     fn save_current_tab_with_name(&mut self, filename: String) -> Result<(), String> {
         if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
             // Get query directory and ensure it exists
-            let query_dir = modules::get_query_dir();
+            let query_dir = directory::get_query_dir();
             std::fs::create_dir_all(&query_dir).map_err(|e| format!("Failed to create query directory: {}", e))?;
             
             let mut clean_filename = filename.trim().to_string();
@@ -834,8 +833,8 @@ impl Tabular {
     fn load_queries_from_directory(&mut self) {
         self.queries_tree.clear();
 
-        let query_dir = modules::get_query_dir();
-        self.queries_tree = Self::load_directory_recursive(&query_dir);
+        let query_dir = directory::get_query_dir();
+        self.queries_tree = directory::load_directory_recursive(&query_dir);
         
         // Sort folders and files alphabetically
         self.queries_tree.sort_by(|a, b| {
@@ -847,58 +846,12 @@ impl Tabular {
         });
     }
 
-    fn load_directory_recursive(dir_path: &std::path::Path) -> Vec<models::structs::TreeNode> {
-        let mut items = Vec::new();
-        
-        if let Ok(entries) = std::fs::read_dir(dir_path) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_dir() {
-                        // This is a folder
-                        if let Some(folder_name) = entry.file_name().to_str() {
-                            let folder_path = entry.path();
-                            
-                            // Recursively load the folder contents
-                            let folder_contents = Self::load_directory_recursive(&folder_path);
-                            
-                            let mut folder_node = models::structs::TreeNode::new(folder_name.to_string(), models::enums::NodeType::QueryFolder);
-                            folder_node.children = folder_contents;
-                            folder_node.is_expanded = true;
-                            folder_node.file_path = Some(folder_path.to_string_lossy().to_string());
-                            items.push(folder_node);
-                        }
-                    } else if metadata.is_file() {
-                        // This is a file
-                        if let Some(file_name) = entry.file_name().to_str() {
-                            if file_name.ends_with(".sql") {
-                                let mut node = models::structs::TreeNode::new(file_name.to_string(), models::enums::NodeType::Query);
-                                node.file_path = Some(entry.path().to_string_lossy().to_string());
-                                items.push(node);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Sort the items: folders first, then files, all alphabetically
-        items.sort_by(|a, b| {
-            match (&a.node_type, &b.node_type) {
-                (models::enums::NodeType::QueryFolder, models::enums::NodeType::Query) => std::cmp::Ordering::Less, // Folders first
-                (models::enums::NodeType::Query, models::enums::NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
-                _ => a.name.cmp(&b.name), // Alphabetical within same type
-            }
-        });
-        
-        items
-    }
-
     fn create_query_folder(&mut self, folder_name: &str) -> Result<(), String> {
         if folder_name.trim().is_empty() {
             return Err("Folder name cannot be empty".to_string());
         }
 
-        let query_dir = modules::get_query_dir();
+        let query_dir = directory::get_query_dir();
         let folder_path = query_dir.join(folder_name);
         
         if folder_path.exists() {
@@ -919,7 +872,7 @@ impl Tabular {
             return Err("Folder name cannot be empty".to_string());
         }
 
-        let query_dir = modules::get_query_dir();
+        let query_dir = directory::get_query_dir();
         let parent_path = query_dir.join(parent_folder);
         
         if !parent_path.exists() || !parent_path.is_dir() {
@@ -946,7 +899,7 @@ impl Tabular {
         let file_name = source_path.file_name()
             .ok_or("Invalid file path")?;
             
-        let query_dir = modules::get_query_dir();
+        let query_dir = directory::get_query_dir();
         let target_folder_path = query_dir.join(target_folder);
         let target_file_path = target_folder_path.join(file_name);
         
@@ -972,7 +925,7 @@ impl Tabular {
         let file_name = source_path.file_name()
             .ok_or("Invalid file path")?;
             
-        let query_dir = modules::get_query_dir();
+        let query_dir = directory::get_query_dir();
         let target_file_path = query_dir.join(file_name);
         
         // Move the file to root
@@ -1842,7 +1795,7 @@ impl Tabular {
                         if ui.button("🗑️ Remove Folder").clicked() {
                             // Store the full folder path for removal (relative to query dir)
                             if let Some(full_path) = &node.file_path {
-                                let query_dir = modules::get_query_dir();
+                                let query_dir = directory::get_query_dir();
                                 // Get relative path from query directory
                                 let relative_path = std::path::Path::new(full_path)
                                     .strip_prefix(&query_dir)
@@ -2467,7 +2420,7 @@ impl Tabular {
 
 
     fn find_query_file_by_hash(&self, hash: i64) -> Option<String> {
-        let query_dir = modules::get_query_dir();
+        let query_dir = directory::get_query_dir();
         
         // Function to search recursively in directories
         fn search_in_dir(dir: &std::path::Path, target_hash: i64) -> Option<String> {
@@ -2600,7 +2553,7 @@ impl Tabular {
         
         // Look up the folder path using the hash
         if let Some(folder_relative_path) = self.folder_removal_map.get(&hash).cloned() {
-            let query_dir = modules::get_query_dir();
+            let query_dir = directory::get_query_dir();
             let folder_path = query_dir.join(&folder_relative_path);
             
             
@@ -2642,7 +2595,7 @@ impl Tabular {
             println!("❌ Available mappings: {:?}", self.folder_removal_map);
             // Fallback to the old method
             if let Some(folder_relative_path) = &self.selected_folder_for_removal {
-                let query_dir = modules::get_query_dir();
+                let query_dir = directory::get_query_dir();
                 let folder_path = query_dir.join(folder_relative_path);
                 
                 
