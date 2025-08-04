@@ -1262,6 +1262,7 @@ impl Tabular {
                 connection_click_requests.push(connection_id);
             }
             if let Some((filename, content, file_path)) = query_file_to_open {
+                println!("📋 Collected query file to open: {} (path: {})", filename, file_path);
                 query_files_to_open.push((filename, content, file_path));
             }
         }
@@ -1464,10 +1465,20 @@ impl Tabular {
         
         // Handle query file open requests
         let results = query_files_to_open.clone();
-        for (_filename, _content, file_path) in query_files_to_open {
-            // Use existing open_query_file logic which checks for already open tabs
-            if let Err(err) = self.open_query_file(&file_path) {
-                println!("Failed to open query file: {}", err);
+        for (filename, content, file_path) in query_files_to_open {
+            println!("📂 Processing file: {} (path: {})", filename, file_path);
+            if file_path.is_empty() {
+                // This is a placeholder query without a file path - create a new unsaved tab
+                println!("📝 Creating new tab for placeholder query: {}", filename);
+                self.create_new_tab(filename, content);
+            } else {
+                // Use existing open_query_file logic which checks for already open tabs
+                println!("📁 Opening query file: {}", file_path);
+                if let Err(err) = self.open_query_file(&file_path) {
+                    println!("❌ Failed to open query file: {}", err);
+                } else {
+                    println!("✅ Successfully opened query file: {}", file_path);
+                }
             }
         }
         
@@ -1944,6 +1955,11 @@ impl Tabular {
                             folder_removal_mapping = Some(child_mapping);
                         }
                         
+                        // Handle child query file open requests - propagate to parent
+                        if let Some(child_query_file) = _child_query_file {
+                            query_file_to_open = Some(child_query_file);
+                        }
+                        
                         // Handle child context menu requests - propagate to parent
                         if let Some(child_context_id) = child_context {
                             context_menu_request = Some(child_context_id);
@@ -2001,15 +2017,24 @@ impl Tabular {
                         },
                         models::enums::NodeType::Query => {
                             // Load query file content
+                            println!("🔍 Query node clicked: {}", node.name);
                             if let Some(file_path) = &node.file_path {
+                                println!("📁 File path: {}", file_path);
                                 if let Ok(content) = std::fs::read_to_string(file_path) {
-                                    *editor_text = content.clone();
+                                    println!("✅ File read successfully, content length: {}", content.len());
+                                    // Don't modify editor_text directly, let open_query_file handle it
                                     query_file_to_open = Some((node.name.clone(), content, file_path.clone()));
                                 } else {
-                                    *editor_text = format!("-- Failed to load query file: {}", node.name);
+                                    println!("❌ Failed to read file: {}", file_path);
+                                    // Handle read error case
+                                    query_file_to_open = Some((node.name.clone(), format!("-- Failed to load query file: {}", node.name), file_path.clone()));
                                 }
                             } else {
-                                *editor_text = format!("-- {}\nSELECT * FROM table_name;", node.name);
+                                println!("❌ No file path for query node: {}", node.name);
+                                // Handle missing file path case - create a placeholder query
+                                let placeholder_content = format!("-- {}\nSELECT * FROM table_name;", node.name);
+                                // For files without path, we'll create a new unsaved tab
+                                query_file_to_open = Some((node.name.clone(), placeholder_content, String::new()));
                             }
                         },
                         models::enums::NodeType::QueryHistItem => {
