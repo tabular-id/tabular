@@ -1,7 +1,7 @@
 use eframe::egui;
 
 mod helpers;
-mod sqlite;
+mod driver_sqlite;
 mod export;
 mod models;
 mod modules;

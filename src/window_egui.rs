@@ -1,13 +1,14 @@
 
 use eframe::{egui, App, Frame};
-use sqlx::{SqlitePool, MySqlPool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::MySqlPool;
+use sqlx::{SqlitePool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use redis::{Client, aio::ConnectionManager};
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{export, helpers, models, modules, sqlite};
+use crate::{export, helpers, models, modules, driver_sqlite};
 
 
 
@@ -99,30 +100,65 @@ pub struct Tabular {
 
 
 impl Tabular {
-    fn get_app_data_dir() -> std::path::PathBuf {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        home_dir.join(".tabular")
-    }
-    
-    fn get_data_dir() -> std::path::PathBuf {
-        Self::get_app_data_dir().join("data")
-    }
-    
-    fn get_query_dir() -> std::path::PathBuf {
-        Self::get_app_data_dir().join("query")
-    }
-    
-    fn ensure_app_directories() -> Result<(), std::io::Error> {
-        let app_dir = Self::get_app_data_dir();
-        let data_dir = Self::get_data_dir();
-        let query_dir = Self::get_query_dir();
-        
-        // Create directories if they don't exist
-        std::fs::create_dir_all(&app_dir)?;
-        std::fs::create_dir_all(&data_dir)?;
-        std::fs::create_dir_all(&query_dir)?;
-        
-        Ok(())
+
+    async fn fetch_mysql_data(connection_id: i64, pool: &MySqlPool, cache_pool: &SqlitePool) -> bool {
+        // Fetch databases
+        if let Ok(rows) = sqlx::query("SHOW DATABASES")
+            .fetch_all(pool)
+            .await 
+        {
+            for row in rows {
+                if let Ok(db_name) = row.try_get::<String, _>(0) {
+                    // Cache database
+                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
+                        .bind(connection_id)
+                        .bind(&db_name)
+                        .execute(cache_pool)
+                        .await;
+
+                    // Fetch tables for this database
+                    let query = format!("SHOW TABLES FROM `{}`", db_name);
+                    if let Ok(table_rows) = sqlx::query(&query).fetch_all(pool).await {
+                        for table_row in table_rows {
+                            if let Ok(table_name) = table_row.try_get::<String, _>(0) {
+                                // Cache table
+                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name) VALUES (?, ?, ?)")
+                                    .bind(connection_id)
+                                    .bind(&db_name)
+                                    .bind(&table_name)
+                                    .execute(cache_pool)
+                                    .await;
+
+                                // Fetch columns for this table
+                                let col_query = format!("DESCRIBE `{}`.`{}`", db_name, table_name);
+                                if let Ok(col_rows) = sqlx::query(&col_query).fetch_all(pool).await {
+                                    for col_row in col_rows {
+                                        if let (Ok(col_name), Ok(col_type)) = (
+                                            col_row.try_get::<String, _>(0),
+                                            col_row.try_get::<String, _>(1)
+                                        ) {
+                                            // Cache column
+                                            let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
+                                                .bind(connection_id)
+                                                .bind(&db_name)
+                                                .bind(&table_name)
+                                                .bind(&col_name)
+                                                .bind(&col_type)
+                                                .bind(0) // MySQL DESCRIBE doesn't provide ordinal position easily
+                                                .execute(cache_pool)
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
 
@@ -423,7 +459,7 @@ impl Tabular {
             }
             models::enums::DatabaseType::SQLite => {
                 if let models::enums::DatabasePool::SQLite(sqlite_pool) = pool {
-                    sqlite::fetch_data(connection_id, sqlite_pool, cache_pool).await
+                    driver_sqlite::fetch_data(connection_id, sqlite_pool, cache_pool).await
                 } else {
                     false
                 }
@@ -445,65 +481,6 @@ impl Tabular {
         }
     }
 
-    async fn fetch_mysql_data(connection_id: i64, pool: &MySqlPool, cache_pool: &SqlitePool) -> bool {
-        // Fetch databases
-        if let Ok(rows) = sqlx::query("SHOW DATABASES")
-            .fetch_all(pool)
-            .await 
-        {
-            for row in rows {
-                if let Ok(db_name) = row.try_get::<String, _>(0) {
-                    // Cache database
-                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
-                        .bind(connection_id)
-                        .bind(&db_name)
-                        .execute(cache_pool)
-                        .await;
-
-                    // Fetch tables for this database
-                    let query = format!("SHOW TABLES FROM `{}`", db_name);
-                    if let Ok(table_rows) = sqlx::query(&query).fetch_all(pool).await {
-                        for table_row in table_rows {
-                            if let Ok(table_name) = table_row.try_get::<String, _>(0) {
-                                // Cache table
-                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name) VALUES (?, ?, ?)")
-                                    .bind(connection_id)
-                                    .bind(&db_name)
-                                    .bind(&table_name)
-                                    .execute(cache_pool)
-                                    .await;
-
-                                // Fetch columns for this table
-                                let col_query = format!("DESCRIBE `{}`.`{}`", db_name, table_name);
-                                if let Ok(col_rows) = sqlx::query(&col_query).fetch_all(pool).await {
-                                    for col_row in col_rows {
-                                        if let (Ok(col_name), Ok(col_type)) = (
-                                            col_row.try_get::<String, _>(0),
-                                            col_row.try_get::<String, _>(1)
-                                        ) {
-                                            // Cache column
-                                            let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
-                                                .bind(connection_id)
-                                                .bind(&db_name)
-                                                .bind(&table_name)
-                                                .bind(&col_name)
-                                                .bind(&col_type)
-                                                .bind(0) // MySQL DESCRIBE doesn't provide ordinal position easily
-                                                .execute(cache_pool)
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
 
     async fn fetch_postgres_data(connection_id: i64, pool: &PgPool, cache_pool: &SqlitePool) -> bool {
         // Fetch databases
@@ -626,7 +603,7 @@ impl Tabular {
 
     fn initialize_database(&mut self) {
         // Ensure app directories exist
-        if let Err(e) = Self::ensure_app_directories() {
+        if let Err(e) = modules::ensure_app_directories() {
             println!("Failed to create app directories: {}", e);
             return;
         }
@@ -635,7 +612,7 @@ impl Tabular {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool_result = rt.block_on(async {
             // Get the data directory path
-            let data_dir = Self::get_data_dir();
+            let data_dir = modules::get_data_dir();
             let db_path = data_dir.join("connections.db");
                         
             // Convert path to string and use file:// prefix for SQLite
@@ -1005,7 +982,7 @@ impl Tabular {
     fn save_current_tab_with_name(&mut self, filename: String) -> Result<(), String> {
         if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
             // Get query directory and ensure it exists
-            let query_dir = Self::get_query_dir();
+            let query_dir = modules::get_query_dir();
             std::fs::create_dir_all(&query_dir).map_err(|e| format!("Failed to create query directory: {}", e))?;
             
             let mut clean_filename = filename.trim().to_string();
@@ -1034,8 +1011,8 @@ impl Tabular {
 
     fn load_queries_from_directory(&mut self) {
         self.queries_tree.clear();
-        
-        let query_dir = Self::get_query_dir();
+
+        let query_dir = modules::get_query_dir();
         self.queries_tree = Self::load_directory_recursive(&query_dir);
         
         // Sort folders and files alphabetically
@@ -1098,8 +1075,8 @@ impl Tabular {
         if folder_name.trim().is_empty() {
             return Err("Folder name cannot be empty".to_string());
         }
-        
-        let query_dir = Self::get_query_dir();
+
+        let query_dir = modules::get_query_dir();
         let folder_path = query_dir.join(folder_name);
         
         if folder_path.exists() {
@@ -1119,8 +1096,8 @@ impl Tabular {
         if folder_name.trim().is_empty() {
             return Err("Folder name cannot be empty".to_string());
         }
-        
-        let query_dir = Self::get_query_dir();
+
+        let query_dir = modules::get_query_dir();
         let parent_path = query_dir.join(parent_folder);
         
         if !parent_path.exists() || !parent_path.is_dir() {
@@ -1147,7 +1124,7 @@ impl Tabular {
         let file_name = source_path.file_name()
             .ok_or("Invalid file path")?;
             
-        let query_dir = Self::get_query_dir();
+        let query_dir = modules::get_query_dir();
         let target_folder_path = query_dir.join(target_folder);
         let target_file_path = target_folder_path.join(file_name);
         
@@ -1173,7 +1150,7 @@ impl Tabular {
         let file_name = source_path.file_name()
             .ok_or("Invalid file path")?;
             
-        let query_dir = Self::get_query_dir();
+        let query_dir = modules::get_query_dir();
         let target_file_path = query_dir.join(file_name);
         
         // Move the file to root
@@ -2043,7 +2020,7 @@ impl Tabular {
                         if ui.button("🗑️ Remove Folder").clicked() {
                             // Store the full folder path for removal (relative to query dir)
                             if let Some(full_path) = &node.file_path {
-                                let query_dir = Self::get_query_dir();
+                                let query_dir = modules::get_query_dir();
                                 // Get relative path from query directory
                                 let relative_path = std::path::Path::new(full_path)
                                     .strip_prefix(&query_dir)
@@ -2668,7 +2645,7 @@ impl Tabular {
 
 
     fn find_query_file_by_hash(&self, hash: i64) -> Option<String> {
-        let query_dir = Self::get_query_dir();
+        let query_dir = modules::get_query_dir();
         
         // Function to search recursively in directories
         fn search_in_dir(dir: &std::path::Path, target_hash: i64) -> Option<String> {
@@ -2801,7 +2778,7 @@ impl Tabular {
         
         // Look up the folder path using the hash
         if let Some(folder_relative_path) = self.folder_removal_map.get(&hash).cloned() {
-            let query_dir = Self::get_query_dir();
+            let query_dir = modules::get_query_dir();
             let folder_path = query_dir.join(&folder_relative_path);
             
             
@@ -2843,7 +2820,7 @@ impl Tabular {
             println!("❌ Available mappings: {:?}", self.folder_removal_map);
             // Fallback to the old method
             if let Some(folder_relative_path) = &self.selected_folder_for_removal {
-                let query_dir = Self::get_query_dir();
+                let query_dir = modules::get_query_dir();
                 let folder_path = query_dir.join(folder_relative_path);
                 
                 
