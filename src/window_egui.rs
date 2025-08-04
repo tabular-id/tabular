@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use crate::{cache_data, driver_mysql, driver_sqlite, export, helpers, models, modules};
+use crate::{cache_data, driver_mysql, driver_postgres, driver_redis, driver_sqlite, export, helpers, models, modules};
 
 
 
@@ -99,69 +99,7 @@ pub struct Tabular {
 
 
 
-
 impl Tabular {
-
-    async fn fetch_mysql_data(connection_id: i64, pool: &MySqlPool, cache_pool: &SqlitePool) -> bool {
-
-        // Fetch databases
-        if let Ok(rows) = sqlx::query("SHOW DATABASES")
-            .fetch_all(pool)
-            .await 
-        {
-            for row in rows {
-                if let Ok(db_name) = row.try_get::<String, _>(0) {
-                    // Cache database
-                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
-                        .bind(connection_id)
-                        .bind(&db_name)
-                        .execute(cache_pool)
-                        .await;
-
-                    // Fetch tables for this database
-                    let query = format!("SHOW TABLES FROM `{}`", db_name);
-                    if let Ok(table_rows) = sqlx::query(&query).fetch_all(pool).await {
-                        for table_row in table_rows {
-                            if let Ok(table_name) = table_row.try_get::<String, _>(0) {
-                                // Cache table
-                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name) VALUES (?, ?, ?)")
-                                    .bind(connection_id)
-                                    .bind(&db_name)
-                                    .bind(&table_name)
-                                    .execute(cache_pool)
-                                    .await;
-
-                                // Fetch columns for this table
-                                let col_query = format!("DESCRIBE `{}`.`{}`", db_name, table_name);
-                                if let Ok(col_rows) = sqlx::query(&col_query).fetch_all(pool).await {
-                                    for col_row in col_rows {
-                                        if let (Ok(col_name), Ok(col_type)) = (
-                                            col_row.try_get::<String, _>(0),
-                                            col_row.try_get::<String, _>(1)
-                                        ) {
-                                            // Cache column
-                                            let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
-                                                .bind(connection_id)
-                                                .bind(&db_name)
-                                                .bind(&table_name)
-                                                .bind(&col_name)
-                                                .bind(&col_type)
-                                                .bind(0) // MySQL DESCRIBE doesn't provide ordinal position easily
-                                                .execute(cache_pool)
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
 
 
     pub fn new() -> Self {
@@ -454,7 +392,7 @@ impl Tabular {
         match &connection.connection_type {
             models::enums::DatabaseType::MySQL => {
                 if let models::enums::DatabasePool::MySQL(mysql_pool) = pool {
-                    Self::fetch_mysql_data(connection_id, mysql_pool, cache_pool).await
+                    driver_mysql::fetch_mysql_data(connection_id, mysql_pool, cache_pool).await
                 } else {
                     false
                 }
@@ -468,14 +406,14 @@ impl Tabular {
             }
             models::enums::DatabaseType::PostgreSQL => {
                 if let models::enums::DatabasePool::PostgreSQL(postgres_pool) = pool {
-                    Self::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
+                    driver_postgres::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
                 } else {
                     false
                 }
             }
             models::enums::DatabaseType::Redis => {
                 if let models::enums::DatabasePool::Redis(redis_manager) = pool {
-                    Self::fetch_redis_data(connection_id, redis_manager, cache_pool).await
+                    driver_redis::fetch_redis_data(connection_id, redis_manager, cache_pool).await
                 } else {
                     false
                 }
@@ -484,124 +422,6 @@ impl Tabular {
     }
 
 
-    async fn fetch_postgres_data(connection_id: i64, pool: &PgPool, cache_pool: &SqlitePool) -> bool {
-        // Fetch databases
-        if let Ok(rows) = sqlx::query("SELECT datname FROM pg_database WHERE datistemplate = false")
-            .fetch_all(pool)
-            .await 
-        {
-            for row in rows {
-                if let Ok(db_name) = row.try_get::<String, _>(0) {
-                    // Cache database
-                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
-                        .bind(connection_id)
-                        .bind(&db_name)
-                        .execute(cache_pool)
-                        .await;
-
-                    // Fetch tables for this database (PostgreSQL uses schemas, typically 'public')
-                    if let Ok(table_rows) = sqlx::query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
-                        .fetch_all(pool)
-                        .await 
-                    {
-                        for table_row in table_rows {
-                            if let Ok(table_name) = table_row.try_get::<String, _>(0) {
-                                // Cache table
-                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name, table_type) VALUES (?, ?, ?, ?)")
-                                    .bind(connection_id)
-                                    .bind(&db_name)
-                                    .bind(&table_name)
-                                    .bind("table")
-                                    .execute(cache_pool)
-                                    .await;
-
-                                // Fetch columns for this table
-                                if let Ok(col_rows) = sqlx::query("SELECT column_name, data_type, ordinal_position FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position")
-                                    .bind(&table_name)
-                                    .fetch_all(pool)
-                                    .await 
-                                {
-                                    for col_row in col_rows {
-                                        if let (Ok(col_name), Ok(col_type), Ok(ordinal_pos)) = (
-                                            col_row.try_get::<String, _>(0),
-                                            col_row.try_get::<String, _>(1),
-                                            col_row.try_get::<i32, _>(2)
-                                        ) {
-                                            // Cache column
-                                            let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
-                                                .bind(connection_id)
-                                                .bind(&db_name)
-                                                .bind(&table_name)
-                                                .bind(&col_name)
-                                                .bind(&col_type)
-                                                .bind(ordinal_pos)
-                                                .execute(cache_pool)
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    async fn fetch_redis_data(connection_id: i64, redis_manager: &ConnectionManager, cache_pool: &SqlitePool) -> bool {
-        // Try to get a Redis connection
-        let mut conn = redis_manager.clone();
-        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
-            Ok(_) => {
-                // Get CONFIG GET databases to determine max database count
-                let max_databases = if let Ok(config_result) = redis::cmd("CONFIG").arg("GET").arg("databases").query_async::<_, Vec<String>>(&mut conn).await {
-                    if config_result.len() >= 2 {
-                        config_result[1].parse::<i32>().unwrap_or(16)
-                    } else {
-                        16 // Default Redis databases count
-                    }
-                } else {
-                    16 // Default fallback
-                };
-                
-                // Cache all potential databases (db0 to db15 by default)
-                for db_num in 0..max_databases {
-                    let db_name = format!("db{}", db_num);
-                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
-                        .bind(connection_id)
-                        .bind(&db_name)
-                        .execute(cache_pool)
-                        .await;
-                }
-                
-                // Get keyspace info to identify which databases actually have keys
-                if let Ok(keyspace_result) = redis::cmd("INFO").arg("keyspace").query_async::<_, String>(&mut conn).await {
-                    for line in keyspace_result.lines() {
-                        if line.starts_with("db") {
-                            if let Some(db_part) = line.split(':').next() {
-                                // Mark this database as having keys by adding a special marker
-                                let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name, table_type) VALUES (?, ?, ?, ?)")
-                                    .bind(connection_id)
-                                    .bind(db_part)
-                                    .bind("_has_keys")
-                                    .bind("redis_marker")
-                                    .execute(cache_pool)
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                
-                true
-            }
-            Err(_e) => {
-                false
-            }
-        }
-    }
 
     fn initialize_database(&mut self) {
         // Ensure app directories exist

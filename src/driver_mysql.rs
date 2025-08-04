@@ -1,3 +1,7 @@
+use sqlx::{MySqlPool};
+use sqlx::{SqlitePool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+
+
 
 // Helper function for final fallback when all type-specific conversions fail
 fn get_value_as_string_fallback(row: &sqlx::mysql::MySqlRow, column_name: &str, type_name: &str) -> String {
@@ -249,5 +253,68 @@ pub(crate) fn convert_mysql_rows_to_table_data(rows: Vec<sqlx::mysql::MySqlRow>)
        }
        
        table_data
+}
+
+
+
+pub(crate) async fn fetch_mysql_data(connection_id: i64, pool: &MySqlPool, cache_pool: &SqlitePool) -> bool {
+
+       // Fetch databases
+       if let Ok(rows) = sqlx::query("SHOW DATABASES")
+       .fetch_all(pool)
+       .await 
+       {
+       for row in rows {
+              if let Ok(db_name) = row.try_get::<String, _>(0) {
+              // Cache database
+              let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
+                     .bind(connection_id)
+                     .bind(&db_name)
+                     .execute(cache_pool)
+                     .await;
+
+              // Fetch tables for this database
+              let query = format!("SHOW TABLES FROM `{}`", db_name);
+              if let Ok(table_rows) = sqlx::query(&query).fetch_all(pool).await {
+                     for table_row in table_rows {
+                     if let Ok(table_name) = table_row.try_get::<String, _>(0) {
+                            // Cache table
+                            let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name) VALUES (?, ?, ?)")
+                                   .bind(connection_id)
+                                   .bind(&db_name)
+                                   .bind(&table_name)
+                                   .execute(cache_pool)
+                                   .await;
+
+                            // Fetch columns for this table
+                            let col_query = format!("DESCRIBE `{}`.`{}`", db_name, table_name);
+                            if let Ok(col_rows) = sqlx::query(&col_query).fetch_all(pool).await {
+                                   for col_row in col_rows {
+                                   if let (Ok(col_name), Ok(col_type)) = (
+                                          col_row.try_get::<String, _>(0),
+                                          col_row.try_get::<String, _>(1)
+                                   ) {
+                                          // Cache column
+                                          let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
+                                          .bind(connection_id)
+                                          .bind(&db_name)
+                                          .bind(&table_name)
+                                          .bind(&col_name)
+                                          .bind(&col_type)
+                                          .bind(0) // MySQL DESCRIBE doesn't provide ordinal position easily
+                                          .execute(cache_pool)
+                                          .await;
+                                   }
+                                   }
+                            }
+                     }
+                     }
+              }
+              }
+       }
+       true
+       } else {
+       false
+       }
 }
 
