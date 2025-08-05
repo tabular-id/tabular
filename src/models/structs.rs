@@ -67,6 +67,8 @@ pub struct QueryTab {
     pub file_path: Option<String>,
     pub is_saved: bool,
     pub is_modified: bool,
+    pub connection_id: Option<i64>, // Each tab can have its own database connection
+    pub database_name: Option<String>, // Each tab can have its own database selection
 }
 
 

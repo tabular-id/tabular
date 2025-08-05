@@ -3,7 +3,6 @@ use crate::{
               driver_mysql, driver_sqlite, helpers
        };
 use eframe::egui;
-use image::open;
 use sqlx::{Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::sync::Arc;
 use redis::{Client, aio::ConnectionManager};

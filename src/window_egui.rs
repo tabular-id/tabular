@@ -776,6 +776,32 @@ impl Tabular {
             file_path: None,
             is_saved: false,
             is_modified: false,
+            connection_id: None, // No connection assigned by default
+            database_name: None, // No database assigned by default
+        };
+        
+        self.query_tabs.push(new_tab);
+        let new_index = self.query_tabs.len() - 1;
+        self.active_tab_index = new_index;
+        
+        // Update editor with new tab content
+        self.editor_text = content;
+        
+        tab_id
+    }
+
+    fn create_new_tab_with_connection(&mut self, title: String, content: String, connection_id: Option<i64>) -> usize {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        
+        let new_tab = models::structs::QueryTab {
+            title,
+            content: content.clone(),
+            file_path: None,
+            is_saved: false,
+            is_modified: false,
+            connection_id,
+            database_name: None, // No database assigned by default
         };
         
         self.query_tabs.push(new_tab);
@@ -797,6 +823,8 @@ impl Tabular {
                 tab.file_path = None;
                 tab.is_saved = false;
                 tab.is_modified = false;
+                tab.connection_id = None; // Clear connection as well
+                tab.database_name = None; // Clear database as well
             }
             self.editor_text.clear();
             return;
@@ -1231,6 +1259,8 @@ impl Tabular {
             file_path: Some(file_path.to_string()),
             is_saved: true,
             is_modified: false,
+            connection_id: None, // File queries don't have connection by default
+            database_name: None, // File queries don't have database by default
         };
         
         self.query_tabs.push(new_tab);
@@ -1251,6 +1281,42 @@ impl Tabular {
         } else {
             "No Tab".to_string()
         }
+    }
+
+    fn set_active_tab_connection(&mut self, connection_id: Option<i64>) {
+        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+            tab.connection_id = connection_id;
+            // Reset database when changing connection
+            tab.database_name = None;
+        }
+    }
+
+    fn set_active_tab_database(&mut self, database_name: Option<String>) {
+        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+            tab.database_name = database_name;
+        }
+    }
+
+    fn get_active_tab_connection(&self) -> Option<i64> {
+        if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+            tab.connection_id
+        } else {
+            None
+        }
+    }
+
+    fn get_active_tab_database(&self) -> Option<String> {
+        if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+            tab.database_name.clone()
+        } else {
+            None
+        }
+    }
+
+    fn get_connection_name(&self, connection_id: i64) -> Option<String> {
+        self.connections.iter()
+            .find(|conn| conn.id == Some(connection_id))
+            .map(|conn| conn.name.clone())
     }
 
     fn render_tree(&mut self, ui: &mut egui::Ui, nodes: &mut [models::structs::TreeNode]) -> Vec<(String, String, String)> {
@@ -1294,10 +1360,19 @@ impl Tabular {
             }
         }
         
-        // Handle connection clicks (set current active connection)
+        // Handle connection clicks (create new tab with that connection)
         for connection_id in connection_click_requests {
-            self.current_connection_id = Some(connection_id);
-            println!("Set active connection to ID: {}", connection_id);
+            // Find connection name for tab title
+            let connection_name = self.connections.iter()
+                .find(|conn| conn.id == Some(connection_id))
+                .map(|conn| conn.name.clone())
+                .unwrap_or_else(|| format!("Connection {}", connection_id));
+            
+            // Create new tab with this connection pre-selected
+            let tab_title = format!("Query - {}", connection_name);
+            self.create_new_tab_with_connection(tab_title, String::new(), Some(connection_id));
+            
+            println!("Created new tab with connection ID: {}", connection_id);
         }
         
         // Handle expansions after rendering
@@ -1444,7 +1519,7 @@ impl Tabular {
                             };
                             
                             let tab_title = format!("Redis Key: {} ({})", table_name, k_type);
-                            self.create_new_tab(tab_title, redis_command.clone());
+                            self.create_new_tab_with_connection(tab_title, redis_command.clone(), Some(connection_id));
                             
                             // Set current connection ID for Redis query execution
                             self.current_connection_id = Some(connection_id);
@@ -1475,14 +1550,14 @@ impl Tabular {
                             }
                         };
                         let tab_title = format!("Redis {}", table_name);
-                        self.create_new_tab(tab_title, redis_command);
+                        self.create_new_tab_with_connection(tab_title, redis_command, Some(connection_id));
                     }
                 }
                 _ => {
                     // SQL databases - use regular SELECT query
                     let query_content = format!("SELECT * FROM {} LIMIT 100;", table_name);
                     let tab_title = format!("Table: {}", table_name);
-                    self.create_new_tab(tab_title, query_content);
+                    self.create_new_tab_with_connection(tab_title, query_content, Some(connection_id));
                     
                     // Also load the table data
                     self.load_table_data(connection_id, &table_name);
@@ -5364,8 +5439,15 @@ impl Tabular {
             return;
         }
 
+        // Get connection_id from current active tab, fallback to global current_connection_id
+        let connection_id = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+            tab.connection_id.or(self.current_connection_id)
+        } else {
+            self.current_connection_id
+        };
+
         // Check if we have an active connection
-        if let Some(connection_id) = self.current_connection_id {
+        if let Some(connection_id) = connection_id {
             println!("=== EXECUTING QUERY ===");
             println!("Connection ID: {}", connection_id);
             println!("Query: {}", query);
@@ -6922,6 +7004,7 @@ impl App for Tabular {
                                 // Render tabs
                                 let mut tab_to_close = None;
                                 let mut tab_to_switch = None;
+                                let mut connection_to_set: Option<(usize, Option<i64>)> = None;
                                 
                                 for (index, tab) in self.query_tabs.iter().enumerate() {
                                     let is_active = index == self.active_tab_index;
@@ -6934,10 +7017,19 @@ impl App for Tabular {
                                     let tab_bg = egui::Color32::from_rgb(0, 0, 0); // Black background for all tabs
                                     
                                     ui.horizontal(|ui| {
-                                        // Tab button
+                                        // Tab button with connection indicator
+                                        let mut tab_text = tab.title.clone();
+                                        
+                                        // Add connection indicator to tab title
+                                        if let Some(conn_id) = tab.connection_id {
+                                            if let Some(conn_name) = self.get_connection_name(conn_id) {
+                                                tab_text = format!("{} [{}]", tab.title, conn_name);
+                                            }
+                                        }
+                                        
                                         let tab_response = ui.add(
                                             egui::Button::new(
-                                                egui::RichText::new(&tab.title)
+                                                egui::RichText::new(&tab_text)
                                                     .color(tab_color)
                                                     .size(12.0)
                                             )
@@ -6948,6 +7040,29 @@ impl App for Tabular {
                                         if tab_response.clicked() && !is_active {
                                             tab_to_switch = Some(index);
                                         }
+                                        
+                                        // Right-click context menu for connection selection
+                                        tab_response.context_menu(|ui| {
+                                            ui.label("Select Connection:");
+                                            ui.separator();
+                                            
+                                            // None option
+                                            if ui.selectable_label(tab.connection_id.is_none(), "None").clicked() {
+                                                connection_to_set = Some((index, None));
+                                                ui.close_menu();
+                                            }
+                                            
+                                            // Available connections
+                                            for connection in &self.connections {
+                                                if let Some(conn_id) = connection.id {
+                                                    let is_selected = tab.connection_id == Some(conn_id);
+                                                    if ui.selectable_label(is_selected, &connection.name).clicked() {
+                                                        connection_to_set = Some((index, Some(conn_id)));
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            }
+                                        });
                                         
                                         // Close button (only show for non-active tabs or if more than 1 tab)
                                         if self.query_tabs.len() > 1 || !is_active {
@@ -6963,6 +7078,13 @@ impl App for Tabular {
                                             }
                                         }
                                     });
+                                }
+                                
+                                // Handle deferred operations after the loop
+                                if let Some((tab_index, conn_id)) = connection_to_set {
+                                    if let Some(tab) = self.query_tabs.get_mut(tab_index) {
+                                        tab.connection_id = conn_id;
+                                    }
                                 }
                                 
                                 // New tab button
@@ -7111,6 +7233,23 @@ impl App for Tabular {
                 ui.label(format!("Lines: {}", self.editor_text.lines().count()));
                 ui.separator();
                 
+                // Show connection for current tab
+                ui.label("Tab Connection:");
+                if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+                    if let Some(conn_id) = tab.connection_id {
+                        if let Some(conn_name) = self.get_connection_name(conn_id) {
+                            ui.colored_label(egui::Color32::from_rgb(0, 255, 0), format!("✓ {}", conn_name));
+                        } else {
+                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), format!("⚠ ID {}", conn_id));
+                        }
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(255, 255, 0), "⚠ None");
+                    }
+                } else {
+                    ui.colored_label(egui::Color32::from_rgb(255, 0, 0), "❌ No tab");
+                }
+                ui.separator();
+                
                 // Show selection status
                 if !self.selected_text.trim().is_empty() {
                     ui.colored_label(egui::Color32::from_rgb(0, 150, 255), 
@@ -7123,97 +7262,129 @@ impl App for Tabular {
                 ui.label(format!("Connections: {}", self.connections.len()));
                 ui.separator();
                 
-                // Connection selector ComboBox
+                // Connection selector ComboBox for current tab
                 if !self.connections.is_empty() {
-                    ui.label("Connection:");
-                    let current_connection_name = if let Some(connection_id) = self.current_connection_id {
-                        self.connections.iter()
-                            .find(|c| c.id == Some(connection_id))
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| "None".to_string())
+                    ui.label("Set Tab Connection:");
+                    let current_tab_connection_name = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+                        if let Some(conn_id) = tab.connection_id {
+                            self.get_connection_name(conn_id).unwrap_or_else(|| format!("ID {}", conn_id))
+                        } else {
+                            "None".to_string()
+                        }
                     } else {
-                        "None".to_string()
+                        "No Tab".to_string()
                     };
                     
-                    egui::ComboBox::from_id_salt("status_connection_selector")
-                        .selected_text(&current_connection_name)
+                    let mut connection_to_set: Option<Option<i64>> = None;
+                    
+                    egui::ComboBox::from_id_salt("status_tab_connection_selector")
+                        .selected_text(&current_tab_connection_name)
                         .width(150.0)
                         .show_ui(ui, |ui| {
                             // Option for no connection
-                            if ui.selectable_label(self.current_connection_id.is_none(), "None").clicked() {
-                                self.current_connection_id = None;
-                                self.current_database_name = None;
+                            if ui.selectable_label(
+                                self.query_tabs.get(self.active_tab_index).map_or(false, |tab| tab.connection_id.is_none()), 
+                                "None"
+                            ).clicked() {
+                                connection_to_set = Some(None);
                             }
                             
                             // All available connections
                             for connection in &self.connections {
                                 if let Some(connection_id) = connection.id {
-                                    let is_selected = self.current_connection_id == Some(connection_id);
+                                    let is_selected = self.query_tabs.get(self.active_tab_index)
+                                        .map_or(false, |tab| tab.connection_id == Some(connection_id));
                                     if ui.selectable_label(is_selected, &connection.name).clicked() {
-                                        self.current_connection_id = Some(connection_id);
-                                        self.current_database_name = None; // Reset database selection
-                                        
-                                        // Clear current table data when switching connections
-                                        self.current_table_data.clear();
-                                        self.current_table_headers.clear();
-                                        self.current_table_name.clear();
-                                        self.total_rows = 0;
-                                        self.current_page = 0;
-                                        
-                                        println!("Switched to connection: {} (ID: {})", connection.name, connection_id);
+                                        connection_to_set = Some(Some(connection_id));
                                     }
                                 }
                             }
                         });
+                    
+                    // Apply connection change after the borrow is released
+                    if let Some(conn_id) = connection_to_set {
+                        self.set_active_tab_connection(conn_id);
+                    }
+                    
                     ui.separator();
                     
-                    // Database selector ComboBox (for databases that support multiple databases)
-                    if let Some(connection_id) = self.current_connection_id {
-                        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-                            // Only show database selector for MySQL and PostgreSQL
-                            if matches!(connection.connection_type, models::enums::DatabaseType::MySQL | models::enums::DatabaseType::PostgreSQL) {
-                                ui.label("Database:");
-                                
-                                // Get available databases using cached method (but only if ComboBox is being opened)
-                                let current_database = self.current_database_name.clone().unwrap_or_else(|| "Select Database".to_string());
-                                
-                                // Use a simple ComboBox that only fetches when opened  
-                                egui::ComboBox::from_id_salt("status_database_selector")
-                                    .selected_text(&current_database)
-                                    .width(120.0)
-                                    .show_ui(ui, |ui| {
-                                        // Only fetch databases when ComboBox is actually opened
-                                        let available_databases = self.get_databases_cached(connection_id);
+                    // Database selector for current tab connection (for MySQL and PostgreSQL)
+                    let current_tab_connection = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+                        tab.connection_id
+                    } else {
+                        None
+                    };
+                    
+                    let current_tab_database = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+                        tab.database_name.clone()
+                    } else {
+                        None
+                    };
+                    
+                    if let Some(conn_id) = current_tab_connection {
+                        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(conn_id)) {
+                            // Store connection info to avoid borrow checker issues
+                            let connection_type = connection.connection_type.clone();
+                            let connection_database = connection.database.clone();
+                            
+                            // Show database selector for all connection types
+                            ui.label("Database:");
+                            
+                            // Get current tab's database selection
+                            let current_database = current_tab_database.clone().unwrap_or_else(|| "Select Database".to_string());
+                            
+                            let mut database_to_set: Option<Option<String>> = None;
+                            
+                            egui::ComboBox::from_id_salt("status_database_selector")
+                                .selected_text(&current_database)
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    // For MySQL and PostgreSQL, get available databases
+                                    if matches!(connection_type, models::enums::DatabaseType::MySQL | models::enums::DatabaseType::PostgreSQL) {
+                                        let available_databases = self.get_databases_cached(conn_id);
                                         
                                         if available_databases.is_empty() {
                                             ui.colored_label(egui::Color32::GRAY, "Loading databases...");
                                         } else {
                                             for database in &available_databases {
-                                                let is_selected = self.current_database_name.as_ref() == Some(database);
+                                                let is_selected = current_tab_database.as_ref() == Some(database);
                                                 if ui.selectable_label(is_selected, database).clicked() {
-                                                    self.current_database_name = Some(database.clone());
-                                                    
-                                                    // Clear current table data when switching databases
-                                                    self.current_table_data.clear();
-                                                    self.current_table_headers.clear();
-                                                    self.current_table_name.clear();
-                                                    self.total_rows = 0;
-                                                    self.current_page = 0;
-                                                    
-                                                    println!("Switched to database: {}", database);
+                                                    database_to_set = Some(Some(database.clone()));
                                                 }
                                             }
                                         }
-                                    });
+                                    } else {
+                                        // For SQLite and Redis, show the configured database
+                                        let is_selected = current_tab_database.as_ref() == Some(&connection_database);
+                                        if ui.selectable_label(is_selected, &connection_database).clicked() {
+                                            database_to_set = Some(Some(connection_database.clone()));
+                                        }
+                                    }
+                                });
+                            
+                            // Apply database change after the borrow is released
+                            if let Some(db_name) = database_to_set {
+                                self.set_active_tab_database(db_name.clone());
                                 
-                                ui.separator();
+                                // Clear current table data when switching databases
+                                self.current_table_data.clear();
+                                self.current_table_headers.clear();
+                                self.current_table_name.clear();
+                                self.total_rows = 0;
+                                self.current_page = 0;
+                                
+                                if let Some(db) = &db_name {
+                                    println!("Switched to database: {}", db);
+                                }
                             }
+                            
+                            ui.separator();
                         }
                     }
                 } else {
                     ui.colored_label(egui::Color32::RED, "No connections available");
-                    ui.separator();
                 }
+                ui.separator();
                 
                 // Show pagination info
                 if self.total_rows > 0 {
