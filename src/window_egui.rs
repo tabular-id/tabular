@@ -5290,7 +5290,7 @@ impl Tabular {
             "MIN", "MAX", "ASC", "DESC", "PRIMARY", "KEY", "FOREIGN", "REFERENCES",
             "CONSTRAINT", "UNIQUE", "DEFAULT", "AUTO_INCREMENT", "SERIAL", "INT",
             "INTEGER", "VARCHAR", "TEXT", "CHAR", "DECIMAL", "FLOAT", "DOUBLE",
-            "DATE", "TIME", "DATETIME", "TIMESTAMP", "BOOLEAN", "BOOL",
+            "DATE", "TIME", "DATETIME", "TIMESTAMP", "BOOLEAN", "BOOL", "USE",
         ];
         
         // Define colors for different themes
