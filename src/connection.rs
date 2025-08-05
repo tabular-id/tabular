@@ -111,47 +111,88 @@ pub(crate) fn execute_query_with_connection(tabular: &mut Tabular, connection_id
 pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64, _connection: &models::structs::ConnectionConfig, query: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
        println!("Executing query synchronously: {}", query);
        
-       // Create a new runtime specifically for this query execution
-       let rt = match tokio::runtime::Runtime::new() {
-       Ok(runtime) => runtime,
-       Err(e) => {
-              println!("Failed to create runtime: {}", e);
-              return None;
-       }
+       // Use the shared runtime from tabular instead of creating a new one
+       let runtime = match &tabular.runtime {
+           Some(rt) => rt.clone(),
+           None => {
+               println!("No runtime available, creating temporary one");
+               match tokio::runtime::Runtime::new() {
+                   Ok(rt) => Arc::new(rt),
+                   Err(e) => {
+                       println!("Failed to create runtime: {}", e);
+                       return None;
+                   }
+               }
+           }
        };
        
-       rt.block_on(async {
+       runtime.block_on(async {
        match get_or_create_connection_pool(tabular, connection_id).await {
               Some(pool) => {
               match pool {
-                     models::enums::DatabasePool::MySQL(mysql_pool) => {
+                     models::enums::DatabasePool::MySQL(mut mysql_pool) => {
                      println!("Executing MySQL query: {}", query);
-                     match sqlx::query(query).fetch_all(mysql_pool.as_ref()).await {
-                            Ok(rows) => {
+                     
+                     // Try query with retry mechanism
+                     let mut attempts = 0;
+                     let max_attempts = 3;
+                     
+                     while attempts < max_attempts {
+                            attempts += 1;
+                            println!("Query attempt {} of {}", attempts, max_attempts);
+                            
+                            match sqlx::query(query).fetch_all(mysql_pool.as_ref()).await {
+                                   Ok(rows) => {
                                    if rows.is_empty() {
-                                   println!("Query returned no rows");
-                                   return Some((vec![], vec![]));
+                                          println!("Query returned no rows");
+                                          return Some((vec![], vec![]));
                                    }
                                    
                                    // Get column headers
                                    let headers: Vec<String> = rows[0].columns().iter()
-                                   .map(|col| col.name().to_string())
-                                   .collect();
+                                          .map(|col| col.name().to_string())
+                                          .collect();
                                    
                                    // Convert rows to table data
                                    let table_data = driver_mysql::convert_mysql_rows_to_table_data(rows);
                                    
                                    println!("Query successful: {} headers, {} rows", headers.len(), table_data.len());
-                                   Some((headers, table_data))
-                            },
-                            Err(e) => {
-                                   println!("MySQL query failed: {}", e);
-                                   Some((
-                                   vec!["Error".to_string()],
-                                   vec![vec![format!("Query error: {}", e)]]
-                                   ))
+                                   return Some((headers, table_data));
+                                   },
+                                   Err(e) => {
+                                   let error_msg = e.to_string();
+                                   println!("MySQL query failed on attempt {}: {}", attempts, error_msg);
+                                   
+                                   // If it's a connection timeout/pool error and not the last attempt
+                                   if (error_msg.contains("timed out") || error_msg.contains("pool")) && attempts < max_attempts {
+                                          println!("Removing cached pool and retrying...");
+                                          tabular.connection_pools.remove(&connection_id);
+                                          
+                                          // Try to recreate the pool for next attempt
+                                          if let Some(new_pool) = get_or_create_connection_pool(tabular, connection_id).await {
+                                                 if let models::enums::DatabasePool::MySQL(new_mysql_pool) = new_pool {
+                                                        mysql_pool = new_mysql_pool;
+                                                        continue;
+                                                 }
+                                          }
+                                   }
+                                   
+                                   // If this is the last attempt, return error
+                                   if attempts >= max_attempts {
+                                          return Some((
+                                                 vec!["Error".to_string()],
+                                                 vec![vec![format!("Query error: {}", error_msg)]]
+                                          ));
+                                   }
+                                   }
                             }
                      }
+                     
+                     // Fallback return if something goes wrong
+                     Some((
+                            vec!["Error".to_string()],
+                            vec![vec!["Failed to execute query after multiple attempts".to_string()]]
+                     ))
                      },
                      models::enums::DatabasePool::PostgreSQL(pg_pool) => {
                      println!("Executing PostgreSQL query: {}", query);
@@ -516,14 +557,20 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      return None;
               }
               
-              // Configure MySQL pool with proper settings
+              // Configure MySQL pool with improved settings for stability
               let pool_result = MySqlPoolOptions::new()
-                     .max_connections(10)  // Reduce connections for better stability
-                     .min_connections(2)   // Fewer minimum connections
-                     .acquire_timeout(std::time::Duration::from_secs(30))  // Reasonable timeout
-                     .idle_timeout(std::time::Duration::from_secs(600))    // 10 minute idle timeout
-                     .max_lifetime(std::time::Duration::from_secs(3600))   // 1 hour max lifetime
-                     .test_before_acquire(true)  // Test connections before use
+                     .max_connections(20)  // Increase max connections
+                     .min_connections(1)   // Start with fewer minimum connections
+                     .acquire_timeout(std::time::Duration::from_secs(60))  // Longer timeout for complex queries
+                     .idle_timeout(std::time::Duration::from_secs(300))    // 5 minute idle timeout
+                     .max_lifetime(std::time::Duration::from_secs(1800))   // 30 minute max lifetime
+                     .test_before_acquire(false)  // Disable pre-test for better performance
+                     .after_connect(|conn, _| Box::pin(async move {
+                         // Set connection-specific settings for better stability
+                         let _ = sqlx::query("SET SESSION wait_timeout = 300").execute(&mut *conn).await;
+                         let _ = sqlx::query("SET SESSION interactive_timeout = 300").execute(&mut *conn).await;
+                         Ok(())
+                     }))
                      .connect(&connection_string)
                      .await;
               
@@ -546,14 +593,14 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      connection.username, connection.password, connection.host, connection.port, connection.database
               );
                                    
-              // Configure PostgreSQL pool with proper settings
+              // Configure PostgreSQL pool with improved settings
               let pool_result = PgPoolOptions::new()
-                     .max_connections(10)
-                     .min_connections(2)
-                     .acquire_timeout(std::time::Duration::from_secs(30))
-                     .idle_timeout(std::time::Duration::from_secs(1200))
-                     .max_lifetime(std::time::Duration::from_secs(3600))
-                     .test_before_acquire(true)
+                     .max_connections(15)  // Increase max connections
+                     .min_connections(1)   // Start with fewer minimum connections  
+                     .acquire_timeout(std::time::Duration::from_secs(60))  // Longer timeout
+                     .idle_timeout(std::time::Duration::from_secs(300))    // 5 minute idle timeout
+                     .max_lifetime(std::time::Duration::from_secs(1800))   // 30 minute max lifetime
+                     .test_before_acquire(false)  // Disable pre-test for better performance
                      .connect(&connection_string)
                      .await;
               
@@ -572,14 +619,14 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
               models::enums::DatabaseType::SQLite => {
               let connection_string = format!("sqlite:{}", connection.host);
               
-              // Configure SQLite pool with proper settings
+              // Configure SQLite pool with improved settings
               let pool_result = SqlitePoolOptions::new()
-                     .max_connections(10)
-                     .min_connections(2)
-                     .acquire_timeout(std::time::Duration::from_secs(30))
-                     .idle_timeout(std::time::Duration::from_secs(1200))
-                     .max_lifetime(std::time::Duration::from_secs(3600))
-                     .test_before_acquire(true)
+                     .max_connections(5)   // SQLite doesn't need many connections
+                     .min_connections(1)   // Start with one connection
+                     .acquire_timeout(std::time::Duration::from_secs(60))  // Longer timeout
+                     .idle_timeout(std::time::Duration::from_secs(300))    // 5 minute idle timeout
+                     .max_lifetime(std::time::Duration::from_secs(1800))   // 30 minute max lifetime
+                     .test_before_acquire(false)  // Disable pre-test for better performance
                      .connect(&connection_string)
                      .await;
               
@@ -626,6 +673,38 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
        }
        } else {
        None
+       }
+}
+
+// Function to cleanup and recreate connection pools
+pub(crate) fn cleanup_connection_pool(tabular: &mut Tabular, connection_id: i64) {
+       println!("🧹 Cleaning up connection pool for connection {}", connection_id);
+       tabular.connection_pools.remove(&connection_id);
+}
+
+// Function to cleanup all connection pools
+pub(crate) fn cleanup_all_connection_pools(tabular: &mut Tabular) {
+       println!("🧹 Cleaning up all connection pools");
+       tabular.connection_pools.clear();
+}
+
+// Function to check and refresh stale connections
+pub(crate) async fn refresh_connection_pool(tabular: &mut Tabular, connection_id: i64) -> bool {
+       println!("🔄 Refreshing connection pool for connection {}", connection_id);
+       
+       // Remove the existing pool
+       tabular.connection_pools.remove(&connection_id);
+       
+       // Try to create a new one
+       match get_or_create_connection_pool(tabular, connection_id).await {
+           Some(_) => {
+               println!("✅ Successfully refreshed connection pool for {}", connection_id);
+               true
+           },
+           None => {
+               println!("❌ Failed to refresh connection pool for {}", connection_id);
+               false
+           }
        }
 }
 

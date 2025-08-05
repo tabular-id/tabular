@@ -30,6 +30,8 @@ pub struct Tabular {
     pub show_add_connection: bool,
     pub new_connection: models::structs::ConnectionConfig,
     pub db_pool: Option<Arc<SqlitePool>>,
+    // Global async runtime for all database operations
+    pub runtime: Option<Arc<tokio::runtime::Runtime>>,
     // Connection cache untuk menghindari membuat koneksi berulang
     pub connection_pools: HashMap<i64, models::enums::DatabasePool>,
     // Context menu and edit connection fields
@@ -100,6 +102,8 @@ pub struct Tabular {
     pub parent_folder_for_creation: Option<String>,
     pub selected_folder_for_removal: Option<String>,
     pub folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
+    // Connection pool cleanup tracking
+    pub last_cleanup_time: std::time::Instant,
 }
 
 
@@ -112,6 +116,15 @@ impl Tabular {
         let (background_sender, background_receiver) = mpsc::channel::<models::enums::BackgroundTask>();
         let (result_sender, result_receiver) = mpsc::channel::<models::enums::BackgroundResult>();
 
+        // Create shared runtime for all database operations
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => Some(Arc::new(rt)),
+            Err(e) => {
+                println!("Failed to create runtime: {}", e);
+                None
+            }
+        };
+
         let mut app = Self {
             editor_text: String::new(),
             selected_menu: "Database".to_string(),
@@ -123,6 +136,7 @@ impl Tabular {
             show_add_connection: false,
             new_connection: models::structs::ConnectionConfig::default(),
             db_pool: None,
+            runtime,
             connection_pools: HashMap::new(), // Start with empty cache
             show_edit_connection: false,
             edit_connection: models::structs::ConnectionConfig::default(),
@@ -175,6 +189,7 @@ impl Tabular {
             parent_folder_for_creation: None,
             selected_folder_for_removal: None,
             folder_removal_map: std::collections::HashMap::new(),
+            last_cleanup_time: std::time::Instant::now(),
         };
         
         // Clear any old cached pools
@@ -6166,6 +6181,25 @@ impl App for Tabular {
             
             // Request UI repaint
             ctx.request_repaint();
+        }
+        
+        // Periodic cleanup of stale connection pools (every 5 minutes)
+        if self.last_cleanup_time.elapsed().as_secs() > 300 { // 5 minutes
+            println!("🧹 Performing periodic connection pool cleanup");
+            
+            // Clean up connections that might be stale
+            let mut connections_to_refresh: Vec<i64> = self.connection_pools.keys().copied().collect();
+            
+            // Limit cleanup to avoid blocking UI
+            if connections_to_refresh.len() > 5 {
+                connections_to_refresh.truncate(5);
+            }
+            
+            for connection_id in connections_to_refresh {
+                connection::cleanup_connection_pool(self, connection_id);
+            }
+            
+            self.last_cleanup_time = std::time::Instant::now();
         }
         
         // Handle deferred theme selector request
