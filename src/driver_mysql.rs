@@ -1,11 +1,10 @@
 use sqlx::{MySqlPool};
-use sqlx::{SqlitePool, PgPool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::{SqlitePool, Row, Column};
 
 
 
 // Helper function for final fallback when all type-specific conversions fail
 fn get_value_as_string_fallback(row: &sqlx::mysql::MySqlRow, column_name: &str, type_name: &str) -> String {
-       use sqlx::{Row, Column};
        
        println!("Fallback for column '{}' with type '{}'", column_name, type_name);
        

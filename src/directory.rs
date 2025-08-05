@@ -1,4 +1,4 @@
-use crate::{models, window_egui::{self, Tabular}};
+use crate::models;
 
 
 

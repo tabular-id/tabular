@@ -2,10 +2,9 @@ use crate::{
               modules, models, window_egui::{Tabular}, 
               driver_mysql, driver_sqlite, helpers
        };
-use eframe::{egui, App, Frame};
-use sqlx::{SqlitePool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use eframe::egui;
+use sqlx::{Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
 use redis::{Client, aio::ConnectionManager};
 
 

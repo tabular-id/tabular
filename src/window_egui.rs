@@ -1,6 +1,6 @@
 
 use eframe::{egui, App, Frame};
-use sqlx::{SqlitePool, Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::{SqlitePool, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use redis::{Client, aio::ConnectionManager};
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
