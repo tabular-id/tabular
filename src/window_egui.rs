@@ -2080,46 +2080,55 @@ impl Tabular {
                 });
             }
         } else {
-            ui.horizontal(|ui| {
-                ui.add_space(16.0); // Indent for leaf nodes
-                
-                let icon = match node.node_type {
-                    models::enums::NodeType::Database => "🗄",
-                    models::enums::NodeType::Table => "📋",
-                    models::enums::NodeType::Column => "📄",
-                    models::enums::NodeType::Query => "🔍",
-                    models::enums::NodeType::QueryHistItem => "📜",
-                    models::enums::NodeType::Connection => "🔗",
-                    models::enums::NodeType::DatabasesFolder => "📁",
-                    models::enums::NodeType::TablesFolder => "📋",
-                    models::enums::NodeType::ViewsFolder => "👁",
-                    models::enums::NodeType::StoredProceduresFolder => "⚙️",
-                    models::enums::NodeType::UserFunctionsFolder => "🔧",
-                    models::enums::NodeType::TriggersFolder => "⚡",
-                    models::enums::NodeType::EventsFolder => "📅",
-                    models::enums::NodeType::DBAViewsFolder => "👨‍💼",
-                    models::enums::NodeType::UsersFolder => "👥",
-                    models::enums::NodeType::PrivilegesFolder => "🔒",
-                    models::enums::NodeType::ProcessesFolder => "⚡",
-                    models::enums::NodeType::StatusFolder => "📊",
-                    models::enums::NodeType::View => "👁",
-                    models::enums::NodeType::StoredProcedure => "⚙️",
-                    models::enums::NodeType::UserFunction => "🔧",
-                    models::enums::NodeType::Trigger => "⚡",
-                    models::enums::NodeType::Event => "📅",
-                    models::enums::NodeType::MySQLFolder => "🐬",
-                    models::enums::NodeType::PostgreSQLFolder => "🐘",
-                    models::enums::NodeType::SQLiteFolder => "📄",
-                    models::enums::NodeType::RedisFolder => "🔴",
-                    models::enums::NodeType::CustomFolder => "📁",
-                    models::enums::NodeType::QueryFolder => "📂",
-                };
-                
-                let response = ui.button(format!("{} {}", icon, node.name));
-                
-                if response.clicked() {
-                    // Handle node selection
-                    match node.node_type {
+            let response = if node.node_type == models::enums::NodeType::QueryHistItem {
+                // Special handling for history items - text only, completely left aligned with no indentation
+                let available_width = ui.available_width();
+                ui.add_sized(
+                    [available_width, ui.text_style_height(&egui::TextStyle::Body) * 3.0], // Allow up to 3 lines
+                    egui::SelectableLabel::new(false, &node.name)
+                )
+            } else {
+                // For all other node types, use horizontal layout with icons
+                ui.horizontal(|ui| {
+                    let icon = match node.node_type {
+                        models::enums::NodeType::Database => "�",
+                        models::enums::NodeType::Table => "�",
+                        models::enums::NodeType::Column => "�",
+                        models::enums::NodeType::Query => "�",
+                        models::enums::NodeType::Connection => "🔗",
+                        models::enums::NodeType::DatabasesFolder => "📁",
+                        models::enums::NodeType::TablesFolder => "📋",
+                        models::enums::NodeType::ViewsFolder => "👁",
+                        models::enums::NodeType::StoredProceduresFolder => "⚙️",
+                        models::enums::NodeType::UserFunctionsFolder => "🔧",
+                        models::enums::NodeType::TriggersFolder => "⚡",
+                        models::enums::NodeType::EventsFolder => "📅",
+                        models::enums::NodeType::DBAViewsFolder => "👨‍💼",
+                        models::enums::NodeType::UsersFolder => "👥",
+                        models::enums::NodeType::PrivilegesFolder => "🔒",
+                        models::enums::NodeType::ProcessesFolder => "⚡",
+                        models::enums::NodeType::StatusFolder => "📊",
+                        models::enums::NodeType::View => "👁",
+                        models::enums::NodeType::StoredProcedure => "⚙️",
+                        models::enums::NodeType::UserFunction => "🔧",
+                        models::enums::NodeType::Trigger => "⚡",
+                        models::enums::NodeType::Event => "📅",
+                        models::enums::NodeType::MySQLFolder => "🐬",
+                        models::enums::NodeType::PostgreSQLFolder => "🐘",
+                        models::enums::NodeType::SQLiteFolder => "📄",
+                        models::enums::NodeType::RedisFolder => "🔴",
+                        models::enums::NodeType::CustomFolder => "📁",
+                        models::enums::NodeType::QueryFolder => "📂",
+                        _ => "❓",
+                    };
+                    
+                    ui.button(format!("{} {}", icon, node.name))
+                }).inner
+            };
+            
+            if response.clicked() {
+                // Handle node selection
+                match node.node_type {
                         models::enums::NodeType::Table => {
                             // Don't modify current editor_text, we'll create a new tab
                             // Just trigger table data loading 
@@ -2190,7 +2199,6 @@ impl Tabular {
                         }
                     });
                 }
-            });
         }
         
         (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open, folder_name_for_removal, parent_folder_for_creation, folder_removal_mapping)
@@ -6949,12 +6957,8 @@ impl App for Tabular {
                                 // Handle history item clicks
                                 for (display_name, _, _) in query_files_to_open {
                                     if let Some(history_item) = self.history_items.iter().find(|item| {
-                                        let query_preview = if item.query.len() > 50 {
-                                            format!("{}...", &item.query[..50])
-                                        } else {
-                                            item.query.clone()
-                                        };
-                                        query_preview == display_name
+                                        // Use full query text for comparison instead of truncated preview
+                                        item.query == display_name
                                     }) {
                                         // Set the query text in the active tab
                                         if let Some(active_tab) = self.query_tabs.get_mut(self.active_tab_index) {
