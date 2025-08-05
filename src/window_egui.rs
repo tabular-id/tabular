@@ -6176,6 +6176,16 @@ impl App for Tabular {
         
         // Handle keyboard shortcuts
         ctx.input(|i| {
+            // CMD+W or CTRL+W to close current tab
+            if (i.modifiers.mac_cmd || i.modifiers.ctrl) && i.key_pressed(egui::Key::W) && !self.query_tabs.is_empty() {
+                self.close_tab(self.active_tab_index);
+            }
+            
+            // CMD+Q or CTRL+Q to quit application
+            if (i.modifiers.mac_cmd || i.modifiers.ctrl) && i.key_pressed(egui::Key::Q) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            
             // CMD+SHIFT+P to open command palette (on macOS)
             if i.modifiers.mac_cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
                 self.open_command_palette();
