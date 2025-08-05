@@ -4650,9 +4650,20 @@ impl Tabular {
 
     // Pagination methods
     fn update_pagination_data(&mut self, all_data: Vec<Vec<String>>) {
+        println!("=== UPDATE_PAGINATION_DATA DEBUG ===");
+        println!("Received data rows: {}", all_data.len());
+        if !all_data.is_empty() {
+            println!("First row sample: {:?}", &all_data[0]);
+        }
+        
         self.all_table_data = all_data;
         self.total_rows = self.all_table_data.len();
         self.current_page = 0; // Reset to first page
+        
+        println!("After assignment - all_table_data.len(): {}", self.all_table_data.len());
+        println!("After assignment - total_rows: {}", self.total_rows);
+        println!("====================================");
+        
         self.update_current_page_data();
     }
 
@@ -5126,8 +5137,22 @@ impl Tabular {
 
         // Check if we have an active connection
         if let Some(connection_id) = self.current_connection_id {
+            println!("=== EXECUTING QUERY ===");
+            println!("Connection ID: {}", connection_id);
+            println!("Query: {}", query);
+            
             let result = connection::execute_query_with_connection(self, connection_id, query.clone());
+            
+            println!("Query execution result: {:?}", result.is_some());
+            
             if let Some((headers, data)) = result {
+                println!("=== QUERY RESULT SUCCESS ===");
+                println!("Headers received: {} - {:?}", headers.len(), headers);
+                println!("Data rows received: {}", data.len());
+                if !data.is_empty() {
+                    println!("First row sample: {:?}", &data[0]);
+                }
+                
                 self.current_table_headers = headers;
                 
                 // Use pagination for query results
@@ -5139,6 +5164,10 @@ impl Tabular {
                     self.current_table_name = format!("Query Results ({} total rows, showing page {} of {})", 
                         self.total_rows, self.current_page + 1, self.get_total_pages());
                 }
+                println!("After update_pagination_data - total_rows: {}, all_table_data.len(): {}", 
+                         self.total_rows, self.all_table_data.len());
+                println!("============================");
+                
                 // Save query to history after successful execution
                 self.save_query_to_history(&query, connection_id);
             } else {
@@ -5520,10 +5549,30 @@ impl Tabular {
                             ui.set_min_width(150.0);
                             ui.vertical(|ui| {
                                 if ui.button("📄 Export to CSV").clicked() {
+                                    println!("=== BEFORE EXPORT CSV CALL ===");
+                                    println!("self.all_table_data.len(): {}", self.all_table_data.len());
+                                    println!("self.current_table_headers.len(): {}", self.current_table_headers.len());
+                                    println!("self.current_table_name: {}", self.current_table_name);
+                                    println!("self.total_rows: {}", self.total_rows);
+                                    if !self.all_table_data.is_empty() {
+                                        println!("First row sample: {:?}", &self.all_table_data[0]);
+                                    }
+                                    println!("=============================");
+                                    
                                     export::export_to_csv(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
                                     ui.close_menu();
                                 }
                                 if ui.button("📊 Export to XLSX").clicked() {
+                                    println!("=== BEFORE EXPORT XLSX CALL ===");
+                                    println!("self.all_table_data.len(): {}", self.all_table_data.len());
+                                    println!("self.current_table_headers.len(): {}", self.current_table_headers.len());
+                                    println!("self.current_table_name: {}", self.current_table_name);
+                                    println!("self.total_rows: {}", self.total_rows);
+                                    if !self.all_table_data.is_empty() {
+                                        println!("First row sample: {:?}", &self.all_table_data[0]);
+                                    }
+                                    println!("==============================");
+                                    
                                     export::export_to_xlsx(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
                                     ui.close_menu();
                                 }

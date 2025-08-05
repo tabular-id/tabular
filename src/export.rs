@@ -5,8 +5,19 @@ pub fn export_to_csv(
     current_table_headers: &[String],
     current_table_name: &str,
 ) {
+    println!("=== CSV EXPORT DEBUG INFO ===");
+    println!("Table name: {}", current_table_name);
+    println!("Headers count: {}", current_table_headers.len());
+    println!("Headers: {:?}", current_table_headers);
+    println!("Data rows: {}", all_table_data.len());
+    if !all_table_data.is_empty() {
+        println!("First row sample: {:?}", &all_table_data[0]);
+    }
+    println!("============================");
+    
     if all_table_data.is_empty() || current_table_headers.is_empty() {
-        eprintln!("No data to export");
+        eprintln!("No data to export - empty data: {}, empty headers: {}", 
+                 all_table_data.is_empty(), current_table_headers.is_empty());
         return;
     }
 
@@ -15,11 +26,18 @@ pub fn export_to_csv(
         .add_filter("CSV files", &["csv"])
         .set_file_name(format!("{}.csv", current_table_name.replace(' ', "_")));
 
+    println!("Opening CSV file dialog...");
+    
     if let Some(path) = file_dialog.save_file() {
+        println!("CSV file path selected: {:?}", path);
+        println!("About to write CSV with {} rows and {} headers", all_table_data.len(), current_table_headers.len());
+        
         match write_csv_file(&path, all_table_data, current_table_headers) {
             Ok(_) => println!("✓ Successfully exported {} rows to CSV: {:?}", all_table_data.len(), path),
             Err(e) => eprintln!("❌ Failed to export CSV: {}", e),
         }
+    } else {
+        println!("CSV file dialog was cancelled");
     }
 }
 
@@ -28,17 +46,31 @@ fn write_csv_file(
     all_table_data: &[Vec<String>],
     current_table_headers: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== WRITE_CSV_FILE DEBUG ===");
+    println!("Path: {:?}", path);
+    println!("Headers to write: {:?}", current_table_headers);
+    println!("Data rows to write: {}", all_table_data.len());
+    
     let mut writer = csv::Writer::from_path(path)?;
+    println!("CSV writer created successfully");
     
     // Write headers
     writer.write_record(current_table_headers)?;
+    println!("Headers written successfully");
     
     // Write data rows
-    for row in all_table_data {
+    for (idx, row) in all_table_data.iter().enumerate() {
         writer.write_record(row)?;
+        if idx < 3 {  // Log first 3 rows
+            println!("Row {} written: {:?}", idx, row);
+        }
     }
+    println!("All {} data rows written successfully", all_table_data.len());
     
     writer.flush()?;
+    println!("CSV file flushed and closed successfully");
+    println!("===========================");
+    
     Ok(())
 }
 
@@ -47,8 +79,20 @@ pub fn export_to_xlsx(
     current_table_headers: &[String],
     current_table_name: &str,
 ) {
+    println!("=== EXPORT DEBUG INFO ===");
+    println!("Table name: {}", current_table_name);
+    println!("Headers count: {}", current_table_headers.len());
+    println!("Headers: {:?}", current_table_headers);
+    println!("Data rows: {}", all_table_data.len());
+    if !all_table_data.is_empty() {
+        println!("First row sample: {:?}", &all_table_data[0]);
+    }
+    println!("========================");
+    
+    println!("Exporting {} rows to XLSX", all_table_data.len());
     if all_table_data.is_empty() || current_table_headers.is_empty() {
-        eprintln!("No data to export");
+        eprintln!("No data to export - empty data: {}, empty headers: {}", 
+                 all_table_data.is_empty(), current_table_headers.is_empty());
         return;
     }
 

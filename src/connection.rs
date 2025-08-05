@@ -222,7 +222,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      use redis::AsyncCommands;
                      
                      // Parse simple Redis commands
-                     let parts: Vec<&str> = query.trim().split_whitespace().collect();
+                     let parts: Vec<&str> = query.split_whitespace().collect();
                      if parts.is_empty() {
                             return Some((
                                    vec!["Error".to_string()],
