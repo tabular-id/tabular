@@ -778,6 +778,7 @@ impl Tabular {
             is_modified: false,
             connection_id: None, // No connection assigned by default
             database_name: None, // No database assigned by default
+            has_executed_query: false, // New tab hasn't executed any query yet
         };
         
         self.query_tabs.push(new_tab);
@@ -802,6 +803,7 @@ impl Tabular {
             is_modified: false,
             connection_id,
             database_name: None, // No database assigned by default
+            has_executed_query: false, // New tab hasn't executed any query yet
         };
         
         self.query_tabs.push(new_tab);
@@ -1261,6 +1263,7 @@ impl Tabular {
             is_modified: false,
             connection_id: None, // File queries don't have connection by default
             database_name: None, // File queries don't have database by default
+            has_executed_query: false, // New tab hasn't executed any query yet
         };
         
         self.query_tabs.push(new_tab);
@@ -5446,12 +5449,34 @@ impl Tabular {
             return;
         }
 
-        // Get connection_id from current active tab, fallback to global current_connection_id
-        let connection_id = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
-            tab.connection_id.or(self.current_connection_id)
+        // Check if current tab has never executed a query
+        let tab_never_executed = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+            !tab.has_executed_query
         } else {
-            self.current_connection_id
+            true // If no tab exists, treat as never executed
         };
+
+        // Get connection_id from current active tab (don't fallback to global for first-time execution)
+        let connection_id = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
+            if tab_never_executed {
+                // For first-time execution, only use tab's own connection, don't inherit from other tabs
+                tab.connection_id
+            } else {
+                // For subsequent executions, allow fallback to global
+                tab.connection_id.or(self.current_connection_id)
+            }
+        } else {
+            None
+        };
+
+        // If tab has never executed a query and has no connection, show connection selector
+        if tab_never_executed && connection_id.is_none() {
+            println!("First-time query execution - showing connection selector");
+            self.pending_query = query;
+            self.auto_execute_after_connection = true;
+            self.show_connection_selector = true;
+            return;
+        }
 
         // Check if we have an active connection
         if let Some(connection_id) = connection_id {
@@ -5462,6 +5487,11 @@ impl Tabular {
             let result = connection::execute_query_with_connection(self, connection_id, query.clone());
             
             println!("Query execution result: {:?}", result.is_some());
+            
+            // Mark tab as having executed a query (regardless of success/failure)
+            if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+                tab.has_executed_query = true;
+            }
             
             if let Some((headers, data)) = result {
                 println!("=== QUERY RESULT SUCCESS ===");
@@ -5504,7 +5534,8 @@ impl Tabular {
                 self.all_table_data.clear();
                 self.total_rows = 0;
             } else {
-                // Show connection selector popup
+                // For tabs that have executed before but lost connection, show connection selector
+                println!("No connection available for query execution - showing connection selector");
                 self.pending_query = query.clone();
                 self.show_connection_selector = true;
                 self.auto_execute_after_connection = true;
@@ -7183,28 +7214,8 @@ impl App for Tabular {
                                         };
 
                                         if has_query {
-                                            if self.current_connection_id.is_some() {
-                                                // Connection is already selected, execute query
-                                                self.execute_query();
-                                            } else if !self.connections.is_empty() {
-                                                // No connection selected but connections exist, show selector
-                                                self.pending_query = if !self.selected_text.trim().is_empty() {
-                                                    self.selected_text.clone()
-                                                } else {
-                                                    let cursor_query = self.extract_query_from_cursor();
-                                                    if !cursor_query.trim().is_empty() {
-                                                        cursor_query
-                                                    } else {
-                                                        self.editor_text.clone()
-                                                    }
-                                                };
-                                                self.auto_execute_after_connection = true;
-                                                self.show_connection_selector = true;
-                                            } else {
-                                                // No connections exist, show error dialog
-                                                self.error_message = "No database connections available.\n\nPlease add a connection first by clicking the '+' button in the Database panel.".to_string();
-                                                self.show_error_message = true;
-                                            }
+                                            // Always call execute_query, it will handle connection logic internally
+                                            self.execute_query();
                                         }
                                     }
                                     

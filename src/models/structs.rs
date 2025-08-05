@@ -69,6 +69,7 @@ pub struct QueryTab {
     pub is_modified: bool,
     pub connection_id: Option<i64>, // Each tab can have its own database connection
     pub database_name: Option<String>, // Each tab can have its own database selection
+    pub has_executed_query: bool, // Track if this tab has ever executed a query
 }
 
 
