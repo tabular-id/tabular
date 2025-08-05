@@ -3,6 +3,7 @@ use crate::{
               driver_mysql, driver_sqlite, helpers
        };
 use eframe::egui;
+use image::open;
 use sqlx::{Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::sync::Arc;
 use redis::{Client, aio::ConnectionManager};
@@ -10,89 +11,110 @@ use redis::{Client, aio::ConnectionManager};
 
 pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Context) {
        if tabular.show_connection_selector {
+
+       let mut open = true;
+              
        egui::Window::new("Select Connection to Execute Query")
               .collapsible(false)
-              .resizable(false)
+              .resizable(true)
+              .default_width(400.0)
               .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+              .open(&mut open)
               .show(ctx, |ui| {
+
               ui.add_space(5.0);
               
-              // Show the query that will be executed
-              ui.horizontal(|ui| {
-                     ui.monospace(format!("\"{}...\"", 
-                     if tabular.pending_query.len() > 50 {
-                            &tabular.pending_query[..50]
-                     } else {
-                            &tabular.pending_query
-                     }
-                     ));
-              });
-              ui.separator();
-              
-                     egui::ScrollArea::vertical()
-                     .max_height(200.0)
-                     .show(ui, |ui| {
-                     let mut selected_connection = None;
+              egui::ScrollArea::vertical()
+              .show(ui, |ui| {
+              let mut selected_connection = None;
 
-                     // sort tabular.connections by folder and name
-                     tabular.connections.sort_by(|a, b| {
-                            a.folder.cmp(&b.folder).then_with(|| a.name.cmp(&b.name))
-                     });
-                     
-                     for connection in &tabular.connections {
-                            let connection_text = format!("{} / {} / {}", 
-                                   connection.folder.as_deref().unwrap_or(""),
-                                   match connection.connection_type {
-                                   models::enums::DatabaseType::MySQL => "MySQL",
-                                   models::enums::DatabaseType::PostgreSQL => "PostgreSQL",
-                                   models::enums::DatabaseType::SQLite => "SQLite",
-                                   models::enums::DatabaseType::Redis => "Redis",
-                                   },
-                                   connection.name 
-                            );
-                            
-                            if ui.button(&connection_text).clicked() {
+              // sort tabular.connections by folder and name
+              tabular.connections.sort_by(|a, b| {
+                     a.folder.cmp(&b.folder).then_with(|| a.name.cmp(&b.name))
+              });
+              
+              for connection in &tabular.connections {
+                     let mut sfolder = connection.folder.as_deref().unwrap_or("");
+                     if sfolder.is_empty() {
+                            sfolder = "Default";
+                     }
+                     let connection_text = format!("{} / {} / {}", 
+                            sfolder,
+                            match connection.connection_type {
+                            models::enums::DatabaseType::MySQL => "MySQL",
+                            models::enums::DatabaseType::PostgreSQL => "PostgreSQL",
+                            models::enums::DatabaseType::SQLite => "SQLite",
+                            models::enums::DatabaseType::Redis => "Redis",
+                            },
+                            connection.name 
+                     );
+                                          
+                            // Custom button with red fill on hover
+                            let button = egui::Button::new(&connection_text);
+                            let response = ui.add_sized([ui.available_width(), 32.0], button);
+
+                            if response.hovered() {
+                                   let rect = response.rect;
+                                   let visuals = ui.style().visuals.clone();
+                                   let fill_color = egui::Color32::RED; // Red
+                                   ui.painter().rect_filled(rect, visuals.widgets.inactive.corner_radius, fill_color);
+                                   // Repaint the text over the fill
+                                   ui.painter().text(
+                                   rect.center(),
+                                   egui::Align2::CENTER_CENTER,
+                                   &connection_text,
+                                   egui::TextStyle::Button.resolve(ui.style()),
+                                   visuals.text_color(),
+                                   );
+                            }
+
+                            if response.clicked() {
                                    if let Some(connection_id) = connection.id {
                                    selected_connection = Some(connection_id);
                                    }
                             }
+                         ui.add_space(7.0);
+
+              }
+              
+              // Handle selection outside the loop to avoid borrowing issues
+              if let Some(connection_id) = selected_connection {
+                     // Set active connection
+                     tabular.current_connection_id = Some(connection_id);
+                     
+                     if tabular.auto_execute_after_connection {
+                            // Execute the query immediately
+                            let query = tabular.pending_query.clone();
+                            if let Some((headers, data)) = execute_query_with_connection(tabular, connection_id, query) {
+                            tabular.current_table_headers = headers;
+                            tabular.current_table_data = data;
+                            if tabular.current_table_data.is_empty() {
+                                   tabular.current_table_name = "Query executed successfully (no results)".to_string();
+                            } else {
+                                   tabular.current_table_name = format!("Query Results ({} rows)", tabular.current_table_data.len());
+                            }
+                            } else {
+                            tabular.current_table_name = "Query execution failed".to_string();
+                            tabular.current_table_headers.clear();
+                            tabular.current_table_data.clear();
+                            }
                      }
                      
-                     // Handle selection outside the loop to avoid borrowing issues
-                     if let Some(connection_id) = selected_connection {
-                            // Set active connection
-                            tabular.current_connection_id = Some(connection_id);
-                            
-                            if tabular.auto_execute_after_connection {
-                                   // Execute the query immediately
-                                   let query = tabular.pending_query.clone();
-                                   if let Some((headers, data)) = execute_query_with_connection(tabular, connection_id, query) {
-                                   tabular.current_table_headers = headers;
-                                   tabular.current_table_data = data;
-                                   if tabular.current_table_data.is_empty() {
-                                          tabular.current_table_name = "Query executed successfully (no results)".to_string();
-                                   } else {
-                                          tabular.current_table_name = format!("Query Results ({} rows)", tabular.current_table_data.len());
-                                   }
-                                   } else {
-                                   tabular.current_table_name = "Query execution failed".to_string();
-                                   tabular.current_table_headers.clear();
-                                   tabular.current_table_data.clear();
-                                   }
-                            }
-                            
-                            tabular.show_connection_selector = false;
-                            tabular.pending_query.clear();
-                            tabular.auto_execute_after_connection = false;
-                     }
-                     });                    ui.separator();
-              ui.horizontal(|ui| {
-                     if ui.button("Cancel").clicked() {
                      tabular.show_connection_selector = false;
                      tabular.pending_query.clear();
-                     }
+                     tabular.auto_execute_after_connection = false;
+              }
               });
+
               });
+
+              // Handle close button click
+              if !open {
+                     tabular.show_connection_selector = false;
+                     tabular.pending_query.clear();
+                     tabular.auto_execute_after_connection = false;
+              }
+              
        }
 }
 
