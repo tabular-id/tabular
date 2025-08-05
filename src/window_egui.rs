@@ -7250,24 +7250,7 @@ impl App for Tabular {
                 ui.separator();
                 ui.label(format!("Lines: {}", self.editor_text.lines().count()));
                 ui.separator();
-                
-                // Show connection for current tab
-                ui.label("Tab Connection:");
-                if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
-                    if let Some(conn_id) = tab.connection_id {
-                        if let Some(conn_name) = self.get_connection_name(conn_id) {
-                            ui.colored_label(egui::Color32::from_rgb(0, 255, 0), format!("✓ {}", conn_name));
-                        } else {
-                            ui.colored_label(egui::Color32::from_rgb(255, 165, 0), format!("⚠ ID {}", conn_id));
-                        }
-                    } else {
-                        ui.colored_label(egui::Color32::from_rgb(255, 255, 0), "⚠ None");
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::from_rgb(255, 0, 0), "❌ No tab");
-                }
-                ui.separator();
-                
+                                
                 // Show selection status
                 if !self.selected_text.trim().is_empty() {
                     ui.colored_label(egui::Color32::from_rgb(0, 150, 255), 
@@ -7282,7 +7265,7 @@ impl App for Tabular {
                 
                 // Connection selector ComboBox for current tab
                 if !self.connections.is_empty() {
-                    ui.label("Set Tab Connection:");
+                    ui.label("Conn:");
                     let current_tab_connection_name = if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
                         if let Some(conn_id) = tab.connection_id {
                             self.get_connection_name(conn_id).unwrap_or_else(|| format!("ID {}", conn_id))
@@ -7301,7 +7284,7 @@ impl App for Tabular {
                         .show_ui(ui, |ui| {
                             // Option for no connection
                             if ui.selectable_label(
-                                self.query_tabs.get(self.active_tab_index).map_or(false, |tab| tab.connection_id.is_none()), 
+                                self.query_tabs.get(self.active_tab_index).is_some_and(|tab| tab.connection_id.is_none()), 
                                 "None"
                             ).clicked() {
                                 connection_to_set = Some(None);
@@ -7310,8 +7293,7 @@ impl App for Tabular {
                             // All available connections
                             for connection in &self.connections {
                                 if let Some(connection_id) = connection.id {
-                                    let is_selected = self.query_tabs.get(self.active_tab_index)
-                                        .map_or(false, |tab| tab.connection_id == Some(connection_id));
+                                    let is_selected = self.query_tabs.get(self.active_tab_index).is_some_and(|tab| tab.connection_id == Some(connection_id));
                                     if ui.selectable_label(is_selected, &connection.name).clicked() {
                                         connection_to_set = Some(Some(connection_id));
                                     }
