@@ -6338,7 +6338,7 @@ impl App for Tabular {
                     ui.horizontal(|ui| {
                         // Database tab
                         let database_text = if self.selected_menu == "Database" {
-                            egui::RichText::new("Database").color(egui::Color32::from_rgb(255, 130, 0)) // Orange text for active
+                            egui::RichText::new("Database").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
                         } else {
                             egui::RichText::new("Database")
                         };
@@ -6348,7 +6348,7 @@ impl App for Tabular {
                         
                         // Queries tab
                         let queries_text = if self.selected_menu == "Queries" {
-                            egui::RichText::new("Queries").color(egui::Color32::from_rgb(255, 130, 0)) // Orange text for active
+                            egui::RichText::new("Queries").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
                         } else {
                             egui::RichText::new("Queries")
                         };
@@ -6358,7 +6358,7 @@ impl App for Tabular {
                         
                         // History tab
                         let history_text = if self.selected_menu == "History" {
-                            egui::RichText::new("History").color(egui::Color32::from_rgb(255, 130, 0)) // Orange text for active
+                            egui::RichText::new("History").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
                         } else {
                             egui::RichText::new("History")
                         };
@@ -6457,7 +6457,7 @@ impl App for Tabular {
                                 if ui.add_sized(
                                     [24.0, 24.0], // Small square button
                                     egui::Button::new("➕")
-                                        .fill(egui::Color32::from_rgb(255, 100, 0))
+                                        .fill(egui::Color32::RED)
                                 ).on_hover_text("Add New Database Connection").clicked() {
                                     // Reset test connection status saat buka add dialog
                                     self.test_connection_status = None;
@@ -6469,7 +6469,7 @@ impl App for Tabular {
                                 if ui.add_sized(
                                     [24.0, 24.0], // Small square button
                                     egui::Button::new("➕")
-                                        .fill(egui::Color32::from_rgb(255, 100, 60))
+                                        .fill(egui::Color32::RED)
                                 ).on_hover_text("New Query File").clicked() {
                                     // Create new tab instead of clearing editor
                                     self.create_new_tab("Untitled Query".to_string(), String::new());
@@ -6513,7 +6513,7 @@ impl App for Tabular {
                                 for (index, tab) in self.query_tabs.iter().enumerate() {
                                     let is_active = index == self.active_tab_index;
                                     let tab_color = if is_active {
-                                        egui::Color32::from_rgb(255, 130, 0) // Orange for active
+                                        egui::Color32::from_rgb(255, 60, 0) // Orange for active
                                     } else {
                                         ui.visuals().text_color()
                                     };
@@ -6556,7 +6556,7 @@ impl App for Tabular {
                                 if ui.add_sized(
                                     [24.0, 24.0],
                                     egui::Button::new("+")
-                                        .fill(egui::Color32::from_rgb(60, 60, 60))
+                                        .fill(egui::Color32::BLACK)
                                 ).clicked() {
                                     self.create_new_tab("Untitled Query".to_string(), String::new());
                                 }
