@@ -111,6 +111,10 @@ pub struct Tabular {
     pub column_widths: Vec<f32>, // Store individual column widths
     pub min_column_width: f32,
     pub max_column_width: f32,
+    // Gear menu and about dialog
+    pub show_about_dialog: bool,
+    // Logo texture
+    pub logo_texture: Option<egui::TextureHandle>,
 }
 
 
@@ -203,6 +207,10 @@ impl Tabular {
             column_widths: Vec::new(),
             min_column_width: 50.0,
             max_column_width: 600.0,
+            // Gear menu and about dialog
+            show_about_dialog: false,
+            // Logo texture
+            logo_texture: None,
         };
         
         // Clear any old cached pools
@@ -222,6 +230,21 @@ impl Tabular {
         app.start_background_worker(background_receiver, result_sender);
         
         app
+    }
+
+    fn load_logo_texture(&mut self, ctx: &egui::Context) {
+        if self.logo_texture.is_none() {
+            // Try to load the logo from assets/logo.png
+            if let Ok(image_bytes) = std::fs::read("assets/logo.png") {
+                if let Ok(image) = image::load_from_memory(&image_bytes) {
+                    let rgba_image = image.to_rgba8();
+                    let size = [image.width() as usize, image.height() as usize];
+                    let pixels = rgba_image.as_flat_samples();
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                    self.logo_texture = Some(ctx.load_texture("logo", color_image, Default::default()));
+                }
+            }
+        }
     }
 
     fn start_background_worker(&self, task_receiver: Receiver<models::enums::BackgroundTask>, result_sender: Sender<models::enums::BackgroundResult>) {
@@ -1018,6 +1041,49 @@ impl Tabular {
                             self.show_error_message = false;
                             self.error_message.clear();
                         }
+                    });
+                });
+        }
+    }
+
+    fn render_about_dialog(&mut self, ctx: &egui::Context) {
+        if self.show_about_dialog {
+            // Load logo texture if not already loaded
+            self.load_logo_texture(ctx);
+            
+            egui::Window::new("About Tabular")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(400.0)
+                .open(&mut self.show_about_dialog)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+                        
+                        // App icon/logo - use actual logo if loaded, fallback to emoji
+                        if let Some(logo_texture) = &self.logo_texture {
+                            ui.add(egui::Image::from_texture(logo_texture).max_size(egui::vec2(64.0, 64.0)));
+                        } else {
+                            ui.label(egui::RichText::new("📊").size(48.0));
+                        }
+                        ui.add_space(10.0);
+                        
+                        // App name and version
+                        ui.label(egui::RichText::new("Tabular").size(24.0).strong());
+                        ui.label(egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(14.0).color(egui::Color32::GRAY));
+                        ui.add_space(15.0);
+                        
+                        // Description
+                        ui.label("Your SQL Editor, Forged with Rust: Fast, Safe, Efficient.");
+                        ui.label("Jayuda");
+                        ui.add_space(10.0);
+                        
+                       
+                        ui.label(egui::RichText::new("© 2025 PT. Vneu Teknologi Indonesia ").size(12.0).color(egui::Color32::GRAY));
+                        ui.hyperlink_to("https://github.com/tabular-id/tabular", "https://github.com/tabular-id/tabular");
+                        ui.label(egui::RichText::new("Built with ❤️ using Rust").size(12.0).color(egui::Color32::GRAY));
+                        ui.add_space(15.0);
                     });
                 });
         }
@@ -6596,6 +6662,7 @@ impl App for Tabular {
         self.render_save_dialog(ctx);
         connection::render_connection_selector(self, ctx);
         self.render_error_dialog(ctx);
+        self.render_about_dialog(ctx);
         self.render_create_folder_dialog(ctx);
         self.render_move_to_folder_dialog(ctx);
 
@@ -6828,6 +6895,39 @@ impl App for Tabular {
                                 ).clicked() {
                                     self.create_new_tab("Untitled Query".to_string(), String::new());
                                 }
+                                
+                                // Push gear icon to the far right
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Gear icon with context menu
+                                    let gear_button = ui.add_sized(
+                                        [24.0, 24.0],
+                                        egui::Button::new("⚙")
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .stroke(egui::Stroke::NONE)
+                                    );
+                                    
+                                    // Show context menu when gear is left-clicked
+                                    if gear_button.clicked() {
+                                        ui.memory_mut(|mem| mem.toggle_popup(egui::Id::new("gear_menu")));
+                                    }
+                                    
+                                    // Render popup menu
+                                    egui::popup::popup_below_widget(ui, egui::Id::new("gear_menu"), &gear_button, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                                        ui.set_min_width(120.0); // Set minimum width for the popup
+                                        ui.spacing_mut().button_padding = egui::vec2(8.0, 6.0); // Add more padding to buttons
+                                        ui.spacing_mut().item_spacing.y = 4.0; // Add vertical spacing between items
+                                        
+                                        if ui.add_sized([100.0, 24.0], egui::Button::new("Settings")).clicked() {
+                                            // TODO: Implement settings dialog
+                                            println!("Settings clicked - not implemented yet");
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
+                                        if ui.add_sized([100.0, 24.0], egui::Button::new("About")).clicked() {
+                                            self.show_about_dialog = true;
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
+                                    });
+                                });
                                 
                                 
                                 // Handle tab operations
