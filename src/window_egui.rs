@@ -6601,7 +6601,9 @@ impl App for Tabular {
 
         egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(200.0)
+            .default_width(250.0)
+            .min_width(150.0)
+            .max_width(500.0)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     // Top section with tabs
@@ -6659,17 +6661,7 @@ impl App for Tabular {
                                     self.render_tree_for_database_section(ui);
                                 }
                             },
-                            "Queries" => {
-                                ui.horizontal(|ui| {
-                                    ui.label("🔍 Saved Queries");
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("📂").on_hover_text("Create Folder").clicked() {
-                                            self.show_create_folder_dialog = true;
-                                        }
-                                    });
-                                });
-                                ui.separator();
-                                
+                            "Queries" => {                                
                                 // Add right-click context menu support to the UI area itself
                                 let queries_response = ui.interact(ui.available_rect_before_wrap(), egui::Id::new("queries_area"), egui::Sense::click());
                                 queries_response.context_menu(|ui| {
@@ -6685,8 +6677,6 @@ impl App for Tabular {
                                 self.queries_tree = queries_tree;
                             },
                             "History" => {
-                                ui.label("📜 Query History");
-                                ui.separator();
                                 let mut history_tree = std::mem::take(&mut self.history_tree);
                                 let query_files_to_open = self.render_tree(ui, &mut history_tree);
                                 self.history_tree = history_tree;
