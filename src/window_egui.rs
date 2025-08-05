@@ -6307,13 +6307,8 @@ impl Tabular {
                     .shadow(egui::epaint::Shadow::default())
                     .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
-                        ui.set_min_size(egui::vec2(600.0, 400.0));
                         
-                        ui.vertical(|ui| {
-                            // Title and input field
-                            ui.label(egui::RichText::new("Command Palette").heading());
-                            ui.separator();
-                            
+                        ui.vertical(|ui| {                            
                             // Search input
                             let response = ui.add_sized(
                                 [580.0, 25.0],
@@ -6351,7 +6346,7 @@ impl Tabular {
                             
                             // Command list
                             egui::ScrollArea::vertical()
-                                .max_height(300.0)
+                                .max_height(500.0)
                                 .show(ui, |ui| {
                                     for (index, command) in filtered_commands.iter().enumerate() {
                                         let is_selected = index == self.command_palette_selected_index;
@@ -6371,16 +6366,6 @@ impl Tabular {
                                     }
                                 });
                             
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Use");
-                                ui.code("↑↓");
-                                ui.label("to navigate,");
-                                ui.code("Enter");
-                                ui.label("to select,");
-                                ui.code("Escape");
-                                ui.label("to close");
-                            });
                         });
                     });
             });
