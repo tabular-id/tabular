@@ -5358,66 +5358,6 @@ impl Tabular {
         }
     }
 
-    fn load_table_data(&mut self, connection_id: i64, table_name: &str) {
-        println!("load_table_data called with connection_id: {}, table_name: {}", connection_id, table_name);
-        
-        // Clear any previous table selection
-        self.clear_table_selection();
-        
-        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
-            println!("Found connection for table: {}", table_name);
-            
-            // Generate appropriate query based on database type
-            let query = match connection.connection_type {
-                models::enums::DatabaseType::Redis => {
-                    // Create safe Redis commands using SCAN instead of KEYS for production safety
-                    match table_name {
-                        "hashes" => "SCAN 0 MATCH hash:* COUNT 100".to_string(),  // Scan hash keys safely
-                        "strings" => "SCAN 0 MATCH string:* COUNT 100".to_string(), // Scan string keys safely
-                        "lists" => "SCAN 0 MATCH list:* COUNT 100".to_string(),     // Scan list keys safely
-                        "sets" => "SCAN 0 MATCH set:* COUNT 100".to_string(),       // Scan set keys safely
-                        "sorted_sets" => "SCAN 0 MATCH zset:* COUNT 100".to_string(), // Scan sorted set keys safely
-                        "streams" => "SCAN 0 MATCH stream:* COUNT 100".to_string(),   // Scan stream keys safely
-                        "keys" => "SCAN 0 COUNT 100".to_string(),                     // Scan all keys safely
-                        _ => {
-                            // For info sections or other types, show INFO command
-                            format!("INFO {}", table_name)
-                        }
-                    }
-                }
-                _ => {
-                    // SQL databases - use regular SELECT query
-                    format!("SELECT * FROM {} LIMIT 10000", table_name)
-                }
-            };
-            
-            // Set the query in the editor  
-            self.editor_text = query.clone();
-            self.current_connection_id = Some(connection_id);
-            
-            // Execute the query with proper database connection
-            if let Some((headers, data)) = connection::execute_table_query_sync(self, connection_id, &connection, &query) {
-                self.current_table_headers = headers;
-                
-                // Use pagination for table data
-                self.update_pagination_data(data);
-                
-                if self.total_rows == 0 {
-                    self.current_table_name = format!("Table: {} (no results)", table_name);
-                } else {
-                    self.current_table_name = format!("Table: {} ({} total rows, showing page {} of {})", 
-                        table_name, self.total_rows, self.current_page + 1, self.get_total_pages());
-                }
-                println!("Successfully loaded {} total rows from table {}", self.total_rows, table_name);
-            } else {
-                self.current_table_name = format!("Failed to load table: {}", table_name);
-                self.current_table_headers.clear();
-                self.current_table_data.clear();
-                println!("Failed to execute query for table: {}", table_name);
-            }
-        }
-    }
-
     fn find_redis_key_info(&self, node: &models::structs::TreeNode, key_name: &str) -> Option<(String, String)> {
         // Check if this node is a type folder (like "Strings (5)")
         if node.node_type == models::enums::NodeType::TablesFolder {            
