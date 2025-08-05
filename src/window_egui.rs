@@ -104,6 +104,9 @@ pub struct Tabular {
     pub folder_removal_map: std::collections::HashMap<i64, String>, // Map hash to folder path
     // Connection pool cleanup tracking
     pub last_cleanup_time: std::time::Instant,
+    // Table selection tracking
+    pub selected_row: Option<usize>,
+    pub selected_cell: Option<(usize, usize)>, // (row_index, column_index)
 }
 
 
@@ -190,6 +193,8 @@ impl Tabular {
             selected_folder_for_removal: None,
             folder_removal_map: std::collections::HashMap::new(),
             last_cleanup_time: std::time::Instant::now(),
+            selected_row: None,
+            selected_cell: None,
         };
         
         // Clear any old cached pools
@@ -4698,6 +4703,7 @@ impl Tabular {
         if self.current_page < max_page {
             self.current_page += 1;
             self.update_current_page_data();
+            self.clear_table_selection();
         }
     }
 
@@ -4705,6 +4711,7 @@ impl Tabular {
         if self.current_page > 0 {
             self.current_page -= 1;
             self.update_current_page_data();
+            self.clear_table_selection();
         }
     }
 
@@ -4713,6 +4720,7 @@ impl Tabular {
         if page <= max_page {
             self.current_page = page;
             self.update_current_page_data();
+            self.clear_table_selection();
         }
     }
 
@@ -4721,6 +4729,7 @@ impl Tabular {
             self.page_size = new_size;
             self.current_page = 0; // Reset to first page
             self.update_current_page_data();
+            self.clear_table_selection();
         }
     }
 
@@ -5035,8 +5044,16 @@ impl Tabular {
         }
     }
 
+    fn clear_table_selection(&mut self) {
+        self.selected_row = None;
+        self.selected_cell = None;
+    }
+
     fn load_table_data(&mut self, connection_id: i64, table_name: &str) {
         println!("load_table_data called with connection_id: {}, table_name: {}", connection_id, table_name);
+        
+        // Clear any previous table selection
+        self.clear_table_selection();
         
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
             println!("Found connection for table: {}", table_name);
@@ -5523,21 +5540,67 @@ impl Tabular {
                                 
                                 // Render data rows with row numbers
                                 for (row_index, row) in self.current_table_data.iter().enumerate() {
+                                    let is_selected_row = self.selected_row == Some(row_index);
+                                    
+                                    // Set row background color if selected
+                                    let row_color = if is_selected_row {
+                                        if ui.visuals().dark_mode {
+                                            egui::Color32::from_rgba_unmultiplied(100, 150, 255, 30) // Light blue for dark mode
+                                        } else {
+                                            egui::Color32::from_rgba_unmultiplied(200, 220, 255, 80) // Light blue for light mode
+                                        }
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
+                                    
                                     // Add row number as first column (centered with fixed width)
                                     ui.allocate_ui_with_layout(
                                         [60.0, ui.available_height()].into(),
                                         egui::Layout::top_down(egui::Align::Center),
                                         |ui| {
-                                            ui.label((row_index + 1).to_string());
+                                            let rect = ui.available_rect_before_wrap();
+                                            if row_color != egui::Color32::TRANSPARENT {
+                                                ui.painter().rect_filled(rect, 3.0, row_color);
+                                            }
+                                            
+                                            let label_response = ui.label((row_index + 1).to_string());
+                                            
+                                            // Handle row number click to select entire row
+                                            if label_response.clicked() {
+                                                self.selected_row = Some(row_index);
+                                                self.selected_cell = None; // Clear cell selection when row is selected
+                                            }
+                                            
+                                            label_response
                                         }
                                     );
                                     
                                     // Add data cells (left-aligned with max width)
-                                    for cell in row {
+                                    for (col_index, cell) in row.iter().enumerate() {
+                                        let is_selected_cell = self.selected_cell == Some((row_index, col_index));
+                                        
                                         ui.allocate_ui_with_layout(
                                             [200.0, ui.available_height()].into(), // Set max width to 200px
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
+                                                let rect = ui.available_rect_before_wrap();
+                                                
+                                                // Draw row background if row is selected
+                                                if row_color != egui::Color32::TRANSPARENT {
+                                                    ui.painter().rect_filled(rect, 3.0, row_color);
+                                                }
+                                                
+                                                // Draw red border if this cell is selected
+                                                if is_selected_cell {
+                                                    let stroke = egui::Stroke::new(2.0, egui::Color32::RED);
+                                                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 0, 0, 20));
+                                                    // Draw border lines manually
+                                                    ui.painter().line_segment([rect.left_top(), rect.right_top()], stroke);
+                                                    ui.painter().line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                                                    ui.painter().line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                                                    ui.painter().line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                                                }
+                                                
                                                 // Truncate text if it's too long and add tooltip
                                                 let max_chars = 50; // Max characters to display
                                                 let display_text = if cell.chars().count() > max_chars {
@@ -5546,18 +5609,55 @@ impl Tabular {
                                                     cell.clone()
                                                 };
                                                 
-                                                // Create label and immediately chain context menu and tooltip
-                                                let mut label_response = ui.label(&display_text);
+                                                // Create selectable label for cell selection
+                                                let mut label_response = ui.add(
+                                                    egui::SelectableLabel::new(
+                                                        is_selected_cell,
+                                                        &display_text
+                                                    )
+                                                );
+                                                
+                                                // Handle cell click
+                                                if label_response.clicked() {
+                                                    self.selected_row = Some(row_index);
+                                                    self.selected_cell = Some((row_index, col_index));
+                                                }
                                                 
                                                 // Show full text in tooltip if truncated
                                                 if cell.chars().count() > max_chars {
                                                     label_response = label_response.on_hover_text(cell);
                                                 }
                                                 
-                                                // Add context menu to the label
+                                                // Add context menu to the label with copy functionality
                                                 label_response.context_menu(|ui| {
                                                     ui.set_min_width(150.0);
                                                     ui.vertical(|ui| {
+                                                        if ui.button("📋 Copy Cell Value").clicked() {
+                                                            ui.ctx().copy_text(cell.clone());
+                                                            ui.close_menu();
+                                                        }
+                                                        
+                                                        if let Some(selected_row_idx) = self.selected_row {
+                                                            if ui.button("📄 Copy Row as CSV").clicked() {
+                                                                if let Some(row_data) = self.current_table_data.get(selected_row_idx) {
+                                                                    let csv_row = row_data.iter()
+                                                                        .map(|cell| {
+                                                                            if cell.contains(',') || cell.contains('"') || cell.contains('\n') {
+                                                                                format!("\"{}\"", cell.replace('"', "\"\""))
+                                                                            } else {
+                                                                                cell.clone()
+                                                                            }
+                                                                        })
+                                                                        .collect::<Vec<_>>()
+                                                                        .join(",");
+                                                                    ui.ctx().copy_text(csv_row);
+                                                                }
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                        
+                                                        ui.separator();
+                                                        
                                                         if ui.button("📄 Export to CSV").clicked() {
                                                             export::export_to_csv(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
                                                             ui.close_menu();
