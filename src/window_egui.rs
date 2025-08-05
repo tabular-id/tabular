@@ -616,7 +616,7 @@ impl Tabular {
             
             // Create custom folder node
             let mut custom_folder = models::structs::TreeNode::new(folder_name.clone(), models::enums::NodeType::CustomFolder);
-            custom_folder.is_expanded = true; // Expand by default
+            custom_folder.is_expanded = false; // Start collapsed
             
             // Within each custom folder, group by database type
             let mut mysql_connections = Vec::new();
@@ -653,7 +653,7 @@ impl Tabular {
                 let _ = mysql_connections.len();
                 let mut mysql_folder = models::structs::TreeNode::new("MySQL".to_string(), models::enums::NodeType::MySQLFolder);
                 mysql_folder.children = mysql_connections;
-                mysql_folder.is_expanded = true;
+                mysql_folder.is_expanded = false;
                 db_type_folders.push(mysql_folder);
             }
             
@@ -661,7 +661,7 @@ impl Tabular {
                 let _ = postgresql_connections.len();
                 let mut postgresql_folder = models::structs::TreeNode::new("PostgreSQL".to_string(), models::enums::NodeType::PostgreSQLFolder);
                 postgresql_folder.children = postgresql_connections;
-                postgresql_folder.is_expanded = true;
+                postgresql_folder.is_expanded = false;
                 db_type_folders.push(postgresql_folder);
             }
             
@@ -669,7 +669,7 @@ impl Tabular {
                 let _ = sqlite_connections.len();
                 let mut sqlite_folder = models::structs::TreeNode::new("SQLite".to_string(), models::enums::NodeType::SQLiteFolder);
                 sqlite_folder.children = sqlite_connections;
-                sqlite_folder.is_expanded = true;
+                sqlite_folder.is_expanded = false;
                 db_type_folders.push(sqlite_folder);
             }
             
@@ -677,7 +677,7 @@ impl Tabular {
                 let _ = redis_connections.len();
                 let mut redis_folder = models::structs::TreeNode::new("Redis".to_string(), models::enums::NodeType::RedisFolder);
                 redis_folder.children = redis_connections;
-                redis_folder.is_expanded = true;
+                redis_folder.is_expanded = false;
                 db_type_folders.push(redis_folder);
             }
             
@@ -3327,7 +3327,7 @@ impl Tabular {
         // Create databases folder for Redis
         let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
         databases_folder.connection_id = Some(connection_id);
-        databases_folder.is_expanded = true;
+        databases_folder.is_expanded = false;
         databases_folder.is_loaded = true;
         
         // Add each Redis database from cache (db0, db1, etc.)
@@ -3717,7 +3717,7 @@ impl Tabular {
             let mut type_folder = models::structs::TreeNode::new(format!("{} ({})", folder_name, keys.len()), models::enums::NodeType::TablesFolder);
             type_folder.connection_id = Some(connection_id);
             type_folder.database_name = Some(database_name.to_string());
-            type_folder.is_expanded = true;
+            type_folder.is_expanded = false;
             type_folder.is_loaded = true;
             
             // Add keys of this type to the folder
@@ -6245,7 +6245,7 @@ impl App for Tabular {
                             for node in &mut self.items_tree {
                                 if node.node_type == models::enums::NodeType::Connection && node.connection_id == Some(connection_id) {
                                     node.is_loaded = false; // Force reload from cache
-                                    node.is_expanded = true; // Expand to show databases
+                                    // Don't auto-expand after refresh, let user manually expand
                                     break;
                                 }
                             }
