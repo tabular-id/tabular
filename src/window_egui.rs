@@ -107,6 +107,11 @@ pub struct Tabular {
     // Table selection tracking
     pub selected_row: Option<usize>,
     pub selected_cell: Option<(usize, usize)>, // (row_index, column_index)
+    // Column width management for resizable columns
+    pub column_widths: Vec<f32>, // Store individual column widths
+    pub min_column_width: f32,
+    pub max_column_width: f32,
+    pub resizing_column: Option<usize>, // Track which column is being resized
 }
 
 
@@ -195,6 +200,11 @@ impl Tabular {
             last_cleanup_time: std::time::Instant::now(),
             selected_row: None,
             selected_cell: None,
+            // Column width management
+            column_widths: Vec::new(),
+            min_column_width: 120.0,
+            max_column_width: 400.0,
+            resizing_column: None,
         };
         
         // Clear any old cached pools
@@ -4685,6 +4695,39 @@ impl Tabular {
         println!("====================================");
         
         self.update_current_page_data();
+        
+        // Initialize column widths when new data is loaded
+        self.initialize_column_widths();
+    }
+
+    // Column width management methods
+    fn initialize_column_widths(&mut self) {
+        let num_columns = self.current_table_headers.len();
+        if num_columns > 0 {
+            // Calculate initial column width based on available space
+            let base_width = 180.0; // Base width per column
+            self.column_widths = vec![base_width; num_columns];
+        } else {
+            self.column_widths.clear();
+        }
+    }
+
+    fn get_column_width(&self, column_index: usize) -> f32 {
+        self.column_widths.get(column_index).copied().unwrap_or(180.0).max(self.min_column_width)
+    }
+
+    fn set_column_width(&mut self, column_index: usize, width: f32) {
+        if column_index < self.column_widths.len() {
+            // Clamp width between min and max values with extra safety checks
+            let safe_width = width.max(self.min_column_width).min(self.max_column_width);
+            // Ensure we never have invalid floating point values
+            let final_width = if safe_width.is_finite() && safe_width > 0.0 {
+                safe_width
+            } else {
+                self.min_column_width
+            };
+            self.column_widths[column_index] = final_width;
+        }
     }
 
     fn update_current_page_data(&mut self) {
@@ -5446,6 +5489,11 @@ impl Tabular {
                 let headers = self.current_table_headers.clone();
                 let mut sort_requests = Vec::new();
                 
+                // Ensure column widths are initialized
+                if self.column_widths.len() != headers.len() {
+                    self.initialize_column_widths();
+                }
+                
                 // Use available height for full responsive design
                 egui::ScrollArea::both()
                     .auto_shrink([false, false]) // Don't auto-shrink to content
@@ -5455,7 +5503,7 @@ impl Tabular {
                             .show(ui, |ui| {
                                 // Render No column header first (centered)
                                 ui.allocate_ui_with_layout(
-                                    [60.0, ui.available_height()].into(),
+                                    [60.0, ui.available_height().max(30.0)].into(), // Ensure minimum height
                                     egui::Layout::top_down(egui::Align::Center),
                                     |ui| {
                                         ui.add(egui::Label::new(
@@ -5471,31 +5519,28 @@ impl Tabular {
                                     }
                                 );
                                 
-                                // Render enhanced headers with sort buttons (centered)
+                                // Render enhanced headers with sort buttons and resize handles
                                 for (col_index, header) in headers.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        // Center the header content with fixed width
-                                        ui.allocate_ui_with_layout(
-                                            [200.0, ui.available_height()].into(), // Match data column width
-                                            egui::Layout::top_down(egui::Align::Center),
-                                            |ui| {
-                                                // Header text with bold styling and better appearance
-                                                ui.add(egui::Label::new(
-                                                    egui::RichText::new(header)
-                                                        .strong()
-                                                        .size(14.0)
-                                                        .color(if ui.visuals().dark_mode { 
-                                                            egui::Color32::from_rgb(220, 220, 255) // Light blue for dark mode
-                                                        } else { 
-                                                            egui::Color32::from_rgb(60, 60, 120) // Dark blue for light mode
-                                                        })
-                                                ));
-                                            }
-                                        );
-                                        
-                                        // Sort button with proper icon (right aligned)
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            // Determine sort icon and state - using ASCII characters that work everywhere
+                                    let column_width = self.get_column_width(col_index).max(50.0); // Ensure minimum width of 50px
+                                    let available_height = ui.available_height().max(30.0); // Ensure minimum height
+                                    
+                                    ui.allocate_ui_with_layout(
+                                        [column_width, available_height].into(), // Use safe values
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            // Header text - takes most of the space
+                                            ui.add(egui::Label::new(
+                                                egui::RichText::new(header)
+                                                    .strong()
+                                                    .size(14.0)
+                                                    .color(if ui.visuals().dark_mode { 
+                                                        egui::Color32::from_rgb(220, 220, 255) // Light blue for dark mode
+                                                    } else { 
+                                                        egui::Color32::from_rgb(60, 60, 120) // Dark blue for light mode
+                                                    })
+                                            ));
+                                            
+                                            // Sort button
                                             let (sort_icon, is_active) = if current_sort_column == Some(col_index) {
                                                 if current_sort_ascending {
                                                     ("^", true) // Caret up for ascending
@@ -5503,7 +5548,7 @@ impl Tabular {
                                                     ("v", true) // Letter v for descending  
                                                 }
                                             } else {
-                                                ("-", false) // Equals sign for unsorted
+                                                ("-", false) // Dash for unsorted
                                             };
                                             
                                             let sort_button = ui.add(
@@ -5525,7 +5570,6 @@ impl Tabular {
                                             );
                                             
                                             if sort_button.clicked() {
-                                                // Toggle logic: if same column, toggle direction; if different column, start with ascending
                                                 let new_ascending = if current_sort_column == Some(col_index) {
                                                     !current_sort_ascending // Toggle direction for same column
                                                 } else {
@@ -5533,8 +5577,48 @@ impl Tabular {
                                                 };
                                                 sort_requests.push((col_index, new_ascending));
                                             }
-                                        });
-                                    });
+                                            
+                                            // Add resize handle for all but the last column
+                                            if col_index < headers.len() - 1 {
+                                                // Position resize handle at the right edge of the column
+                                                let handle_x = ui.max_rect().max.x - 5.0; // Position at right edge
+                                                let handle_y = ui.max_rect().min.y;
+                                                let handle_height = available_height;
+                                                
+                                                let resize_handle_rect = egui::Rect::from_min_size(
+                                                    egui::pos2(handle_x, handle_y),
+                                                    egui::vec2(10.0, handle_height) // Make it wider for easier dragging
+                                                );
+                                                
+                                                let resize_response = ui.allocate_rect(resize_handle_rect, egui::Sense::drag());
+                                                
+                                                if resize_response.hovered() {
+                                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                                                }
+                                                
+                                                if resize_response.dragged() {
+                                                    let delta_x = resize_response.drag_delta().x;
+                                                    let new_width = column_width + delta_x;
+                                                    self.set_column_width(col_index, new_width);
+                                                }
+                                                
+                                                // Visual indicator for resize handle - make it more visible
+                                                if resize_response.hovered() || resize_response.dragged() {
+                                                    ui.painter().rect_filled(
+                                                        resize_handle_rect,
+                                                        0.0,
+                                                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 100) // More visible
+                                                    );
+                                                } else {
+                                                    // Show a subtle line even when not hovered
+                                                    ui.painter().line_segment(
+                                                        [egui::pos2(handle_x + 5.0, handle_y), egui::pos2(handle_x + 5.0, handle_y + handle_height)],
+                                                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 80))
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    );
                                 }
                                 ui.end_row();
                                 
@@ -5555,7 +5639,7 @@ impl Tabular {
                                     
                                     // Add row number as first column (centered with fixed width)
                                     ui.allocate_ui_with_layout(
-                                        [60.0, ui.available_height()].into(),
+                                        [60.0, ui.available_height().max(25.0)].into(), // Ensure minimum height
                                         egui::Layout::top_down(egui::Align::Center),
                                         |ui| {
                                             let rect = ui.available_rect_before_wrap();
@@ -5575,12 +5659,14 @@ impl Tabular {
                                         }
                                     );
                                     
-                                    // Add data cells (left-aligned with max width)
+                                    // Add data cells (left-aligned with individual column width)
                                     for (col_index, cell) in row.iter().enumerate() {
                                         let is_selected_cell = self.selected_cell == Some((row_index, col_index));
+                                        let column_width = self.get_column_width(col_index).max(50.0); // Ensure minimum width
+                                        let cell_height = ui.available_height().max(25.0); // Ensure minimum height
                                         
                                         ui.allocate_ui_with_layout(
-                                            [200.0, ui.available_height()].into(), // Set max width to 200px
+                                            [column_width, cell_height].into(), // Use safe values
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
                                                 let rect = ui.available_rect_before_wrap();
@@ -5602,34 +5688,49 @@ impl Tabular {
                                                 }
                                                 
                                                 // Truncate text if it's too long and add tooltip
-                                                let max_chars = 50; // Max characters to display
+                                                let max_chars = ((column_width / 8.0) as usize).max(10); // Dynamic max chars based on column width, minimum 10
                                                 let display_text = if cell.chars().count() > max_chars {
-                                                    format!("{}...", cell.chars().take(max_chars - 3).collect::<String>())
+                                                    format!("{}...", cell.chars().take(max_chars.saturating_sub(3)).collect::<String>())
                                                 } else {
                                                     cell.clone()
                                                 };
                                                 
-                                                // Create selectable label for cell selection
-                                                let mut label_response = ui.add(
-                                                    egui::SelectableLabel::new(
-                                                        is_selected_cell,
-                                                        &display_text
-                                                    )
-                                                );
+                                                // Create invisible button that covers the entire cell area for click detection
+                                                let cell_response = ui.allocate_response(rect.size(), egui::Sense::click());
                                                 
-                                                // Handle cell click
-                                                if label_response.clicked() {
+                                                // Handle cell click on the entire area
+                                                if cell_response.clicked() {
                                                     self.selected_row = Some(row_index);
                                                     self.selected_cell = Some((row_index, col_index));
                                                 }
                                                 
-                                                // Show full text in tooltip if truncated
-                                                if cell.chars().count() > max_chars {
-                                                    label_response = label_response.on_hover_text(cell);
-                                                }
+                                                // Show full text in tooltip if truncated or if cell has content
+                                                let hover_response = if cell.chars().count() > max_chars || !cell.is_empty() {
+                                                    cell_response.on_hover_text(cell)
+                                                } else {
+                                                    cell_response
+                                                };
                                                 
-                                                // Add context menu to the label with copy functionality
-                                                label_response.context_menu(|ui| {
+                                                // Draw the text on top of the button
+                                                let text_pos = rect.left_top() + egui::vec2(5.0, rect.height() * 0.5);
+                                                ui.painter().text(
+                                                    text_pos,
+                                                    egui::Align2::LEFT_CENTER,
+                                                    &display_text,
+                                                    egui::FontId::default(),
+                                                    if is_selected_cell {
+                                                        if ui.visuals().dark_mode {
+                                                            egui::Color32::WHITE
+                                                        } else {
+                                                            egui::Color32::BLACK
+                                                        }
+                                                    } else {
+                                                        ui.visuals().text_color()
+                                                    }
+                                                );
+                                                
+                                                // Add context menu to the cell response (entire area)
+                                                hover_response.context_menu(|ui| {
                                                     ui.set_min_width(150.0);
                                                     ui.vertical(|ui| {
                                                         if ui.button("📋 Copy Cell Value").clicked() {
