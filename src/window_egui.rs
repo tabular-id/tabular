@@ -6903,8 +6903,7 @@ impl App for Tabular {
                                         ui.spacing_mut().item_spacing.y = 4.0; // Add vertical spacing between items
                                         
                                         if ui.add_sized([100.0, 24.0], egui::Button::new("Settings")).clicked() {
-                                            // TODO: Implement settings dialog
-                                            println!("Settings clicked - not implemented yet");
+                                            self.open_command_palette();
                                             ui.memory_mut(|mem| mem.close_popup());
                                         }
                                         if ui.add_sized([100.0, 24.0], egui::Button::new("About")).clicked() {
