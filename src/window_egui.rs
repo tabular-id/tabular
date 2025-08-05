@@ -1283,7 +1283,7 @@ impl Tabular {
         }
     }
 
-    fn set_active_tab_connection(&mut self, connection_id: Option<i64>) {
+    pub fn set_active_tab_connection(&mut self, connection_id: Option<i64>) {
         if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
             tab.connection_id = connection_id;
             // Reset database when changing connection
@@ -1291,7 +1291,14 @@ impl Tabular {
         }
     }
 
-    fn set_active_tab_database(&mut self, database_name: Option<String>) {
+    pub fn set_active_tab_connection_with_database(&mut self, connection_id: Option<i64>, database_name: Option<String>) {
+        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
+            tab.connection_id = connection_id;
+            tab.database_name = database_name;
+        }
+    }
+
+    pub fn set_active_tab_database(&mut self, database_name: Option<String>) {
         if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
             tab.database_name = database_name;
         }

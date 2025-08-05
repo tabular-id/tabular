@@ -81,6 +81,27 @@ pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Cont
                      // Set active connection
                      tabular.current_connection_id = Some(connection_id);
                      
+                     // Find the selected connection to get its default database
+                     let default_database = if let Some(connection) = tabular.connections.iter().find(|c| c.id == Some(connection_id)) {
+                            let connection_name = connection.name.clone();
+                            let database = if !connection.database.is_empty() {
+                                   Some(connection.database.clone())
+                            } else {
+                                   None
+                            };
+                            
+                            println!("Connection selector: Set connection '{}' and database '{}' for active tab", 
+                                   connection_name, 
+                                   database.as_deref().unwrap_or("None"));
+                            
+                            database
+                     } else {
+                            None
+                     };
+                     
+                     // Set connection and default database in bottom combobox for active tab
+                     tabular.set_active_tab_connection_with_database(Some(connection_id), default_database);
+                     
                      if tabular.auto_execute_after_connection {
                             // Execute the query immediately
                             let query = tabular.pending_query.clone();
