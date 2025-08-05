@@ -44,6 +44,7 @@ pub struct Tabular {
     pub current_table_headers: Vec<String>,
     pub current_table_name: String,
     pub current_connection_id: Option<i64>,
+    pub current_database_name: Option<String>,
     // Pagination
     pub current_page: usize,
     pub page_size: usize,
@@ -115,6 +116,9 @@ pub struct Tabular {
     pub show_about_dialog: bool,
     // Logo texture
     pub logo_texture: Option<egui::TextureHandle>,
+    // Database cache for performance
+    pub database_cache: std::collections::HashMap<i64, Vec<String>>, // connection_id -> databases
+    pub database_cache_time: std::collections::HashMap<i64, std::time::Instant>, // connection_id -> cache time
 }
 
 
@@ -156,6 +160,7 @@ impl Tabular {
             current_table_headers: Vec::new(),
             current_table_name: String::new(),
             current_connection_id: None,
+            current_database_name: None,
             current_page: 0,
             page_size: 100, // Default 100 rows per page
             total_rows: 0,
@@ -211,6 +216,9 @@ impl Tabular {
             show_about_dialog: false,
             // Logo texture
             logo_texture: None,
+            // Database cache for performance
+            database_cache: std::collections::HashMap::new(),
+            database_cache_time: std::collections::HashMap::new(),
         };
         
         // Clear any old cached pools
@@ -3829,6 +3837,44 @@ impl Tabular {
         println!("✅ Database node loaded with {} type folders", db_node.children.len());
     }
     
+    // Cached database fetcher for better performance
+    fn get_databases_cached(&mut self, connection_id: i64) -> Vec<String> {
+        const CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes cache
+        
+        // Check if we have cached data and it's still valid
+        if let Some(cache_time) = self.database_cache_time.get(&connection_id) {
+            if cache_time.elapsed() < CACHE_DURATION {
+                if let Some(cached_databases) = self.database_cache.get(&connection_id) {
+                    return cached_databases.clone();
+                }
+            }
+        }
+        
+        // Cache is invalid or doesn't exist, fetch fresh data
+        // But do this in background to avoid blocking UI
+        if let Some(databases) = self.fetch_databases_from_connection(connection_id) {
+            // Update cache
+            self.database_cache.insert(connection_id, databases.clone());
+            self.database_cache_time.insert(connection_id, std::time::Instant::now());
+            databases
+        } else {
+            // Return empty list if fetch failed, but don't cache the failure
+            Vec::new()
+        }
+    }
+    
+    // Fast check if databases are cached (without fetching)
+    fn has_databases_cached(&self, connection_id: i64) -> bool {
+        const CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(300);
+        
+        if let Some(cache_time) = self.database_cache_time.get(&connection_id) {
+            if cache_time.elapsed() < CACHE_DURATION {
+                return self.database_cache.contains_key(&connection_id);
+            }
+        }
+        false
+    }
+    
     fn fetch_databases_from_connection(&mut self, connection_id: i64) -> Option<Vec<String>> {
         
         // Find the connection configuration
@@ -6504,8 +6550,8 @@ impl App for Tabular {
             ctx.request_repaint();
         }
         
-        // Periodic cleanup of stale connection pools (every 5 minutes)
-        if self.last_cleanup_time.elapsed().as_secs() > 300 { // 5 minutes
+        // Periodic cleanup of stale connection pools (every 10 minutes to reduce overhead)
+        if self.last_cleanup_time.elapsed().as_secs() > 600 { // 10 minutes instead of 5
             println!("🧹 Performing periodic connection pool cleanup");
             
             // Clean up connections that might be stale
@@ -7010,12 +7056,99 @@ impl App for Tabular {
                 ui.separator();
                 ui.label(format!("Connections: {}", self.connections.len()));
                 ui.separator();
-                if let Some(connection_id) = self.current_connection_id {
-                    if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-                        ui.label(format!("Connected: {}", connection.name));
-                        ui.separator();
+                
+                // Connection selector ComboBox
+                if !self.connections.is_empty() {
+                    ui.label("Connection:");
+                    let current_connection_name = if let Some(connection_id) = self.current_connection_id {
+                        self.connections.iter()
+                            .find(|c| c.id == Some(connection_id))
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| "None".to_string())
+                    } else {
+                        "None".to_string()
+                    };
+                    
+                    egui::ComboBox::from_id_salt("status_connection_selector")
+                        .selected_text(&current_connection_name)
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            // Option for no connection
+                            if ui.selectable_label(self.current_connection_id.is_none(), "None").clicked() {
+                                self.current_connection_id = None;
+                                self.current_database_name = None;
+                            }
+                            
+                            // All available connections
+                            for connection in &self.connections {
+                                if let Some(connection_id) = connection.id {
+                                    let is_selected = self.current_connection_id == Some(connection_id);
+                                    if ui.selectable_label(is_selected, &connection.name).clicked() {
+                                        self.current_connection_id = Some(connection_id);
+                                        self.current_database_name = None; // Reset database selection
+                                        
+                                        // Clear current table data when switching connections
+                                        self.current_table_data.clear();
+                                        self.current_table_headers.clear();
+                                        self.current_table_name.clear();
+                                        self.total_rows = 0;
+                                        self.current_page = 0;
+                                        
+                                        println!("Switched to connection: {} (ID: {})", connection.name, connection_id);
+                                    }
+                                }
+                            }
+                        });
+                    ui.separator();
+                    
+                    // Database selector ComboBox (for databases that support multiple databases)
+                    if let Some(connection_id) = self.current_connection_id {
+                        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
+                            // Only show database selector for MySQL and PostgreSQL
+                            if matches!(connection.connection_type, models::enums::DatabaseType::MySQL | models::enums::DatabaseType::PostgreSQL) {
+                                ui.label("Database:");
+                                
+                                // Get available databases using cached method (but only if ComboBox is being opened)
+                                let current_database = self.current_database_name.clone().unwrap_or_else(|| "Select Database".to_string());
+                                
+                                // Use a simple ComboBox that only fetches when opened  
+                                egui::ComboBox::from_id_salt("status_database_selector")
+                                    .selected_text(&current_database)
+                                    .width(120.0)
+                                    .show_ui(ui, |ui| {
+                                        // Only fetch databases when ComboBox is actually opened
+                                        let available_databases = self.get_databases_cached(connection_id);
+                                        
+                                        if available_databases.is_empty() {
+                                            ui.colored_label(egui::Color32::GRAY, "Loading databases...");
+                                        } else {
+                                            for database in &available_databases {
+                                                let is_selected = self.current_database_name.as_ref() == Some(database);
+                                                if ui.selectable_label(is_selected, database).clicked() {
+                                                    self.current_database_name = Some(database.clone());
+                                                    
+                                                    // Clear current table data when switching databases
+                                                    self.current_table_data.clear();
+                                                    self.current_table_headers.clear();
+                                                    self.current_table_name.clear();
+                                                    self.total_rows = 0;
+                                                    self.current_page = 0;
+                                                    
+                                                    println!("Switched to database: {}", database);
+                                                }
+                                            }
+                                        }
+                                    });
+                                
+                                ui.separator();
+                            }
+                        }
                     }
+                } else {
+                    ui.colored_label(egui::Color32::RED, "No connections available");
+                    ui.separator();
                 }
+                
                 // Show pagination info
                 if self.total_rows > 0 {
                     ui.label(format!("Showing {} of {} rows (page {}/{})", 
