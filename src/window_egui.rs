@@ -81,6 +81,8 @@ pub struct Tabular {
     pub advanced_editor: models::structs::AdvancedEditor,
     // Selected text for executing only selected queries
     pub selected_text: String,
+    // Cursor position for query extraction
+    pub cursor_position: usize,
     // Command Palette
     pub show_command_palette: bool,
     pub command_palette_input: String,
@@ -185,6 +187,7 @@ impl Tabular {
             show_error_message: false,
             advanced_editor: models::structs::AdvancedEditor::default(),
             selected_text: String::new(),
+            cursor_position: 0,
             show_command_palette: false,
             command_palette_input: String::new(),
             show_theme_selector: false,
@@ -5202,6 +5205,42 @@ impl Tabular {
         self.selected_cell = None;
     }
 
+    fn extract_query_from_cursor(&self) -> String {
+        if self.editor_text.is_empty() {
+            return String::new();
+        }
+
+        let text_bytes = self.editor_text.as_bytes();
+        let cursor_pos = self.cursor_position.min(text_bytes.len());
+
+        // Find start position: go backwards from cursor to find the last semicolon (or start of file)
+        let mut start_pos = 0;
+        for i in (0..cursor_pos).rev() {
+            if text_bytes[i] == b';' {
+                // Start after the semicolon
+                start_pos = i + 1;
+                break;
+            }
+        }
+
+        // Find end position: go forwards from cursor to find the next semicolon (or end of file)
+        let mut end_pos = text_bytes.len();
+        for i in cursor_pos..text_bytes.len() {
+            if text_bytes[i] == b';' {
+                // Include the semicolon
+                end_pos = i + 1;
+                break;
+            }
+        }
+
+        // Extract the query text
+        if let Ok(query_text) = std::str::from_utf8(&text_bytes[start_pos..end_pos]) {
+            query_text.trim().to_string()
+        } else {
+            String::new()
+        }
+    }
+
     fn load_table_data(&mut self, connection_id: i64, table_name: &str) {
         println!("load_table_data called with connection_id: {}, table_name: {}", connection_id, table_name);
         
@@ -5306,11 +5345,16 @@ impl Tabular {
     }
 
     fn execute_query(&mut self) {
-        // Use selected text if available, otherwise use full editor text
+        // Priority: 1) Selected text, 2) Query from cursor position, 3) Full editor text
         let query = if !self.selected_text.trim().is_empty() {
             self.selected_text.trim().to_string()
         } else {
-            self.editor_text.trim().to_string()
+            let cursor_query = self.extract_query_from_cursor();
+            if !cursor_query.trim().is_empty() {
+                cursor_query
+            } else {
+                self.editor_text.trim().to_string()
+            }
         };
         
         if query.is_empty() {
@@ -6164,6 +6208,9 @@ impl Tabular {
             let start = text_cursor_range.primary.ccursor.index.min(text_cursor_range.secondary.ccursor.index);
             let end = text_cursor_range.primary.ccursor.index.max(text_cursor_range.secondary.ccursor.index);
             
+            // Store cursor position (use primary cursor position)
+            self.cursor_position = text_cursor_range.primary.ccursor.index;
+            
             if start != end {
                 // There is a selection
                 if let Some(selected) = self.editor_text.get(start..end) {
@@ -6993,23 +7040,42 @@ impl App for Tabular {
                                     // Check for Ctrl+Enter or Cmd+Enter to execute query
                                     if ui.input(|i| {
                                         (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::Enter)
-                                    }) && (!self.selected_text.trim().is_empty() || !self.editor_text.trim().is_empty()) {
-                                        if self.current_connection_id.is_some() {
-                                            // Connection is already selected, execute query
-                                            self.execute_query();
-                                        } else if !self.connections.is_empty() {
-                                            // No connection selected but connections exist, show selector
-                                            self.pending_query = if !self.selected_text.trim().is_empty() {
-                                                self.selected_text.clone()
-                                            } else {
-                                                self.editor_text.clone()
-                                            };
-                                            self.auto_execute_after_connection = true;
-                                            self.show_connection_selector = true;
+                                    }) {
+                                        // Check if there's any query to execute using same priority as execute_query
+                                        let has_query = if !self.selected_text.trim().is_empty() {
+                                            true
                                         } else {
-                                            // No connections exist, show error dialog
-                                            self.error_message = "No database connections available.\n\nPlease add a connection first by clicking the '+' button in the Database panel.".to_string();
-                                            self.show_error_message = true;
+                                            let cursor_query = self.extract_query_from_cursor();
+                                            if !cursor_query.trim().is_empty() {
+                                                true
+                                            } else {
+                                                !self.editor_text.trim().is_empty()
+                                            }
+                                        };
+
+                                        if has_query {
+                                            if self.current_connection_id.is_some() {
+                                                // Connection is already selected, execute query
+                                                self.execute_query();
+                                            } else if !self.connections.is_empty() {
+                                                // No connection selected but connections exist, show selector
+                                                self.pending_query = if !self.selected_text.trim().is_empty() {
+                                                    self.selected_text.clone()
+                                                } else {
+                                                    let cursor_query = self.extract_query_from_cursor();
+                                                    if !cursor_query.trim().is_empty() {
+                                                        cursor_query
+                                                    } else {
+                                                        self.editor_text.clone()
+                                                    }
+                                                };
+                                                self.auto_execute_after_connection = true;
+                                                self.show_connection_selector = true;
+                                            } else {
+                                                // No connections exist, show error dialog
+                                                self.error_message = "No database connections available.\n\nPlease add a connection first by clicking the '+' button in the Database panel.".to_string();
+                                                self.show_error_message = true;
+                                            }
                                         }
                                     }
                                     
@@ -7165,7 +7231,12 @@ impl App for Tabular {
                 if !self.selected_text.trim().is_empty() {
                     ui.colored_label(egui::Color32::from_rgb(100, 200, 100), "CMD+Enter: Execute selection");
                 } else {
-                    ui.label("CMD+Enter: Execute all");
+                    let cursor_query = self.extract_query_from_cursor();
+                    if !cursor_query.trim().is_empty() {
+                        ui.colored_label(egui::Color32::from_rgb(200, 150, 100), "CMD+Enter: Execute query at cursor");
+                    } else {
+                        ui.label("CMD+Enter: Execute all");
+                    }
                 }
             });
         });
