@@ -111,7 +111,6 @@ pub struct Tabular {
     pub column_widths: Vec<f32>, // Store individual column widths
     pub min_column_width: f32,
     pub max_column_width: f32,
-    pub resizing_column: Option<usize>, // Track which column is being resized
 }
 
 
@@ -204,7 +203,6 @@ impl Tabular {
             column_widths: Vec::new(),
             min_column_width: 50.0,
             max_column_width: 600.0,
-            resizing_column: None,
         };
         
         // Clear any old cached pools
@@ -5500,12 +5498,31 @@ impl Tabular {
                     .show(ui, |ui| {
                         let grid_response = egui::Grid::new("table_data_grid")
                             .striped(true)
+                            .spacing([0.0, 0.0]) // Remove spacing between columns and rows
+                            .min_col_width(0.0) // No minimum column width spacing
+                            .max_col_width(f32::INFINITY) // Allow any column width
                             .show(ui, |ui| {
                                 // Render No column header first (centered)
                                 ui.allocate_ui_with_layout(
                                     [60.0, ui.available_height().max(30.0)].into(), // Ensure minimum height
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
+                                        let rect = ui.available_rect_before_wrap();
+                                        
+                                        // Draw thin border for header cell
+                                        let border_color = if ui.visuals().dark_mode {
+                                            egui::Color32::from_gray(60) // Dark gray for dark mode
+                                        } else {
+                                            egui::Color32::from_gray(200) // Light gray for light mode
+                                        };
+                                        let thin_stroke = egui::Stroke::new(0.5, border_color);
+                                        
+                                        // Draw cell borders
+                                        ui.painter().line_segment([rect.left_top(), rect.right_top()], thin_stroke);
+                                        ui.painter().line_segment([rect.right_top(), rect.right_bottom()], thin_stroke);
+                                        ui.painter().line_segment([rect.right_bottom(), rect.left_bottom()], thin_stroke);
+                                        ui.painter().line_segment([rect.left_bottom(), rect.left_top()], thin_stroke);
+                                        
                                         ui.add(egui::Label::new(
                                             egui::RichText::new("No")
                                                 .strong()
@@ -5528,6 +5545,22 @@ impl Tabular {
                                         [column_width, available_height].into(), // Use safe values
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
+                                            let rect = ui.available_rect_before_wrap();
+                                            
+                                            // Draw thin border for header cell
+                                            let border_color = if ui.visuals().dark_mode {
+                                                egui::Color32::from_gray(60) // Dark gray for dark mode
+                                            } else {
+                                                egui::Color32::from_gray(200) // Light gray for light mode
+                                            };
+                                            let thin_stroke = egui::Stroke::new(0.5, border_color);
+                                            
+                                            // Draw cell borders
+                                            ui.painter().line_segment([rect.left_top(), rect.right_top()], thin_stroke);
+                                            ui.painter().line_segment([rect.right_top(), rect.right_bottom()], thin_stroke);
+                                            ui.painter().line_segment([rect.right_bottom(), rect.left_bottom()], thin_stroke);
+                                            ui.painter().line_segment([rect.left_bottom(), rect.left_top()], thin_stroke);
+                                            
                                             // Use horizontal layout to position header text centered and sort button on right
                                             ui.horizontal(|ui| {
                                                 // Calculate available width for centering (total width minus sort button space)
@@ -5593,14 +5626,14 @@ impl Tabular {
                                             
                                             // Add resize handle for all but the last column
                                             if col_index < headers.len() - 1 {
-                                                // Position resize handle at the right edge of the column
-                                                let handle_x = ui.max_rect().max.x - 5.0; // Position at right edge
+                                                // Position resize handle exactly at the right edge of the column
+                                                let handle_x = ui.max_rect().max.x; // Position exactly at right edge
                                                 let handle_y = ui.max_rect().min.y;
                                                 let handle_height = available_height;
                                                 
                                                 let resize_handle_rect = egui::Rect::from_min_size(
-                                                    egui::pos2(handle_x, handle_y),
-                                                    egui::vec2(10.0, handle_height) // Make it wider for easier dragging
+                                                    egui::pos2(handle_x - 2.0, handle_y), // Just 2 pixels wide, starting 2 pixels before edge
+                                                    egui::vec2(4.0, handle_height) // Make it much thinner (4 pixels)
                                                 );
                                                 
                                                 let resize_response = ui.allocate_rect(resize_handle_rect, egui::Sense::drag());
@@ -5615,20 +5648,15 @@ impl Tabular {
                                                     self.set_column_width(col_index, new_width);
                                                 }
                                                 
-                                                // Visual indicator for resize handle - make it more visible
+                                                // Visual indicator for resize handle - only show when hovered
                                                 if resize_response.hovered() || resize_response.dragged() {
                                                     ui.painter().rect_filled(
                                                         resize_handle_rect,
                                                         0.0,
-                                                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 100) // More visible
-                                                    );
-                                                } else {
-                                                    // Show a subtle line even when not hovered
-                                                    ui.painter().line_segment(
-                                                        [egui::pos2(handle_x + 5.0, handle_y), egui::pos2(handle_x + 5.0, handle_y + handle_height)],
-                                                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 100, 100, 80))
+                                                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 150) // More visible when hovered
                                                     );
                                                 }
+                                                // Remove the "else" clause that shows subtle line - no visual indicator when not hovered
                                             }
                                         }
                                     );
@@ -5660,6 +5688,20 @@ impl Tabular {
                                                 ui.painter().rect_filled(rect, 3.0, row_color);
                                             }
                                             
+                                            // Draw thin border for row number cell
+                                            let border_color = if ui.visuals().dark_mode {
+                                                egui::Color32::from_gray(60) // Dark gray for dark mode
+                                            } else {
+                                                egui::Color32::from_gray(200) // Light gray for light mode
+                                            };
+                                            let thin_stroke = egui::Stroke::new(0.5, border_color);
+                                            
+                                            // Draw cell borders
+                                            ui.painter().line_segment([rect.left_top(), rect.right_top()], thin_stroke);
+                                            ui.painter().line_segment([rect.right_top(), rect.right_bottom()], thin_stroke);
+                                            ui.painter().line_segment([rect.right_bottom(), rect.left_bottom()], thin_stroke);
+                                            ui.painter().line_segment([rect.left_bottom(), rect.left_top()], thin_stroke);
+                                            
                                             let label_response = ui.label((row_index + 1).to_string());
                                             
                                             // Handle row number click to select entire row
@@ -5689,10 +5731,24 @@ impl Tabular {
                                                     ui.painter().rect_filled(rect, 3.0, row_color);
                                                 }
                                                 
-                                                // Draw red border if this cell is selected
+                                                // Draw thin border for all cells
+                                                let border_color = if ui.visuals().dark_mode {
+                                                    egui::Color32::from_gray(60) // Dark gray for dark mode
+                                                } else {
+                                                    egui::Color32::from_gray(200) // Light gray for light mode
+                                                };
+                                                let thin_stroke = egui::Stroke::new(0.5, border_color);
+                                                
+                                                // Draw cell borders
+                                                ui.painter().line_segment([rect.left_top(), rect.right_top()], thin_stroke);
+                                                ui.painter().line_segment([rect.right_top(), rect.right_bottom()], thin_stroke);
+                                                ui.painter().line_segment([rect.right_bottom(), rect.left_bottom()], thin_stroke);
+                                                ui.painter().line_segment([rect.left_bottom(), rect.left_top()], thin_stroke);
+                                                
+                                                // Draw red border if this cell is selected (on top of thin border)
                                                 if is_selected_cell {
-                                                    let stroke = egui::Stroke::new(2.0, egui::Color32::RED);
-                                                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 0, 0, 20));
+                                                    let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 60, 0)); // Red stroke for selected cell
+                                                    ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 60, 10, 20));
                                                     // Draw border lines manually
                                                     ui.painter().line_segment([rect.left_top(), rect.right_top()], stroke);
                                                     ui.painter().line_segment([rect.right_top(), rect.right_bottom()], stroke);
@@ -6679,16 +6735,16 @@ impl App for Tabular {
                                     self.show_add_connection = true;
                                 }
                             },
-                            "Queries" => {
-                                if ui.add_sized(
-                                    [24.0, 24.0], // Small square button
-                                    egui::Button::new("➕")
-                                        .fill(egui::Color32::RED)
-                                ).on_hover_text("New Query File").clicked() {
-                                    // Create new tab instead of clearing editor
-                                    self.create_new_tab("Untitled Query".to_string(), String::new());
-                                }
-                            },
+                            // "Queries" => {
+                            //     if ui.add_sized(
+                            //         [24.0, 24.0], // Small square button
+                            //         egui::Button::new("➕")
+                            //             .fill(egui::Color32::RED)
+                            //     ).on_hover_text("New Query File").clicked() {
+                            //         // Create new tab instead of clearing editor
+                            //         self.create_new_tab("Untitled Query".to_string(), String::new());
+                            //     }
+                            // },
                             _ => {
                                 // No button for History tab
                             }
