@@ -5531,12 +5531,48 @@ impl Tabular {
                                                     cell.clone()
                                                 };
                                                 
-                                                let label = ui.add(egui::Label::new(display_text));
+                                                // Create label and immediately chain context menu and tooltip
+                                                let mut label_response = ui.label(&display_text);
                                                 
                                                 // Show full text in tooltip if truncated
                                                 if cell.chars().count() > max_chars {
-                                                    label.on_hover_text(cell);
+                                                    label_response = label_response.on_hover_text(cell);
                                                 }
+                                                
+                                                // Add context menu to the label
+                                                label_response.context_menu(|ui| {
+                                                    ui.set_min_width(150.0);
+                                                    ui.vertical(|ui| {
+                                                        if ui.button("📄 Export to CSV").clicked() {
+                                                            println!("=== BEFORE EXPORT CSV CALL ===");
+                                                            println!("self.all_table_data.len(): {}", self.all_table_data.len());
+                                                            println!("self.current_table_headers.len(): {}", self.current_table_headers.len());
+                                                            println!("self.current_table_name: {}", self.current_table_name);
+                                                            println!("self.total_rows: {}", self.total_rows);
+                                                            if !self.all_table_data.is_empty() {
+                                                                println!("First row sample: {:?}", &self.all_table_data[0]);
+                                                            }
+                                                            println!("=============================");
+                                                            
+                                                            export::export_to_csv(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
+                                                            ui.close_menu();
+                                                        }
+                                                        if ui.button("📊 Export to XLSX").clicked() {
+                                                            println!("=== BEFORE EXPORT XLSX CALL ===");
+                                                            println!("self.all_table_data.len(): {}", self.all_table_data.len());
+                                                            println!("self.current_table_headers.len(): {}", self.current_table_headers.len());
+                                                            println!("self.current_table_name: {}", self.current_table_name);
+                                                            println!("self.total_rows: {}", self.total_rows);
+                                                            if !self.all_table_data.is_empty() {
+                                                                println!("First row sample: {:?}", &self.all_table_data[0]);
+                                                            }
+                                                            println!("==============================");
+                                                            
+                                                            export::export_to_xlsx(&self.all_table_data, &self.current_table_headers, &self.current_table_name);
+                                                            ui.close_menu();
+                                                        }
+                                                    });
+                                                });
                                             }
                                         );
                                     }
