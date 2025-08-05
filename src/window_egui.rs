@@ -5301,7 +5301,7 @@ impl Tabular {
         };
         
         let keyword_color = egui::Color32::from_rgb(86, 156, 214); // Blue - SQL keywords
-        let string_color = egui::Color32::from_rgb(206, 145, 120); // Orange - strings
+        let string_color = egui::Color32::from_rgb(255, 60, 0); // Orange - strings
         let comment_color = egui::Color32::from_rgb(106, 153, 85); // Green - comments
         let number_color = egui::Color32::from_rgb(181, 206, 168); // Light green - numbers
         let function_color = egui::Color32::from_rgb(255, 206, 84); // Yellow - functions
@@ -6576,7 +6576,7 @@ impl App for Tabular {
         // Disable visual indicators for active/focused elements (but keep text selection visible)
         ctx.style_mut(|style| {
             // Keep text selection visible with a subtle highlight
-            style.visuals.selection.bg_fill = egui::Color32::from_rgb(255, 120, 0);
+            style.visuals.selection.bg_fill = egui::Color32::from_rgb(255, 60, 0);
             style.visuals.selection.stroke.color = egui::Color32::from_rgb(0, 0, 0);
             
             // Only disable other widget visual indicators
