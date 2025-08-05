@@ -681,30 +681,3 @@ pub(crate) fn cleanup_connection_pool(tabular: &mut Tabular, connection_id: i64)
        println!("🧹 Cleaning up connection pool for connection {}", connection_id);
        tabular.connection_pools.remove(&connection_id);
 }
-
-// Function to cleanup all connection pools
-pub(crate) fn cleanup_all_connection_pools(tabular: &mut Tabular) {
-       println!("🧹 Cleaning up all connection pools");
-       tabular.connection_pools.clear();
-}
-
-// Function to check and refresh stale connections
-pub(crate) async fn refresh_connection_pool(tabular: &mut Tabular, connection_id: i64) -> bool {
-       println!("🔄 Refreshing connection pool for connection {}", connection_id);
-       
-       // Remove the existing pool
-       tabular.connection_pools.remove(&connection_id);
-       
-       // Try to create a new one
-       match get_or_create_connection_pool(tabular, connection_id).await {
-           Some(_) => {
-               println!("✅ Successfully refreshed connection pool for {}", connection_id);
-               true
-           },
-           None => {
-               println!("❌ Failed to refresh connection pool for {}", connection_id);
-               false
-           }
-       }
-}
-

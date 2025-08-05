@@ -8,7 +8,7 @@ edition = "2024"
 name = "Tabular"
 identifier = "id.tabular.data"
 icon = ["assets/AppIcon.icns"]
-category = "Development, Database, Query Editor"
+category = "Developer Tool"
 copyright = "Copyright © 2025 Y.N Pamungkas Jayuda" 
 info = "Your SQL Editor, Forged with Rust: Fast, Safe, Efficient."
 
