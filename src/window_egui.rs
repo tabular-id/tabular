@@ -202,8 +202,8 @@ impl Tabular {
             selected_cell: None,
             // Column width management
             column_widths: Vec::new(),
-            min_column_width: 120.0,
-            max_column_width: 400.0,
+            min_column_width: 50.0,
+            max_column_width: 600.0,
             resizing_column: None,
         };
         
@@ -5504,7 +5504,7 @@ impl Tabular {
                                 // Render No column header first (centered)
                                 ui.allocate_ui_with_layout(
                                     [60.0, ui.available_height().max(30.0)].into(), // Ensure minimum height
-                                    egui::Layout::top_down(egui::Align::Center),
+                                    egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         ui.add(egui::Label::new(
                                             egui::RichText::new("No")
@@ -5521,62 +5521,75 @@ impl Tabular {
                                 
                                 // Render enhanced headers with sort buttons and resize handles
                                 for (col_index, header) in headers.iter().enumerate() {
-                                    let column_width = self.get_column_width(col_index).max(50.0); // Ensure minimum width of 50px
+                                    let column_width = self.get_column_width(col_index).max(30.0); // Ensure minimum width of 30px
                                     let available_height = ui.available_height().max(30.0); // Ensure minimum height
                                     
                                     ui.allocate_ui_with_layout(
                                         [column_width, available_height].into(), // Use safe values
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                            // Header text - takes most of the space
-                                            ui.add(egui::Label::new(
-                                                egui::RichText::new(header)
-                                                    .strong()
-                                                    .size(14.0)
-                                                    .color(if ui.visuals().dark_mode { 
-                                                        egui::Color32::from_rgb(220, 220, 255) // Light blue for dark mode
-                                                    } else { 
-                                                        egui::Color32::from_rgb(60, 60, 120) // Dark blue for light mode
-                                                    })
-                                            ));
-                                            
-                                            // Sort button
-                                            let (sort_icon, is_active) = if current_sort_column == Some(col_index) {
-                                                if current_sort_ascending {
-                                                    ("^", true) // Caret up for ascending
+                                            // Use horizontal layout to position header text centered and sort button on right
+                                            ui.horizontal(|ui| {
+                                                // Calculate available width for centering (total width minus sort button space)
+                                                let sort_button_width = 25.0;
+                                                let text_area_width = ui.available_width() - sort_button_width;
+                                                
+                                                // Header text - centered in available space
+                                                ui.allocate_ui_with_layout(
+                                                    [text_area_width, ui.available_height()].into(),
+                                                    egui::Layout::top_down(egui::Align::Center),
+                                                    |ui| {
+                                                        ui.add(egui::Label::new(
+                                                            egui::RichText::new(header)
+                                                                .strong()
+                                                                .size(14.0)
+                                                                .color(if ui.visuals().dark_mode { 
+                                                                    egui::Color32::from_rgb(220, 220, 255) // Light blue for dark mode
+                                                                } else { 
+                                                                    egui::Color32::from_rgb(60, 60, 120) // Dark blue for light mode
+                                                                })
+                                                        ));
+                                                    }
+                                                );
+                                                
+                                                // Sort button at the right
+                                                let (sort_icon, is_active) = if current_sort_column == Some(col_index) {
+                                                    if current_sort_ascending {
+                                                        ("^", true) // Caret up for ascending
+                                                    } else {
+                                                        ("v", true) // Letter v for descending  
+                                                    }
                                                 } else {
-                                                    ("v", true) // Letter v for descending  
-                                                }
-                                            } else {
-                                                ("-", false) // Dash for unsorted
-                                            };
-                                            
-                                            let sort_button = ui.add(
-                                                egui::Button::new(
-                                                    egui::RichText::new(sort_icon)
-                                                        .size(12.0)
-                                                        .color(if is_active {
-                                                            egui::Color32::from_rgb(100, 150, 255) // Blue when active
-                                                        } else {
-                                                            egui::Color32::GRAY // Gray when inactive
-                                                        })
-                                                )
-                                                .small()
-                                                .fill(if is_active {
-                                                    egui::Color32::from_rgba_unmultiplied(100, 150, 255, 50) // Light blue background when active
-                                                } else {
-                                                    egui::Color32::TRANSPARENT
-                                                })
-                                            );
-                                            
-                                            if sort_button.clicked() {
-                                                let new_ascending = if current_sort_column == Some(col_index) {
-                                                    !current_sort_ascending // Toggle direction for same column
-                                                } else {
-                                                    true // Start with ascending for new column
+                                                    ("-", false) // Dash for unsorted
                                                 };
-                                                sort_requests.push((col_index, new_ascending));
-                                            }
+                                                
+                                                let sort_button = ui.add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new(sort_icon)
+                                                            .size(12.0)
+                                                            .color(if is_active {
+                                                                egui::Color32::from_rgb(100, 150, 255) // Blue when active
+                                                            } else {
+                                                                egui::Color32::GRAY // Gray when inactive
+                                                            })
+                                                    )
+                                                    .small()
+                                                    .fill(if is_active {
+                                                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 50) // Light blue background when active
+                                                    } else {
+                                                        egui::Color32::TRANSPARENT
+                                                    })
+                                                );
+                                                
+                                                if sort_button.clicked() {
+                                                    let new_ascending = if current_sort_column == Some(col_index) {
+                                                        !current_sort_ascending // Toggle direction for same column
+                                                    } else {
+                                                        true // Start with ascending for new column
+                                                    };
+                                                    sort_requests.push((col_index, new_ascending));
+                                                }
+                                            });
                                             
                                             // Add resize handle for all but the last column
                                             if col_index < headers.len() - 1 {
