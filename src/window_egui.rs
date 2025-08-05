@@ -6606,33 +6606,41 @@ impl App for Tabular {
                 ui.vertical(|ui| {
                     // Top section with tabs
                     ui.horizontal(|ui| {
+                        // Calculate equal width for three buttons with responsive design
+                        let available_width = ui.available_width();
+                        let button_spacing = ui.spacing().item_spacing.x;
+                        let button_width = (available_width - (button_spacing * 2.0)) / 3.0;
+                        let button_height = 24.0;
+                        
                         // Database tab
-                        let database_text = if self.selected_menu == "Database" {
-                            egui::RichText::new("Database").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
+                        let database_button = if self.selected_menu == "Database" {
+                            egui::Button::new(
+                                egui::RichText::new("Database").color(egui::Color32::WHITE).text_style(egui::TextStyle::Body)
+                            ).fill(egui::Color32::from_rgb(255, 60, 0))
                         } else {
-                            egui::RichText::new("Database")
+                            egui::Button::new("Database").fill(egui::Color32::TRANSPARENT)
                         };
-                        if ui.button(database_text).clicked() {
+                        if ui.add_sized([button_width, button_height], database_button).clicked() {
                             self.selected_menu = "Database".to_string();
                         }
                         
                         // Queries tab
-                        let queries_text = if self.selected_menu == "Queries" {
-                            egui::RichText::new("Queries").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
+                        let queries_button = if self.selected_menu == "Queries" {
+                            egui::Button::new(egui::RichText::new("Queries").color(egui::Color32::WHITE).text_style(egui::TextStyle::Body)).fill(egui::Color32::from_rgb(255, 60, 0)) // Orange fill for active
                         } else {
-                            egui::RichText::new("Queries")
+                            egui::Button::new("Queries").fill(egui::Color32::TRANSPARENT)
                         };
-                        if ui.button(queries_text).clicked() {
+                        if ui.add_sized([button_width, button_height], queries_button).clicked() {
                             self.selected_menu = "Queries".to_string();
                         }
                         
                         // History tab
-                        let history_text = if self.selected_menu == "History" {
-                            egui::RichText::new("History").color(egui::Color32::from_rgb(255, 60, 0)) // Orange text for active
+                        let history_button = if self.selected_menu == "History" {
+                            egui::Button::new(egui::RichText::new("History").color(egui::Color32::WHITE).text_style(egui::TextStyle::Body)).fill(egui::Color32::from_rgb(255, 60, 0)) // Orange fill for active
                         } else {
-                            egui::RichText::new("History")
+                            egui::Button::new("History").fill(egui::Color32::TRANSPARENT)
                         };
-                        if ui.button(history_text).clicked() {
+                        if ui.add_sized([button_width, button_height], history_button).clicked() {
                             self.selected_menu = "History".to_string();
                         }
                     });
