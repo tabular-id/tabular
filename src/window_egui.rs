@@ -790,6 +790,10 @@ impl Tabular {
     }
 
     fn create_new_tab_with_connection(&mut self, title: String, content: String, connection_id: Option<i64>) -> usize {
+        self.create_new_tab_with_connection_and_database(title, content, connection_id, None)
+    }
+    
+    fn create_new_tab_with_connection_and_database(&mut self, title: String, content: String, connection_id: Option<i64>, database_name: Option<String>) -> usize {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
         
@@ -800,7 +804,7 @@ impl Tabular {
             is_saved: false,
             is_modified: false,
             connection_id,
-            database_name: None, // No database assigned by default
+            database_name,
             has_executed_query: false, // New tab hasn't executed any query yet
         };
         
@@ -1477,85 +1481,133 @@ impl Tabular {
         
         // Handle table click requests - create new tab for each table
         for (connection_id, table_name) in table_click_requests {
-            // Find the connection to determine the database type
-            let connection_type = self.connections.iter()
+            // Find the connection to determine the database type and database name
+            let connection = self.connections.iter()
                 .find(|conn| conn.id == Some(connection_id))
-                .map(|conn| &conn.connection_type);
+                .cloned();
             
-            match connection_type {
-                Some(models::enums::DatabaseType::Redis) => {
-                    
-                    // Check if this is a Redis key (has specific Redis data types in the tree structure)
-                    // For Redis keys, we need to find which database they belong to
-                    let mut is_redis_key = false;
-                    let mut key_type: Option<String> = None;
-                    
-                    for node in nodes.iter() {
-                        if let Some((_, k_type)) = self.find_redis_key_info(node, &table_name) {
-                            key_type = Some(k_type.clone());
-                            is_redis_key = true;
-                            break;
-                        }
+            if let Some(conn) = connection {
+                // Find the database name from the tree structure
+                let mut database_name: Option<String> = None;
+                for node in nodes.iter() {
+                    if let Some(db_name) = self.find_database_name_for_table(node, connection_id, &table_name) {
+                        database_name = Some(db_name);
+                        break;
                     }
-                    
-                    if is_redis_key {
-                        if let Some(k_type) = key_type {
-                            // This is a Redis key - create a query tab with appropriate Redis command
-                            let redis_command = match k_type.to_lowercase().as_str() {
-                                "string" => format!("GET {}", table_name),
-                                "hash" => format!("HGETALL {}", table_name),
-                                "list" => format!("LRANGE {} 0 -1", table_name),
-                                "set" => format!("SMEMBERS {}", table_name),
-                                "zset" | "sorted_set" => format!("ZRANGE {} 0 -1 WITHSCORES", table_name),
-                                "stream" => format!("XRANGE {} - +", table_name),
-                                _ => format!("TYPE {}", table_name), // Fallback to show type
+                }
+                
+                // If no database found in tree, use connection default
+                if database_name.is_none() {
+                    database_name = Some(conn.database.clone());
+                }
+                
+                match conn.connection_type {
+                    models::enums::DatabaseType::Redis => {
+                        
+                        // Check if this is a Redis key (has specific Redis data types in the tree structure)
+                        // For Redis keys, we need to find which database they belong to
+                        let mut is_redis_key = false;
+                        let mut key_type: Option<String> = None;
+                        
+                        for node in nodes.iter() {
+                            if let Some((_, k_type)) = self.find_redis_key_info(node, &table_name) {
+                                key_type = Some(k_type.clone());
+                                is_redis_key = true;
+                                break;
+                            }
+                        }
+                        
+                        if is_redis_key {
+                            if let Some(k_type) = key_type {
+                                // This is a Redis key - create a query tab with appropriate Redis command
+                                let redis_command = match k_type.to_lowercase().as_str() {
+                                    "string" => format!("GET {}", table_name),
+                                    "hash" => format!("HGETALL {}", table_name),
+                                    "list" => format!("LRANGE {} 0 -1", table_name),
+                                    "set" => format!("SMEMBERS {}", table_name),
+                                    "zset" | "sorted_set" => format!("ZRANGE {} 0 -1 WITHSCORES", table_name),
+                                    "stream" => format!("XRANGE {} - +", table_name),
+                                    _ => format!("TYPE {}", table_name), // Fallback to show type
+                                };
+                                
+                                let tab_title = format!("Redis Key: {} ({})", table_name, k_type);
+                                self.create_new_tab_with_connection_and_database(tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
+                                
+                                // Set current connection ID and database for Redis query execution
+                                self.current_connection_id = Some(connection_id);
+                                
+                                // Auto-execute the Redis query and display results in bottom
+                                if let Some((headers, data)) = connection::execute_query_with_connection(self, connection_id, redis_command) {
+                                    self.current_table_headers = headers;
+                                    self.current_table_data = data.clone();
+                                    self.all_table_data = data;
+                                    self.current_table_name = format!("Redis Key: {}", table_name);
+                                    self.total_rows = self.all_table_data.len();
+                                    self.current_page = 0;
+                                }
+                            }
+                        } else {
+                            // This is a Redis folder/type - create a query tab for scanning keys
+                            let redis_command = match table_name.as_str() {
+                                "hashes" => "SCAN 0 MATCH *:* TYPE hash COUNT 100".to_string(),
+                                "strings" => "SCAN 0 MATCH *:* TYPE string COUNT 100".to_string(),
+                                "lists" => "SCAN 0 MATCH *:* TYPE list COUNT 100".to_string(),
+                                "sets" => "SCAN 0 MATCH *:* TYPE set COUNT 100".to_string(),
+                                "sorted_sets" => "SCAN 0 MATCH *:* TYPE zset COUNT 100".to_string(),
+                                "streams" => "SCAN 0 MATCH *:* TYPE stream COUNT 100".to_string(),
+                                _ => {
+                                    // Extract folder name from display format like "Strings (5)"
+                                    let clean_name = table_name.split('(').next().unwrap_or(&table_name).trim();
+                                    format!("SCAN 0 MATCH *:* COUNT 100 # Browse {}", clean_name)
+                                }
                             };
+                            let tab_title = format!("Redis {}", table_name);
+                            self.create_new_tab_with_connection_and_database(tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
                             
-                            let tab_title = format!("Redis Key: {} ({})", table_name, k_type);
-                            self.create_new_tab_with_connection(tab_title, redis_command.clone(), Some(connection_id));
-                            
-                            // Set current connection ID for Redis query execution
+                            // Set database and auto-execute
                             self.current_connection_id = Some(connection_id);
-                            
-                            // Auto-execute the Redis query
                             if let Some((headers, data)) = connection::execute_query_with_connection(self, connection_id, redis_command) {
                                 self.current_table_headers = headers;
                                 self.current_table_data = data.clone();
                                 self.all_table_data = data;
-                                self.current_table_name = format!("Redis Key: {}", table_name);
+                                self.current_table_name = format!("Redis {}", table_name);
                                 self.total_rows = self.all_table_data.len();
                                 self.current_page = 0;
                             }
                         }
-                    } else {
-                        // This is a Redis folder/type - create a query tab for scanning keys
-                        let redis_command = match table_name.as_str() {
-                            "hashes" => "SCAN 0 MATCH *:* TYPE hash COUNT 100".to_string(),
-                            "strings" => "SCAN 0 MATCH *:* TYPE string COUNT 100".to_string(),
-                            "lists" => "SCAN 0 MATCH *:* TYPE list COUNT 100".to_string(),
-                            "sets" => "SCAN 0 MATCH *:* TYPE set COUNT 100".to_string(),
-                            "sorted_sets" => "SCAN 0 MATCH *:* TYPE zset COUNT 100".to_string(),
-                            "streams" => "SCAN 0 MATCH *:* TYPE stream COUNT 100".to_string(),
-                            _ => {
-                                // Extract folder name from display format like "Strings (5)"
-                                let clean_name = table_name.split('(').next().unwrap_or(&table_name).trim();
-                                format!("SCAN 0 MATCH *:* COUNT 100 # Browse {}", clean_name)
-                            }
-                        };
-                        let tab_title = format!("Redis {}", table_name);
-                        self.create_new_tab_with_connection(tab_title, redis_command, Some(connection_id));
                     }
-                }
-                _ => {
-                    // SQL databases - use regular SELECT query
-                    let query_content = format!("SELECT * FROM {} LIMIT 100;", table_name);
-                    let tab_title = format!("Table: {}", table_name);
-                    self.create_new_tab_with_connection(tab_title, query_content, Some(connection_id));
-                    
-                    // Also load the table data
-                    self.load_table_data(connection_id, &table_name);
-                }
-            };
+                    _ => {
+                        // SQL databases - use regular SELECT query with proper database context
+                        let query_content = if let Some(db_name) = &database_name {
+                            match conn.connection_type {
+                                models::enums::DatabaseType::MySQL => {
+                                    format!("USE `{}`;\nSELECT * FROM `{}` LIMIT 100;", db_name, table_name)
+                                }
+                                models::enums::DatabaseType::PostgreSQL => {
+                                    format!("SELECT * FROM \"{}\".\"{}\" LIMIT 100;", db_name, table_name)
+                                }
+                                _ => format!("SELECT * FROM `{}` LIMIT 100;", table_name)
+                            }
+                        } else {
+                            format!("SELECT * FROM `{}` LIMIT 100;", table_name)
+                        };
+                        
+                        let tab_title = format!("Table: {}", table_name);
+                        self.create_new_tab_with_connection_and_database(tab_title, query_content.clone(), Some(connection_id), database_name.clone());
+                        
+                        // Set database context for current tab and auto-execute the query and display results in bottom
+                        self.current_connection_id = Some(connection_id);
+                        if let Some((headers, data)) = connection::execute_query_with_connection(self, connection_id, query_content) {
+                            self.current_table_headers = headers;
+                            self.current_table_data = data.clone();
+                            self.all_table_data = data;
+                            self.current_table_name = format!("Table: {} (Database: {})", table_name, database_name.as_deref().unwrap_or("Unknown"));
+                            self.total_rows = self.all_table_data.len();
+                            self.current_page = 0;
+                        }
+                    }
+                };
+            }
         }
         
         // Handle query file open requests
@@ -4857,7 +4909,7 @@ impl Tabular {
     }
 
     // Pagination methods
-    fn update_pagination_data(&mut self, all_data: Vec<Vec<String>>) {
+    pub fn update_pagination_data(&mut self, all_data: Vec<Vec<String>>) {
         println!("=== UPDATE_PAGINATION_DATA DEBUG ===");
         println!("Received data rows: {}", all_data.len());
         if !all_data.is_empty() {
@@ -4954,7 +5006,7 @@ impl Tabular {
         }
     }
 
-    fn get_total_pages(&self) -> usize {
+    pub fn get_total_pages(&self) -> usize {
         if self.total_rows == 0 {
             0
         } else {
@@ -5403,6 +5455,26 @@ impl Tabular {
         for child in &node.children {
             if let Some((db_name, key_type)) = self.find_redis_key_info(child, key_name) {
                 return Some((db_name, key_type));
+            }
+        }
+        
+        None
+    }
+
+    fn find_database_name_for_table(&self, node: &models::structs::TreeNode, connection_id: i64, table_name: &str) -> Option<String> {
+        // Look for the table in the tree structure to find its database context
+        
+        // Check if this node is a table with the matching name and connection
+        if node.node_type == models::enums::NodeType::Table && 
+           node.name == table_name &&
+           node.connection_id == Some(connection_id) {
+            return node.database_name.clone();
+        }
+        
+        // Recursively search in children
+        for child in &node.children {
+            if let Some(db_name) = self.find_database_name_for_table(child, connection_id, table_name) {
+                return Some(db_name);
             }
         }
         

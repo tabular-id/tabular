@@ -3,7 +3,7 @@ use crate::{
               driver_mysql, driver_sqlite, helpers
        };
 use eframe::egui;
-use sqlx::{Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
+use sqlx::{Row, Column, Executor, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::sync::Arc;
 use redis::{Client, aio::ConnectionManager};
 
@@ -107,16 +107,22 @@ pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Cont
                             let query = tabular.pending_query.clone();
                             if let Some((headers, data)) = execute_query_with_connection(tabular, connection_id, query) {
                             tabular.current_table_headers = headers;
-                            tabular.current_table_data = data;
-                            if tabular.current_table_data.is_empty() {
+                            
+                            // Use pagination for query results
+                            tabular.update_pagination_data(data);
+                            
+                            if tabular.total_rows == 0 {
                                    tabular.current_table_name = "Query executed successfully (no results)".to_string();
                             } else {
-                                   tabular.current_table_name = format!("Query Results ({} rows)", tabular.current_table_data.len());
+                                   tabular.current_table_name = format!("Query Results ({} total rows, showing page {} of {})", 
+                                          tabular.total_rows, tabular.current_page + 1, tabular.get_total_pages());
                             }
                             } else {
                             tabular.current_table_name = "Query execution failed".to_string();
                             tabular.current_table_headers.clear();
                             tabular.current_table_data.clear();
+                            tabular.all_table_data.clear();
+                            tabular.total_rows = 0;
                             }
                      }
                      
@@ -175,6 +181,17 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      models::enums::DatabasePool::MySQL(mut mysql_pool) => {
                      println!("Executing MySQL query: {}", query);
                      
+                     // Split query by semicolons to handle multi-statement queries
+                     let statements: Vec<&str> = query.split(';')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                     
+                     println!("Found {} SQL statements to execute", statements.len());
+                     
+                     let mut final_headers = Vec::new();
+                     let mut final_data = Vec::new();
+                     
                      // Try query with retry mechanism
                      let mut attempts = 0;
                      let max_attempts = 3;
@@ -183,30 +200,56 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             attempts += 1;
                             println!("Query attempt {} of {}", attempts, max_attempts);
                             
-                            match sqlx::query(query).fetch_all(mysql_pool.as_ref()).await {
-                                   Ok(rows) => {
-                                   if rows.is_empty() {
-                                          println!("Query returned no rows");
-                                          return Some((vec![], vec![]));
+                            let mut execution_success = true;
+                            let mut error_message = String::new();
+                            
+                            // Execute each statement separately
+                            for (i, statement) in statements.iter().enumerate() {
+                                   println!("Executing statement {}: {}", i + 1, statement);
+                                   
+                                   // Check if this is a USE statement
+                                   let statement_upper = statement.trim().to_uppercase();
+                                   if statement_upper.starts_with("USE") {
+                                          // For USE statements, skip execution as they're not needed with connection pools
+                                          // The database context is already set in the connection string
+                                          println!("Skipping USE statement as database context is handled by connection pool");
+                                          continue;
                                    }
                                    
-                                   // Get column headers
-                                   let headers: Vec<String> = rows[0].columns().iter()
-                                          .map(|col| col.name().to_string())
-                                          .collect();
-                                   
-                                   // Convert rows to table data
-                                   let table_data = driver_mysql::convert_mysql_rows_to_table_data(rows);
-                                   
-                                   println!("Query successful: {} headers, {} rows", headers.len(), table_data.len());
-                                   return Some((headers, table_data));
-                                   },
-                                   Err(e) => {
-                                   let error_msg = e.to_string();
-                                   println!("MySQL query failed on attempt {}: {}", attempts, error_msg);
+                                   // Execute other statements normally
+                                   match sqlx::query(statement).fetch_all(mysql_pool.as_ref()).await {
+                                          Ok(rows) => {
+                                          println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                          
+                                          // For the last statement that returns data, store the results
+                                          if !rows.is_empty() && i == statements.len() - 1 {
+                                                 // Get column headers
+                                                 final_headers = rows[0].columns().iter()
+                                                        .map(|col| col.name().to_string())
+                                                        .collect();
+                                                 
+                                                 // Convert rows to table data
+                                                 final_data = driver_mysql::convert_mysql_rows_to_table_data(rows);
+                                          }
+                                          },
+                                          Err(e) => {
+                                          let error_msg = e.to_string();
+                                          println!("Statement {} failed: {}", i + 1, error_msg);
+                                          execution_success = false;
+                                          error_message = error_msg;
+                                          break;
+                                          }
+                                   }
+                            }
+                            
+                            if execution_success {
+                                   println!("All statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
+                                   return Some((final_headers, final_data));
+                            } else {
+                                   println!("MySQL query failed on attempt {}: {}", attempts, error_message);
                                    
                                    // If it's a connection timeout/pool error and not the last attempt
-                                   if (error_msg.contains("timed out") || error_msg.contains("pool")) && attempts < max_attempts {
+                                   if (error_message.contains("timed out") || error_message.contains("pool")) && attempts < max_attempts {
                                           println!("Removing cached pool and retrying...");
                                           tabular.connection_pools.remove(&connection_id);
                                           
@@ -223,9 +266,8 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                                    if attempts >= max_attempts {
                                           return Some((
                                                  vec!["Error".to_string()],
-                                                 vec![vec![format!("Query error: {}", error_msg)]]
+                                                 vec![vec![format!("Query error: {}", error_message)]]
                                           ));
-                                   }
                                    }
                             }
                      }
@@ -238,63 +280,99 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      },
                      models::enums::DatabasePool::PostgreSQL(pg_pool) => {
                      println!("Executing PostgreSQL query: {}", query);
-                     match sqlx::query(query).fetch_all(pg_pool.as_ref()).await {
-                            Ok(rows) => {
-                                   if rows.is_empty() {
-                                   return Some((vec![], vec![]));
+                     
+                     // Split query by semicolons to handle multi-statement queries
+                     let statements: Vec<&str> = query.split(';')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                     
+                     println!("Found {} SQL statements to execute", statements.len());
+                     
+                     let mut final_headers = Vec::new();
+                     let mut final_data = Vec::new();
+                     
+                     // Execute each statement separately
+                     for (i, statement) in statements.iter().enumerate() {
+                            println!("Executing PostgreSQL statement {}: {}", i + 1, statement);
+                            
+                            match sqlx::query(statement).fetch_all(pg_pool.as_ref()).await {
+                                   Ok(rows) => {
+                                   println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                   
+                                   // For the last statement that returns data, store the results
+                                   if !rows.is_empty() && i == statements.len() - 1 {
+                                          final_headers = rows[0].columns().iter()
+                                                 .map(|col| col.name().to_string())
+                                                 .collect();
+                                          
+                                          final_data = rows.iter().map(|row| {
+                                                 (0..row.len()).map(|j| {
+                                                        match row.try_get::<Option<String>, _>(j) {
+                                                        Ok(Some(value)) => value,
+                                                        Ok(None) => "NULL".to_string(),
+                                                        Err(_) => "Error".to_string(),
+                                                        }
+                                                 }).collect()
+                                          }).collect();
                                    }
-                                   
-                                   let headers: Vec<String> = rows[0].columns().iter()
-                                   .map(|col| col.name().to_string())
-                                   .collect();
-                                   
-                                   let table_data: Vec<Vec<String>> = rows.iter().map(|row| {
-                                   (0..row.len()).map(|i| {
-                                          match row.try_get::<Option<String>, _>(i) {
-                                          Ok(Some(value)) => value,
-                                          Ok(None) => "NULL".to_string(),
-                                          Err(_) => "Error".to_string(),
-                                          }
-                                   }).collect()
-                                   }).collect();
-                                   
-                                   Some((headers, table_data))
-                            },
-                            Err(e) => {
-                                   println!("PostgreSQL query failed: {}", e);
-                                   Some((
-                                   vec!["Error".to_string()],
-                                   vec![vec![format!("Query error: {}", e)]]
-                                   ))
+                                   },
+                                   Err(e) => {
+                                   println!("PostgreSQL statement {} failed: {}", i + 1, e);
+                                   return Some((
+                                          vec!["Error".to_string()],
+                                          vec![vec![format!("Query error: {}", e)]]
+                                   ));
+                                   }
                             }
                      }
+                     
+                     Some((final_headers, final_data))
                      },
                      models::enums::DatabasePool::SQLite(sqlite_pool) => {
                      println!("Executing SQLite query: {}", query);
-                     match sqlx::query(query).fetch_all(sqlite_pool.as_ref()).await {
-                            Ok(rows) => {
-                                   if rows.is_empty() {
-                                   return Some((vec![], vec![]));
+                     
+                     // Split query by semicolons to handle multi-statement queries
+                     let statements: Vec<&str> = query.split(';')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                     
+                     println!("Found {} SQL statements to execute", statements.len());
+                     
+                     let mut final_headers = Vec::new();
+                     let mut final_data = Vec::new();
+                     
+                     // Execute each statement separately
+                     for (i, statement) in statements.iter().enumerate() {
+                            println!("Executing SQLite statement {}: {}", i + 1, statement);
+                            
+                            match sqlx::query(statement).fetch_all(sqlite_pool.as_ref()).await {
+                                   Ok(rows) => {
+                                   println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                   
+                                   // For the last statement that returns data, store the results
+                                   if !rows.is_empty() && i == statements.len() - 1 {
+                                          final_headers = rows[0].columns().iter()
+                                                 .map(|col| col.name().to_string())
+                                                 .collect();
+                                          
+                                          // Convert SQLite rows to table data with proper type handling
+                                          final_data = driver_sqlite::convert_sqlite_rows_to_table_data(rows);
                                    }
-                                   
-                                   let headers: Vec<String> = rows[0].columns().iter()
-                                   .map(|col| col.name().to_string())
-                                   .collect();
-                                   
-                                   // Convert SQLite rows to table data with proper type handling
-                                   let table_data = driver_sqlite::convert_sqlite_rows_to_table_data(rows);
-                                   
-                                   println!("Query successful: {} headers, {} rows", headers.len(), table_data.len());
-                                   Some((headers, table_data))
-                            },
-                            Err(e) => {
-                                   println!("SQLite query failed: {}", e);
-                                   Some((
-                                   vec!["Error".to_string()],
-                                   vec![vec![format!("Query error: {}", e)]]
-                                   ))
+                                   },
+                                   Err(e) => {
+                                   println!("SQLite statement {} failed: {}", i + 1, e);
+                                   return Some((
+                                          vec!["Error".to_string()],
+                                          vec![vec![format!("Query error: {}", e)]]
+                                   ));
+                                   }
                             }
                      }
+                     
+                     println!("All SQLite statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
+                     Some((final_headers, final_data))
                      },
                      models::enums::DatabasePool::Redis(redis_manager) => {
                      println!("Executing Redis command: {}", query);
