@@ -44,7 +44,6 @@ pub struct Tabular {
     pub current_table_headers: Vec<String>,
     pub current_table_name: String,
     pub current_connection_id: Option<i64>,
-    pub current_database_name: Option<String>,
     // Pagination
     pub current_page: usize,
     pub page_size: usize,
@@ -162,7 +161,6 @@ impl Tabular {
             current_table_headers: Vec::new(),
             current_table_name: String::new(),
             current_connection_id: None,
-            current_database_name: None,
             current_page: 0,
             page_size: 100, // Default 100 rows per page
             total_rows: 0,
@@ -1307,21 +1305,6 @@ impl Tabular {
         }
     }
 
-    fn get_active_tab_connection(&self) -> Option<i64> {
-        if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
-            tab.connection_id
-        } else {
-            None
-        }
-    }
-
-    fn get_active_tab_database(&self) -> Option<String> {
-        if let Some(tab) = self.query_tabs.get(self.active_tab_index) {
-            tab.database_name.clone()
-        } else {
-            None
-        }
-    }
 
     fn get_connection_name(&self, connection_id: i64) -> Option<String> {
         self.connections.iter()
@@ -3959,18 +3942,7 @@ impl Tabular {
         }
     }
     
-    // Fast check if databases are cached (without fetching)
-    fn has_databases_cached(&self, connection_id: i64) -> bool {
-        const CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(300);
-        
-        if let Some(cache_time) = self.database_cache_time.get(&connection_id) {
-            if cache_time.elapsed() < CACHE_DURATION {
-                return self.database_cache.contains_key(&connection_id);
-            }
-        }
-        false
-    }
-    
+
     fn fetch_databases_from_connection(&mut self, connection_id: i64) -> Option<Vec<String>> {
         
         // Find the connection configuration
