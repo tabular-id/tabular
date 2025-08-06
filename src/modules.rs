@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use log::{debug};
 
 
 pub(crate) fn url_encode(input: &str) -> String {
@@ -31,7 +32,7 @@ pub(crate) fn load_icon() -> Option<egui::IconData> {
             })
         }
         Err(e) => {
-            eprintln!("Failed to load icon: {}", e);
+            debug!("Failed to load icon: {}", e);
             None
         }
     }

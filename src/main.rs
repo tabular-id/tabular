@@ -14,6 +14,10 @@ mod directory;
 mod connection;
 
 fn main() -> Result<(), eframe::Error> {
+    dotenv::dotenv().ok();
+    // Initialize logger
+    env_logger::init();
+    
     let mut options = eframe::NativeOptions::default();
     
     // Set window size

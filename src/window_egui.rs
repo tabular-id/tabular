@@ -6,6 +6,7 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use log::{debug, info, warn, error};
 
 use crate::{
     cache_data, directory, 
@@ -136,7 +137,7 @@ impl Tabular {
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(rt) => Some(Arc::new(rt)),
             Err(e) => {
-                println!("Failed to create runtime: {}", e);
+                error!("Failed to create runtime: {}", e);
                 None
             }
         };
@@ -292,7 +293,7 @@ impl Tabular {
         db_pool: &Option<Arc<SqlitePool>>,
     ) -> bool {
 
-        println!("Refreshing connection with ID: {}", connection_id);
+        debug!("Refreshing connection with ID: {}", connection_id);
 
         // Get connection from database
         if let Some(cache_pool_arc) = db_pool {
@@ -491,7 +492,7 @@ impl Tabular {
     fn initialize_database(&mut self) {
         // Ensure app directories exist
         if let Err(e) = directory::ensure_app_directories() {
-            println!("Failed to create app directories: {}", e);
+            error!("Failed to create app directories: {}", e);
             return;
         }
         
@@ -509,7 +510,7 @@ impl Tabular {
             
             match pool {
                 Ok(pool) => {
-                    println!("Database connection successful");
+                    info!("Database connection successful");
                     
                     // Create connections table
                     let create_connections_result = sqlx::query(
@@ -613,13 +614,13 @@ impl Tabular {
                             Some(pool)
                         },
                         _ => {
-                            println!("Error creating some tables");
+                            warn!("Error creating some tables");
                             None
                         }
                     }
                 },
                 Err(e) => {
-                    println!("Database connection failed: {}", e);
+                    error!("Database connection failed: {}", e);
                     None
                 }
             }
@@ -702,7 +703,7 @@ impl Tabular {
                         },
                     }
                 } else {
-                    println!("  -> Skipping connection with no ID");
+                    debug!("  -> Skipping connection with no ID");
                 }
             }
             
@@ -757,7 +758,7 @@ impl Tabular {
         });
         
         if result.is_empty() {
-            println!("No connections found, returning empty tree");
+            debug!("No connections found, returning empty tree");
         }
         
         result
@@ -1054,7 +1055,7 @@ impl Tabular {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() && !self.save_filename.is_empty() {
                             if let Err(err) = self.save_current_tab_with_name(self.save_filename.clone()) {
-                                println!("Failed to save: {}", err);
+                                error!("Failed to save: {}", err);
                             }
                             self.show_save_dialog = false;
                             self.save_filename.clear();
@@ -1337,7 +1338,7 @@ impl Tabular {
             }
             if let Some((hash, folder_path)) = folder_removal_mapping {
                 self.folder_removal_map.insert(hash, folder_path);
-                println!("📁 Stored folder removal mapping: hash={} -> path={}", hash, self.folder_removal_map.get(&hash).unwrap_or(&"NONE".to_string()));
+                debug!("📁 Stored folder removal mapping: hash={} -> path={}", hash, self.folder_removal_map.get(&hash).unwrap_or(&"NONE".to_string()));
             }
             if let Some(parent_folder) = parent_for_creation {
                 self.parent_folder_for_creation = Some(parent_folder);
@@ -1352,7 +1353,7 @@ impl Tabular {
                 connection_click_requests.push(connection_id);
             }
             if let Some((filename, content, file_path)) = query_file_to_open {
-                println!("📋 Collected query file to open: {} (path: {})", filename, file_path);
+                debug!("📋 Collected query file to open: {} (path: {})", filename, file_path);
                 query_files_to_open.push((filename, content, file_path));
             }
         }
@@ -1369,7 +1370,7 @@ impl Tabular {
             let tab_title = format!("Query - {}", connection_name);
             self.create_new_tab_with_connection(tab_title, String::new(), Some(connection_id));
             
-            println!("Created new tab with connection ID: {}", connection_id);
+            debug!("Created new tab with connection ID: {}", connection_id);
         }
         
         // Handle expansions after rendering
@@ -1383,7 +1384,7 @@ impl Tabular {
                             self.load_connection_tables(expansion_req.connection_id, connection_node);
                         }
                     } else {
-                        println!("Connection node not found for ID: {}", expansion_req.connection_id);
+                        debug!("Connection node not found for ID: {}", expansion_req.connection_id);
                     }
                 },
                 models::enums::NodeType::DatabasesFolder => {
@@ -1402,44 +1403,44 @@ impl Tabular {
                     }
                 },
                 models::enums::NodeType::Database => {
-                    println!("🔍 Database expansion request received for connection_id: {}, database_name: {:?}", 
+                    debug!("🔍 Database expansion request received for connection_id: {}, database_name: {:?}", 
                              expansion_req.connection_id, expansion_req.database_name);
                     
                     // Handle Database expansion for Redis - load keys for the database
                     if let Some(connection) = self.connections.iter().find(|c| c.id == Some(expansion_req.connection_id)) {
-                        println!("✅ Found connection: {} (type: {:?})", connection.name, connection.connection_type);
+                        debug!("✅ Found connection: {} (type: {:?})", connection.name, connection.connection_type);
                         
                         if connection.connection_type == models::enums::DatabaseType::Redis {
-                            println!("🔑 Processing Redis database expansion");
+                            debug!("🔑 Processing Redis database expansion");
                             
                             // Find the database node and load its keys
                             let mut node_found = false;
                             for (node_idx, node) in nodes.iter_mut().enumerate() {
-                                println!("🌳 Checking tree node [{}]: '{}' (type: {:?}, connection_id: {:?})", 
+                                debug!("🌳 Checking tree node [{}]: '{}' (type: {:?}, connection_id: {:?})", 
                                          node_idx, node.name, node.node_type, node.connection_id);
                                 
                                 if let Some(db_node) = Self::find_redis_database_node(node, expansion_req.connection_id, &expansion_req.database_name) {
-                                    println!("📁 Found database node: {}, is_loaded: {}", db_node.name, db_node.is_loaded);
+                                    debug!("📁 Found database node: {}, is_loaded: {}", db_node.name, db_node.is_loaded);
                                     node_found = true;
                                     
                                     if !db_node.is_loaded {
-                                        println!("⏳ Loading keys for database: {}", expansion_req.database_name.clone().unwrap_or_default());
+                                        debug!("⏳ Loading keys for database: {}", expansion_req.database_name.clone().unwrap_or_default());
                                         self.load_redis_keys_for_database(expansion_req.connection_id, &expansion_req.database_name.clone().unwrap_or_default(), db_node);
                                     } else {
-                                        println!("✅ Database already loaded with {} children", db_node.children.len());
+                                        debug!("✅ Database already loaded with {} children", db_node.children.len());
                                     }
                                     break;
                                 }
                             }
                             
                             if !node_found {
-                                println!("❌ Database node not found in any tree branch for database: {:?}", expansion_req.database_name);
+                                debug!("❌ Database node not found in any tree branch for database: {:?}", expansion_req.database_name);
                             }
                         } else {
-                            println!("❌ Connection is not Redis type: {:?}", connection.connection_type);
+                            debug!("❌ Connection is not Redis type: {:?}", connection.connection_type);
                         }
                     } else {
-                        println!("❌ Connection not found for ID: {}", expansion_req.connection_id);
+                        debug!("❌ Connection not found for ID: {}", expansion_req.connection_id);
                     }
                 },
                 models::enums::NodeType::TablesFolder | models::enums::NodeType::ViewsFolder | models::enums::NodeType::StoredProceduresFolder |
@@ -1464,11 +1465,11 @@ impl Tabular {
                         }
                     }
                     if !found {
-                        println!("Could not find folder node with type {:?} and database {:?} in any of the nodes", folder_type, database_name);
+                        debug!("Could not find folder node with type {:?} and database {:?} in any of the nodes", folder_type, database_name);
                     }
                 },
                 _ => {
-                    println!("Unhandled node type: {:?}", expansion_req.node_type);
+                    debug!("Unhandled node type: {:?}", expansion_req.node_type);
                 }
             }
         }
@@ -1613,18 +1614,18 @@ impl Tabular {
         // Handle query file open requests
         let results = query_files_to_open.clone();
         for (filename, content, file_path) in query_files_to_open {
-            println!("📂 Processing file: {} (path: {})", filename, file_path);
+            debug!("📂 Processing file: {} (path: {})", filename, file_path);
             if file_path.is_empty() {
                 // This is a placeholder query without a file path - create a new unsaved tab
-                println!("📝 Creating new tab for placeholder query: {}", filename);
+                debug!("📝 Creating new tab for placeholder query: {}", filename);
                 self.create_new_tab(filename, content);
             } else {
                 // Use existing open_query_file logic which checks for already open tabs
-                println!("📁 Opening query file: {}", file_path);
+                debug!("📁 Opening query file: {}", file_path);
                 if let Err(err) = self.open_query_file(&file_path) {
-                    println!("❌ Failed to open query file: {}", err);
+                    debug!("❌ Failed to open query file: {}", err);
                 } else {
-                    println!("✅ Successfully opened query file: {}", file_path);
+                    debug!("✅ Successfully opened query file: {}", file_path);
                 }
             }
         }
@@ -1635,41 +1636,41 @@ impl Tabular {
         let mut needs_full_refresh = false;
                 
         for context_id in context_menu_requests {
-            println!("🔍 Processing context_id: {}", context_id);
+            debug!("🔍 Processing context_id: {}", context_id);
             
             if context_id >= 50000 {
                 // ID >= 50000 means create folder in folder operation
                 let hash = context_id - 50000;
-                println!("📁 Create folder operation with hash: {}", hash);
+                debug!("📁 Create folder operation with hash: {}", hash);
                 self.handle_create_folder_in_folder_request(hash);
                 // Force immediate UI repaint after create folder request
                 ui.ctx().request_repaint();
             } else if context_id >= 40000 {
                 // ID >= 40000 means move query to folder operation
                 let hash = context_id - 40000;
-                println!("📦 Move query operation with hash: {}", hash);
+                debug!("📦 Move query operation with hash: {}", hash);
                 self.handle_query_move_request(hash);
             } else if context_id >= 30000 {
                 // ID >= 30000 means alter table operation
                 let connection_id = context_id - 30000;
-                println!("🔧 Alter table operation for connection: {}", connection_id);
+                debug!("🔧 Alter table operation for connection: {}", connection_id);
                 self.handle_alter_table_request(connection_id);
             } else if context_id >= 20000 {
                 // ID >= 20000 means query edit operation
                 let hash = context_id - 20000;
-                println!("✏️ Query edit operation with hash: {}", hash);
+                debug!("✏️ Query edit operation with hash: {}", hash);
                 self.handle_query_edit_request(hash);
             } else if context_id <= -50000 {
                 // ID <= -50000 means remove folder operation
                 let hash = (-context_id) - 50000;
-                println!("🗑️ Remove folder operation with hash: {}", hash);
+                debug!("🗑️ Remove folder operation with hash: {}", hash);
                 self.handle_remove_folder_request(hash);
                 // Force immediate UI repaint after folder removal
                 ui.ctx().request_repaint();
             } else if context_id <= -20000 {
                 // ID <= -20000 means query removal operation  
                 let hash = (-context_id) - 20000;
-                println!("🗑️ Remove query operation with hash: {}", hash);
+                debug!("🗑️ Remove query operation with hash: {}", hash);
                 if self.handle_query_remove_request_by_hash(hash) {
                     // Force refresh of queries tree if removal was successful
                     self.load_queries_from_directory();
@@ -1684,7 +1685,7 @@ impl Tabular {
             } else if context_id > 10000 {
                 // ID > 10000 means copy connection (connection_id = context_id - 10000)
                 let connection_id = context_id - 10000;
-                println!("📋 Copy connection operation for connection: {}", connection_id);
+                debug!("📋 Copy connection operation for connection: {}", connection_id);
                 self.copy_connection(connection_id);
                 
                 // Force immediate tree refresh and UI update
@@ -1698,7 +1699,7 @@ impl Tabular {
             } else if (1000..10000).contains(&context_id) {
                 // ID 1000-9999 means refresh connection (connection_id = context_id - 1000)
                 let connection_id = context_id - 1000;
-                println!("🔄 Refresh connection operation for connection: {}", connection_id);
+                debug!("🔄 Refresh connection operation for connection: {}", connection_id);
                 if !processed_refreshes.contains(&connection_id) {
                     processed_refreshes.insert(connection_id);
                     self.refresh_connection(connection_id);
@@ -2173,20 +2174,20 @@ impl Tabular {
                         },
                         models::enums::NodeType::Query => {
                             // Load query file content
-                            println!("🔍 Query node clicked: {}", node.name);
+                            debug!("🔍 Query node clicked: {}", node.name);
                             if let Some(file_path) = &node.file_path {
-                                println!("📁 File path: {}", file_path);
+                                debug!("📁 File path: {}", file_path);
                                 if let Ok(content) = std::fs::read_to_string(file_path) {
-                                    println!("✅ File read successfully, content length: {}", content.len());
+                                    debug!("✅ File read successfully, content length: {}", content.len());
                                     // Don't modify editor_text directly, let open_query_file handle it
                                     query_file_to_open = Some((node.name.clone(), content, file_path.clone()));
                                 } else {
-                                    println!("❌ Failed to read file: {}", file_path);
+                                    debug!("❌ Failed to read file: {}", file_path);
                                     // Handle read error case
                                     query_file_to_open = Some((node.name.clone(), format!("-- Failed to load query file: {}", node.name), file_path.clone()));
                                 }
                             } else {
-                                println!("❌ No file path for query node: {}", node.name);
+                                debug!("❌ No file path for query node: {}", node.name);
                                 // Handle missing file path case - create a placeholder query
                                 let placeholder_content = format!("-- {}\nSELECT * FROM table_name;", node.name);
                                 // For files without path, we'll create a new unsaved tab
@@ -2332,11 +2333,11 @@ impl Tabular {
                                             *existing = connection_data.clone();
                                             self.refresh_connections_tree();
                                         } else {
-                                            println!("ERROR: Could not find connection {} in memory", id);
+                                            debug!("ERROR: Could not find connection {} in memory", id);
                                         }
                                     }
                                 } else {
-                                    println!("ERROR: Connection has no ID, cannot update");
+                                    debug!("ERROR: Connection has no ID, cannot update");
                                 }
                                 self.show_edit_connection = false;
                             } else {
@@ -2509,7 +2510,7 @@ impl Tabular {
             self.show_edit_connection = true;
         } else {
             for conn in &self.connections {
-                println!("  - {} (ID: {:?})", conn.name, conn.id);
+                debug!("  - {} (ID: {:?})", conn.name, conn.id);
             }
         }
     }
@@ -2539,7 +2540,7 @@ impl Tabular {
             }
             
         } else {
-            println!("❌ Connection with ID {} not found for copying", connection_id);
+            debug!("❌ Connection with ID {} not found for copying", connection_id);
         }
     }
 
@@ -2550,10 +2551,10 @@ impl Tabular {
             
             // Open the query file in a new tab for editing
             if let Err(err) = self.open_query_file(&query_file_path) {
-                println!("Failed to open query file for editing: {}", err);
+                debug!("Failed to open query file for editing: {}", err);
             }
         } else {
-            println!("Query file not found for hash: {}", hash);
+            debug!("Query file not found for hash: {}", hash);
         }
     }
 
@@ -2566,7 +2567,7 @@ impl Tabular {
             self.selected_query_for_move = Some(query_file_path);
             self.show_move_to_folder_dialog = true;
         } else {
-            println!("Query file not found for hash: {}", hash);
+            debug!("Query file not found for hash: {}", hash);
         }
     }
 
@@ -2588,13 +2589,13 @@ impl Tabular {
                     return true;
                 },
                 Err(e) => {
-                    println!("❌ Failed to remove query file: {}", e);
+                    debug!("❌ Failed to remove query file: {}", e);
                     return false;
                 }
             }
         }
         
-        println!("❌ Query file not found for hash: {}", hash);
+        debug!("❌ Query file not found for hash: {}", hash);
         false
     }
 
@@ -2652,7 +2653,7 @@ impl Tabular {
     }
 
     fn handle_alter_table_request(&mut self, connection_id: i64) {
-        println!("🔍 handle_alter_table_request called with connection_id: {}", connection_id);
+        debug!("🔍 handle_alter_table_request called with connection_id: {}", connection_id);
         
         // Find the connection by ID to determine database type
         if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -2684,7 +2685,7 @@ impl Tabular {
                 
             }
         } else {
-            println!("❌ Connection with ID {} not found", connection_id);
+            debug!("❌ Connection with ID {} not found", connection_id);
         }
     }
 
@@ -2717,13 +2718,13 @@ impl Tabular {
     }
 
     fn handle_create_folder_in_folder_request(&mut self, _hash: i64) {
-        println!("🔍 handle_create_folder_in_folder_request called with hash: {}", _hash);
+        debug!("🔍 handle_create_folder_in_folder_request called with hash: {}", _hash);
         // Parent folder should already be set when context menu was clicked
         if self.parent_folder_for_creation.is_some() {
             // Show the create folder dialog
             self.show_create_folder_dialog = true;
         } else {
-            println!("❌ No parent folder set for creation! This should not happen.");
+            debug!("❌ No parent folder set for creation! This should not happen.");
             self.error_message = "No parent folder selected for creation".to_string();
             self.show_error_message = true;
         }
@@ -2751,7 +2752,7 @@ impl Tabular {
                             self.needs_refresh = true;
                         }
                         Err(e) => {
-                            println!("❌ Failed to remove folder: {}", e);
+                            debug!("❌ Failed to remove folder: {}", e);
                             self.error_message = format!("Failed to remove folder '{}': {}", folder_relative_path, e);
                             self.show_error_message = true;
                         }
@@ -2760,19 +2761,19 @@ impl Tabular {
                     // Offer option to remove folder and all contents
                     self.error_message = format!("Folder '{}' is not empty.\n\nWould you like to remove it and all its contents?", folder_relative_path);
                     self.show_error_message = true;
-                    println!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
+                    debug!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
                 }
             } else {
                 self.error_message = format!("Folder '{}' does not exist", folder_relative_path);
                 self.show_error_message = true;
-                println!("❌ Folder does not exist: {}", folder_relative_path);
+                debug!("❌ Folder does not exist: {}", folder_relative_path);
             }
             
             // Remove the mapping after processing
             self.folder_removal_map.remove(&hash);
         } else {
-            println!("❌ No folder path found for hash: {}", hash);
-            println!("❌ Available mappings: {:?}", self.folder_removal_map);
+            debug!("❌ No folder path found for hash: {}", hash);
+            debug!("❌ Available mappings: {:?}", self.folder_removal_map);
             // Fallback to the old method
             if let Some(folder_relative_path) = &self.selected_folder_for_removal {
                 let query_dir = directory::get_query_dir();
@@ -2789,7 +2790,7 @@ impl Tabular {
                                 self.needs_refresh = true;
                             }
                             Err(e) => {
-                                println!("❌ Failed to remove folder: {}", e);
+                                debug!("❌ Failed to remove folder: {}", e);
                                 self.error_message = format!("Failed to remove folder '{}': {}", folder_relative_path, e);
                                 self.show_error_message = true;
                             }
@@ -2797,17 +2798,17 @@ impl Tabular {
                     } else {
                         self.error_message = format!("Folder '{}' is not empty.\n\nWould you like to remove it and all its contents?", folder_relative_path);
                         self.show_error_message = true;
-                        println!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
+                        debug!("❌ Cannot remove non-empty folder: {}", folder_relative_path);
                     }
                 } else {
                     self.error_message = format!("Folder '{}' does not exist", folder_relative_path);
                     self.show_error_message = true;
-                    println!("❌ Folder does not exist: {}", folder_relative_path);
+                    debug!("❌ Folder does not exist: {}", folder_relative_path);
                 }
                 
                 self.selected_folder_for_removal = None;
             } else {
-                println!("❌ No folder selected for removal in fallback either");
+                debug!("❌ No folder selected for removal in fallback either");
             }
         }
     }
@@ -2956,20 +2957,20 @@ impl Tabular {
                 
                 match &result {
                     Ok(query_result) => {
-                        println!("Update successful: {} rows affected", query_result.rows_affected());
+                        debug!("Update successful: {} rows affected", query_result.rows_affected());
                     }
                     Err(e) => {
-                        println!("Update failed: {}", e);
+                        debug!("Update failed: {}", e);
                     }
                 }
                 
                 result.is_ok()
             } else {
-                println!("Cannot update connection: no ID found");
+                debug!("Cannot update connection: no ID found");
                 false
             }
         } else {
-            println!("Cannot update connection: no database pool available");
+            debug!("Cannot update connection: no database pool available");
             false
         }
     }
@@ -3020,12 +3021,12 @@ impl Tabular {
                     
                     // Only proceed if we actually deleted something
                     if delete_result.rows_affected() == 0 {
-                        println!("Warning: No rows were deleted from database!");
+                        debug!("Warning: No rows were deleted from database!");
                         return;
                     }
                 },
                 Err(e) => {
-                    println!("Failed to delete from database: {}", e);
+                    debug!("Failed to delete from database: {}", e);
                     return; // Don't proceed if database deletion failed
                 }
             }
@@ -3043,7 +3044,7 @@ impl Tabular {
     // Cache functions for database structure
     fn save_databases_to_cache(&self, connection_id: i64, databases: &[String]) {
         for db_name in databases {
-            println!("  - {}", db_name);
+            debug!("  - {}", db_name);
         }
         if let Some(ref pool) = self.db_pool {
             let pool_clone = pool.clone();
@@ -3087,12 +3088,12 @@ impl Tabular {
                     Some(databases)
                 },
                 Err(e) => {
-                    println!("Error reading from cache: {}", e);
+                    debug!("Error reading from cache: {}", e);
                     None
                 }
             }
         } else {
-            println!("No database pool available for cache lookup");
+            debug!("No database pool available for cache lookup");
             None
         }
     }
@@ -3218,7 +3219,7 @@ impl Tabular {
                 node.is_loaded = false;
                 node.is_expanded = false;
                 node.children.clear();
-                println!("Reset connection node: {}", node.name);
+                debug!("Reset connection node: {}", node.name);
                 break;
             }
         }
@@ -3226,12 +3227,12 @@ impl Tabular {
         // Send background task instead of blocking refresh
         if let Some(sender) = &self.background_sender {
             if let Err(e) = sender.send(models::enums::BackgroundTask::RefreshConnection { connection_id }) {
-                println!("Failed to send background refresh task: {}", e);
+                debug!("Failed to send background refresh task: {}", e);
                 // Fallback to synchronous refresh if background thread is not available
                 self.refreshing_connections.remove(&connection_id);
                 self.fetch_and_cache_connection_data(connection_id);
             } else {
-                println!("Background refresh task sent for connection {}", connection_id);
+                debug!("Background refresh task sent for connection {}", connection_id);
             }
         } else {
             // Fallback to synchronous refresh if background system is not initialized
@@ -3246,7 +3247,7 @@ impl Tabular {
         let connection = if let Some(conn) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
             conn.clone()
         } else {
-            println!("Connection not found for ID: {}", connection_id);
+            debug!("Connection not found for ID: {}", connection_id);
             return;
         };
         
@@ -3316,7 +3317,7 @@ impl Tabular {
             }
             
         } else {
-            println!("Failed to fetch databases from server for connection_id: {}", connection_id);
+            debug!("Failed to fetch databases from server for connection_id: {}", connection_id);
         }
     }
 
@@ -3349,11 +3350,11 @@ impl Tabular {
 
     fn load_connection_tables(&mut self, connection_id: i64, node: &mut models::structs::TreeNode) {
 
-        println!("Loading connection tables for ID: {}", connection_id);
+        debug!("Loading connection tables for ID: {}", connection_id);
 
         // First check if we have cached data
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
-            println!("Found cached databases for connection {}: {:?}", connection_id, databases);
+            debug!("Found cached databases for connection {}: {:?}", connection_id, databases);
             if !databases.is_empty() {
                 self.build_connection_structure_from_cache(connection_id, node, &databases);
                 node.is_loaded = true;
@@ -3361,11 +3362,11 @@ impl Tabular {
             }
         }
 
-        println!("🔄 Cache empty or not found, fetching databases from server for connection {}", connection_id);
+        debug!("🔄 Cache empty or not found, fetching databases from server for connection {}", connection_id);
         
         // Try to fetch from actual database server
         if let Some(fresh_databases) = self.fetch_databases_from_connection(connection_id) {
-            println!("✅ Successfully fetched {} databases from server", fresh_databases.len());
+            debug!("✅ Successfully fetched {} databases from server", fresh_databases.len());
             // Save to cache for future use
             self.save_databases_to_cache(connection_id, &fresh_databases);
             // Build structure from fresh data
@@ -3373,7 +3374,7 @@ impl Tabular {
             node.is_loaded = true;
             return;
         } else {
-            println!("❌ Failed to fetch databases from server, creating default structure");
+            debug!("❌ Failed to fetch databases from server, creating default structure");
         }
 
         
@@ -3876,7 +3877,7 @@ impl Tabular {
                     
                     // Select the specific database
                     if let Err(e) = redis::cmd("SELECT").arg(db_number).query_async::<_, ()>(&mut conn).await {
-                        println!("❌ Failed to select database {}: {}", db_number, e);
+                        debug!("❌ Failed to select database {}: {}", db_number, e);
                         return Vec::new();
                     }
                     
@@ -3911,20 +3912,20 @@ impl Tabular {
                                 }
                             }
                             Err(e) => {
-                                println!("❌ SCAN command failed: {}", e);
+                                debug!("❌ SCAN command failed: {}", e);
                                 break;
                             }
                         }
                     }
                     
-                    println!("✅ Found {} keys in database {}", all_keys.len(), database_name);
+                    debug!("✅ Found {} keys in database {}", all_keys.len(), database_name);
                     all_keys
                 } else {
-                    println!("❌ Connection pool is not Redis type");
+                    debug!("❌ Connection pool is not Redis type");
                     Vec::new()
                 }
             } else {
-                println!("❌ Failed to get Redis connection pool");
+                debug!("❌ Failed to get Redis connection pool");
                 Vec::new()
             }
         });
@@ -3965,7 +3966,7 @@ impl Tabular {
         }
         
         db_node.is_loaded = true;
-        println!("✅ Database node loaded with {} type folders", db_node.children.len());
+        debug!("✅ Database node loaded with {} type folders", db_node.children.len());
     }
     
     // Cached database fetcher for better performance
@@ -4022,7 +4023,7 @@ impl Tabular {
                             Some(databases)
                         },
                         Err(e) => {
-                            println!("Error querying MySQL databases: {}", e);
+                            debug!("Error querying MySQL databases: {}", e);
                             None
                         }
                     }
@@ -4040,7 +4041,7 @@ impl Tabular {
                             Some(databases)
                         },
                         Err(e) => {
-                            println!("Error querying PostgreSQL databases: {}", e);
+                            debug!("Error querying PostgreSQL databases: {}", e);
                             None
                         }
                     }
@@ -4058,12 +4059,12 @@ impl Tabular {
                                 // Since SQLite has tables, return main database
                                 Some(vec!["main".to_string()])
                             } else {
-                                println!("No tables found in SQLite database, returning 'main' database anyway");
+                                debug!("No tables found in SQLite database, returning 'main' database anyway");
                                 Some(vec!["main".to_string()])
                             }
                         },
                         Err(e) => {
-                            println!("Error querying SQLite tables: {}", e);
+                            debug!("Error querying SQLite tables: {}", e);
                             Some(vec!["main".to_string()]) // Fallback to main
                         }
                     }
@@ -4080,7 +4081,7 @@ impl Tabular {
                         _ => 16 // Default fallback
                     };
                     
-                    println!("Redis max databases: {}", max_databases);
+                    debug!("Redis max databases: {}", max_databases);
                     
                     // Create list of all Redis databases (db0 to db15 by default)
                     let mut databases = Vec::new();
@@ -4089,7 +4090,7 @@ impl Tabular {
                         databases.push(db_name);
                     }
                     
-                    println!("Generated Redis databases: {:?}", databases);
+                    debug!("Generated Redis databases: {:?}", databases);
                     Some(databases)
                 }
             }
@@ -4115,7 +4116,7 @@ impl Tabular {
                         "trigger" => format!("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = '{}'", database_name),
                         "event" => format!("SELECT event_name FROM information_schema.events WHERE event_schema = '{}'", database_name),
                         _ => {
-                            println!("Unsupported table type: {}", table_type);
+                            debug!("Unsupported table type: {}", table_type);
                             return None;
                         }
                     };
@@ -4130,13 +4131,13 @@ impl Tabular {
                             Some(items)
                         },
                         Err(e) => {
-                            println!("Error querying MySQL {} from database {}: {}", table_type, database_name, e);
+                            debug!("Error querying MySQL {} from database {}: {}", table_type, database_name, e);
                             None
                         }
                     }
                 },
                 _ => {
-                    println!("Wrong pool type for MySQL connection");
+                    debug!("Wrong pool type for MySQL connection");
                     None
                 }
             }
@@ -4158,7 +4159,7 @@ impl Tabular {
                         "table" => "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                         "view" => "SELECT name FROM sqlite_master WHERE type='view'",
                         _ => {
-                            println!("Unsupported table type for SQLite: {}", table_type);
+                            debug!("Unsupported table type for SQLite: {}", table_type);
                             return None;
                         }
                     };
@@ -4173,13 +4174,13 @@ impl Tabular {
                             Some(items)
                         },
                         Err(e) => {
-                            println!("Error querying SQLite {} from database: {}", table_type, e);
+                            debug!("Error querying SQLite {} from database: {}", table_type, e);
                             None
                         }
                     }
                 },
                 _ => {
-                    println!("Wrong pool type for SQLite connection");
+                    debug!("Wrong pool type for SQLite connection");
                     None
                 }
             }
@@ -4214,7 +4215,7 @@ impl Tabular {
                                                 Some(sections)
                                             },
                                             Err(e) => {
-                                                println!("Error getting Redis INFO: {}", e);
+                                                debug!("Error getting Redis INFO: {}", e);
                                                 None
                                             }
                                         }
@@ -4232,7 +4233,7 @@ impl Tabular {
                                                 match redis::cmd("SCAN").arg(0).arg("COUNT").arg(100).query_async::<_, Vec<String>>(&mut conn).await {
                                                     Ok(keys) => Some(keys),
                                                     Err(e) => {
-                                                        println!("Error scanning Redis keys: {}", e);
+                                                        debug!("Error scanning Redis keys: {}", e);
                                                         Some(vec!["keys".to_string()]) // Return generic "keys" entry
                                                     }
                                                 }
@@ -4247,13 +4248,13 @@ impl Tabular {
                                     }
                                 },
                                 _ => {
-                                    println!("Unsupported Redis table type: {}", table_type);
+                                    debug!("Unsupported Redis table type: {}", table_type);
                                     None
                                 }
                             }
                 },
                 _ => {
-                    println!("Wrong pool type for Redis connection");
+                    debug!("Wrong pool type for Redis connection");
                     None
                 }
             }
@@ -4300,13 +4301,13 @@ impl Tabular {
                                     Some(columns)
                                 },
                                 Err(e) => {
-                                    println!("Error querying MySQL columns for table {}: {}", table_name, e);
+                                    debug!("Error querying MySQL columns for table {}: {}", table_name, e);
                                     None
                                 }
                             }
                         },
                         Err(e) => {
-                            println!("Error connecting to MySQL database: {}", e);
+                            debug!("Error connecting to MySQL database: {}", e);
                             None
                         }
                     }
@@ -4334,13 +4335,13 @@ impl Tabular {
                                     Some(columns)
                                 },
                                 Err(e) => {
-                                    println!("Error querying SQLite columns for table {}: {}", table_name, e);
+                                    debug!("Error querying SQLite columns for table {}: {}", table_name, e);
                                     None
                                 }
                             }
                         },
                         Err(e) => {
-                            println!("Error connecting to SQLite database: {}", e);
+                            debug!("Error connecting to SQLite database: {}", e);
                             None
                         }
                     }
@@ -4370,13 +4371,13 @@ impl Tabular {
                                     Some(columns)
                                 },
                                 Err(e) => {
-                                    println!("Error querying PostgreSQL columns for table {}: {}", table_name, e);
+                                    debug!("Error querying PostgreSQL columns for table {}: {}", table_name, e);
                                     None
                                 }
                             }
                         },
                         Err(e) => {
-                            println!("Error connecting to PostgreSQL database: {}", e);
+                            debug!("Error connecting to PostgreSQL database: {}", e);
                             None
                         }
                     }
@@ -4397,7 +4398,7 @@ impl Tabular {
 
     fn load_mysql_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
 
-        println!("Loading MySQL structure for connection ID: {}", connection_id);
+        debug!("Loading MySQL structure for connection ID: {}", connection_id);
         
         // Since we can't use block_on in an async context, we'll create a simple structure
         // and populate it with cached data or show a loading message
@@ -4499,7 +4500,7 @@ impl Tabular {
     fn load_redis_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
         // Check if we have cached databases
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
-            println!("🔍 Found cached Redis databases: {:?}", databases);
+            debug!("🔍 Found cached Redis databases: {:?}", databases);
             if !databases.is_empty() {
                 self.build_redis_structure_from_cache(connection_id, node, &databases);
                 node.is_loaded = true;
@@ -4507,14 +4508,14 @@ impl Tabular {
             }
         }
         
-        println!("🔄 No cached Redis databases found, fetching from server...");
+        debug!("🔄 No cached Redis databases found, fetching from server...");
         
         // Fetch fresh data from Redis server
         self.fetch_and_cache_connection_data(connection_id);
         
         // Try again to get from cache after fetching
         if let Some(databases) = self.get_databases_from_cache(connection_id) {
-            println!("✅ Successfully loaded Redis databases from server: {:?}", databases);
+            debug!("✅ Successfully loaded Redis databases from server: {:?}", databases);
             if !databases.is_empty() {
                 self.build_redis_structure_from_cache(connection_id, node, &databases);
                 node.is_loaded = true;
@@ -4562,7 +4563,7 @@ impl Tabular {
             
             node.is_loaded = true;
         } else {
-            println!("ERROR: Connection with ID {} not found!", connection_id);
+            debug!("ERROR: Connection with ID {} not found!", connection_id);
         }
     }
 
@@ -4579,7 +4580,7 @@ impl Tabular {
             models::enums::NodeType::TriggersFolder => "trigger",
             models::enums::NodeType::EventsFolder => "event",
             _ => {
-                println!("Unsupported folder type: {:?}", folder_type);
+                debug!("Unsupported folder type: {:?}", folder_type);
                 return;
             }
         };
@@ -4611,7 +4612,7 @@ impl Tabular {
         
         // If cache is empty, fetch from actual database        
         if let Some(real_items) = self.fetch_tables_from_mysql_connection(connection_id, database_name, table_type) {
-            println!("Successfully fetched {} {} from MySQL database", real_items.len(), table_type);
+            debug!("Successfully fetched {} {} from MySQL database", real_items.len(), table_type);
             
             // Save to cache for future use
             let table_data: Vec<(String, String)> = real_items.iter().map(|name| (name.clone(), table_type.to_string())).collect();
@@ -4637,7 +4638,7 @@ impl Tabular {
             node.children = child_nodes;
         } else {
             // If database fetch fails, add sample data as fallback
-            println!("Failed to fetch from MySQL, using sample {} data", table_type);
+            debug!("Failed to fetch from MySQL, using sample {} data", table_type);
             
             let sample_items = match folder_type {
                 models::enums::NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string()],
@@ -4669,7 +4670,7 @@ impl Tabular {
             node.children = child_nodes;
         }
         
-        println!("Loaded {} {} items for MySQL", node.children.len(), table_type);
+        debug!("Loaded {} {} items for MySQL", node.children.len(), table_type);
     }
 
     fn load_postgresql_folder_content(&mut self, _connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, _folder_type: models::enums::NodeType) {
@@ -4678,7 +4679,7 @@ impl Tabular {
     }
 
     fn load_sqlite_folder_content(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
-        println!("Loading {:?} content for SQLite", folder_type);
+        debug!("Loading {:?} content for SQLite", folder_type);
         
         // Try to get from cache first
         let table_type = match folder_type {
@@ -4693,7 +4694,7 @@ impl Tabular {
         
         if let Some(cached_items) = cache_data::get_tables_from_cache(self, connection_id, "main", table_type) {
             if !cached_items.is_empty() {
-                println!("Loading {} {} from cache for SQLite", cached_items.len(), table_type);
+                debug!("Loading {} {} from cache for SQLite", cached_items.len(), table_type);
                 
                 node.children = cached_items.into_iter().map(|item_name| {
                     let node_type = match folder_type {
@@ -4714,10 +4715,10 @@ impl Tabular {
         }
         
         // If cache is empty, fetch from actual SQLite database
-        println!("Cache miss, fetching {} from actual SQLite database", table_type);
+        debug!("Cache miss, fetching {} from actual SQLite database", table_type);
         
         if let Some(real_items) = self.fetch_tables_from_sqlite_connection(connection_id, table_type) {
-            println!("Successfully fetched {} {} from SQLite database", real_items.len(), table_type);
+            debug!("Successfully fetched {} {} from SQLite database", real_items.len(), table_type);
             
             // Save to cache for future use
             let table_data: Vec<(String, String)> = real_items.iter().map(|name| (name.clone(), table_type.to_string())).collect();
@@ -4741,7 +4742,7 @@ impl Tabular {
             node.children = child_nodes;
         } else {
             // If database fetch fails, add sample data as fallback
-            println!("Failed to fetch from SQLite, using sample {} data", table_type);
+            debug!("Failed to fetch from SQLite, using sample {} data", table_type);
             
             let sample_items = match folder_type {
                 models::enums::NodeType::TablesFolder => vec!["users".to_string(), "products".to_string(), "orders".to_string(), "categories".to_string()],
@@ -4764,11 +4765,11 @@ impl Tabular {
             }).collect();
         }
         
-        println!("Loaded {} items into {:?} folder for SQLite", node.children.len(), folder_type);
+        debug!("Loaded {} items into {:?} folder for SQLite", node.children.len(), folder_type);
     }
 
     fn load_redis_folder_content(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {
-        println!("Loading {:?} content for Redis", folder_type);
+        debug!("Loading {:?} content for Redis", folder_type);
         
         // Redis doesn't have traditional folder structures like SQL databases
         // We'll create a simplified structure based on Redis concepts
@@ -4819,7 +4820,7 @@ impl Tabular {
             }
         }
         
-        println!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
+        debug!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
     }
 
     fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &models::structs::ConnectionConfig, database_name: &str) -> Vec<models::structs::TreeNode> {
@@ -4910,19 +4911,19 @@ impl Tabular {
 
     // Pagination methods
     pub fn update_pagination_data(&mut self, all_data: Vec<Vec<String>>) {
-        println!("=== UPDATE_PAGINATION_DATA DEBUG ===");
-        println!("Received data rows: {}", all_data.len());
+        debug!("=== UPDATE_PAGINATION_DATA DEBUG ===");
+        debug!("Received data rows: {}", all_data.len());
         if !all_data.is_empty() {
-            println!("First row sample: {:?}", &all_data[0]);
+            debug!("First row sample: {:?}", &all_data[0]);
         }
         
         self.all_table_data = all_data;
         self.total_rows = self.all_table_data.len();
         self.current_page = 0; // Reset to first page
         
-        println!("After assignment - all_table_data.len(): {}", self.all_table_data.len());
-        println!("After assignment - total_rows: {}", self.total_rows);
-        println!("====================================");
+        debug!("After assignment - all_table_data.len(): {}", self.all_table_data.len());
+        debug!("After assignment - total_rows: {}", self.total_rows);
+        debug!("====================================");
         
         self.update_current_page_data();
         
@@ -5053,7 +5054,7 @@ impl Tabular {
                 self.items_tree = items_tree;
             } else {
                 // Tree was refreshed inside render_tree, keep the new tree
-                println!("Tree was refreshed inside render_tree, keeping the new tree");
+                debug!("Tree was refreshed inside render_tree, keeping the new tree");
             }
         }
     }
@@ -5382,7 +5383,7 @@ impl Tabular {
             
             // Search for the key in this folder's children
             for child in &node.children {
-                println!("🔍 Checking child: '{}' (type: {:?})", child.name, child.node_type);
+                debug!("🔍 Checking child: '{}' (type: {:?})", child.name, child.node_type);
                 if child.node_type == models::enums::NodeType::Table && child.name == key_name {
                     if let Some(db_name) = &child.database_name {
                         return Some((db_name.clone(), folder_type.to_string()));
@@ -5463,7 +5464,7 @@ impl Tabular {
 
         // If tab has never executed a query and has no connection, show connection selector
         if tab_never_executed && connection_id.is_none() {
-            println!("First-time query execution - showing connection selector");
+            debug!("First-time query execution - showing connection selector");
             self.pending_query = query;
             self.auto_execute_after_connection = true;
             self.show_connection_selector = true;
@@ -5472,13 +5473,13 @@ impl Tabular {
 
         // Check if we have an active connection
         if let Some(connection_id) = connection_id {
-            println!("=== EXECUTING QUERY ===");
-            println!("Connection ID: {}", connection_id);
-            println!("Query: {}", query);
+            debug!("=== EXECUTING QUERY ===");
+            debug!("Connection ID: {}", connection_id);
+            debug!("Query: {}", query);
             
             let result = connection::execute_query_with_connection(self, connection_id, query.clone());
             
-            println!("Query execution result: {:?}", result.is_some());
+            debug!("Query execution result: {:?}", result.is_some());
             
             // Mark tab as having executed a query (regardless of success/failure)
             if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
@@ -5486,11 +5487,11 @@ impl Tabular {
             }
             
             if let Some((headers, data)) = result {
-                println!("=== QUERY RESULT SUCCESS ===");
-                println!("Headers received: {} - {:?}", headers.len(), headers);
-                println!("Data rows received: {}", data.len());
+                debug!("=== QUERY RESULT SUCCESS ===");
+                debug!("Headers received: {} - {:?}", headers.len(), headers);
+                debug!("Data rows received: {}", data.len());
                 if !data.is_empty() {
-                    println!("First row sample: {:?}", &data[0]);
+                    debug!("First row sample: {:?}", &data[0]);
                 }
                 
                 self.current_table_headers = headers;
@@ -5504,9 +5505,9 @@ impl Tabular {
                     self.current_table_name = format!("Query Results ({} total rows, showing page {} of {})", 
                         self.total_rows, self.current_page + 1, self.get_total_pages());
                 }
-                println!("After update_pagination_data - total_rows: {}, all_table_data.len(): {}", 
+                debug!("After update_pagination_data - total_rows: {}, all_table_data.len(): {}", 
                          self.total_rows, self.all_table_data.len());
-                println!("============================");
+                debug!("============================");
                 
                 // Save query to history after successful execution
                 self.save_query_to_history(&query, connection_id);
@@ -5527,7 +5528,7 @@ impl Tabular {
                 self.total_rows = 0;
             } else {
                 // For tabs that have executed before but lost connection, show connection selector
-                println!("No connection available for query execution - showing connection selector");
+                debug!("No connection available for query execution - showing connection selector");
                 self.pending_query = query.clone();
                 self.show_connection_selector = true;
                 self.auto_execute_after_connection = true;
@@ -6189,7 +6190,7 @@ impl Tabular {
         self.update_current_page_data();
         
         let sort_direction = if ascending { "^ ascending" } else { "v descending" };
-        println!("✓ Sorted table by column '{}' in {} order ({} total rows)", 
+        debug!("✓ Sorted table by column '{}' in {} order ({} total rows)", 
             self.current_table_headers[column_index], 
             sort_direction,
             self.all_table_data.len()
@@ -6221,7 +6222,7 @@ impl Tabular {
                         history_items
                     }
                     Err(e) => {
-                        println!("Failed to load query history: {}", e);
+                        debug!("Failed to load query history: {}", e);
                         Vec::new()
                     }
                 }
@@ -6399,7 +6400,7 @@ impl Tabular {
         if !self.advanced_editor.find_text.is_empty() {
             if let Some(_pos) = self.editor_text.find(&self.advanced_editor.find_text) {
                 // In a full implementation, you would scroll to and highlight the match
-                println!("Found match for: {}", self.advanced_editor.find_text);
+                debug!("Found match for: {}", self.advanced_editor.find_text);
             }
         }
     }
@@ -6597,7 +6598,7 @@ impl Tabular {
                 self.show_command_palette = false;
             }
             _ => {
-                println!("Unknown command: {}", command);
+                debug!("Unknown command: {}", command);
                 self.show_command_palette = false;
             }
         }
@@ -6711,7 +6712,7 @@ impl App for Tabular {
         
         // Periodic cleanup of stale connection pools (every 10 minutes to reduce overhead)
         if self.last_cleanup_time.elapsed().as_secs() > 600 { // 10 minutes instead of 5
-            println!("🧹 Performing periodic connection pool cleanup");
+            debug!("🧹 Performing periodic connection pool cleanup");
             
             // Clean up connections that might be stale
             let mut connections_to_refresh: Vec<i64> = self.connection_pools.keys().copied().collect();
@@ -6810,7 +6811,7 @@ impl App for Tabular {
                         self.refreshing_connections.remove(&connection_id);
                         
                         if success {
-                            println!("Background refresh completed successfully for connection {}", connection_id);
+                            debug!("Background refresh completed successfully for connection {}", connection_id);
                             // Re-expand connection node to show fresh data
                             for node in &mut self.items_tree {
                                 if node.node_type == models::enums::NodeType::Connection && node.connection_id == Some(connection_id) {
@@ -6822,7 +6823,7 @@ impl App for Tabular {
                             // Request UI repaint to show updated data
                             ctx.request_repaint();
                         } else {
-                            println!("Background refresh failed for connection {}", connection_id);
+                            debug!("Background refresh failed for connection {}", connection_id);
                         }
                     }
                 }
@@ -7212,7 +7213,7 @@ impl App for Tabular {
                                         (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::S)
                                     }) {
                                         if let Err(err) = self.save_current_tab() {
-                                            println!("Failed to save: {}", err);
+                                            error!("Failed to save: {}", err);
                                         }
                                     }
                                 });
@@ -7362,7 +7363,7 @@ impl App for Tabular {
                                 self.current_page = 0;
                                 
                                 if let Some(db) = &db_name {
-                                    println!("Switched to database: {}", db);
+                                    debug!("Switched to database: {}", db);
                                 }
                             }
                             

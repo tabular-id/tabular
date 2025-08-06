@@ -1,4 +1,6 @@
 use std::path::Path;
+use log::{debug};
+
 
 pub fn export_to_csv(
     all_table_data: &[Vec<String>],
@@ -14,11 +16,11 @@ pub fn export_to_csv(
     
     if let Some(path) = file_dialog.save_file() {
         match write_csv_file(&path, all_table_data, current_table_headers) {
-            Ok(_) => println!("✓ Successfully exported {} rows to CSV: {:?}", all_table_data.len(), path),
-            Err(e) => eprintln!("❌ Failed to export CSV: {}", e),
+            Ok(_) => debug!("✓ Successfully exported {} rows to CSV: {:?}", all_table_data.len(), path),
+            Err(e) => debug!("❌ Failed to export CSV: {}", e),
         }
     } else {
-        println!("CSV file dialog was cancelled");
+        debug!("CSV file dialog was cancelled");
     }
 }
 
@@ -55,8 +57,8 @@ pub fn export_to_xlsx(
 
     if let Some(path) = file_dialog.save_file() {
         match write_xlsx_file(&path, all_table_data, current_table_headers) {
-            Ok(_) => println!("✓ Successfully exported {} rows to XLSX: {:?}", all_table_data.len(), path),
-            Err(e) => eprintln!("❌ Failed to export XLSX: {}", e),
+            Ok(_) => debug!("✓ Successfully exported {} rows to XLSX: {:?}", all_table_data.len(), path),
+            Err(e) => debug!("❌ Failed to export XLSX: {}", e),
         }
     }
 }

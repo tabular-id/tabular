@@ -6,6 +6,8 @@ use eframe::egui;
 use sqlx::{Row, Column, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
 use std::sync::Arc;
 use redis::{Client, aio::ConnectionManager};
+use log::{debug};
+
 
 
 pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Context) {
@@ -90,7 +92,7 @@ pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Cont
                                    None
                             };
                             
-                            println!("Connection selector: Set connection '{}' and database '{}' for active tab", 
+                            debug!("Connection selector: Set connection '{}' and database '{}' for active tab", 
                                    connection_name, 
                                    database.as_deref().unwrap_or("None"));
                             
@@ -146,28 +148,28 @@ pub(crate) fn render_connection_selector(tabular: &mut Tabular, ctx: &egui::Cont
 
 
 pub(crate) fn execute_query_with_connection(tabular: &mut Tabular, connection_id: i64, query: String) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-       println!("Query execution requested for connection {} with query: {}", connection_id, query);
+       debug!("Query execution requested for connection {} with query: {}", connection_id, query);
        
        if let Some(connection) = tabular.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
        execute_table_query_sync(tabular, connection_id, &connection, &query)
        } else {
-       println!("Connection not found for ID: {}", connection_id);
+       debug!("Connection not found for ID: {}", connection_id);
        None
        }
 }
 
 pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64, _connection: &models::structs::ConnectionConfig, query: &str) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-       println!("Executing query synchronously: {}", query);
+       debug!("Executing query synchronously: {}", query);
        
        // Use the shared runtime from tabular instead of creating a new one
        let runtime = match &tabular.runtime {
            Some(rt) => rt.clone(),
            None => {
-               println!("No runtime available, creating temporary one");
+               debug!("No runtime available, creating temporary one");
                match tokio::runtime::Runtime::new() {
                    Ok(rt) => Arc::new(rt),
                    Err(e) => {
-                       println!("Failed to create runtime: {}", e);
+                       debug!("Failed to create runtime: {}", e);
                        return None;
                    }
                }
@@ -179,7 +181,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
               Some(pool) => {
               match pool {
                      models::enums::DatabasePool::MySQL(mut mysql_pool) => {
-                     println!("Executing MySQL query: {}", query);
+                     debug!("Executing MySQL query: {}", query);
                      
                      // Split query by semicolons to handle multi-statement queries
                      let statements: Vec<&str> = query.split(';')
@@ -187,7 +189,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             .filter(|s| !s.is_empty())
                             .collect();
                      
-                     println!("Found {} SQL statements to execute", statements.len());
+                     debug!("Found {} SQL statements to execute", statements.len());
                      
                      let mut final_headers = Vec::new();
                      let mut final_data = Vec::new();
@@ -198,28 +200,28 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      
                      while attempts < max_attempts {
                             attempts += 1;
-                            println!("Query attempt {} of {}", attempts, max_attempts);
+                            debug!("Query attempt {} of {}", attempts, max_attempts);
                             
                             let mut execution_success = true;
                             let mut error_message = String::new();
                             
                             // Execute each statement separately
                             for (i, statement) in statements.iter().enumerate() {
-                                   println!("Executing statement {}: {}", i + 1, statement);
+                                   debug!("Executing statement {}: {}", i + 1, statement);
                                    
                                    // Check if this is a USE statement
                                    let statement_upper = statement.trim().to_uppercase();
                                    if statement_upper.starts_with("USE") {
                                           // For USE statements, skip execution as they're not needed with connection pools
                                           // The database context is already set in the connection string
-                                          println!("Skipping USE statement as database context is handled by connection pool");
+                                          debug!("Skipping USE statement as database context is handled by connection pool");
                                           continue;
                                    }
                                    
                                    // Execute other statements normally
                                    match sqlx::query(statement).fetch_all(mysql_pool.as_ref()).await {
                                           Ok(rows) => {
-                                          println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                          debug!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
                                           
                                           // For the last statement that returns data, store the results
                                           if !rows.is_empty() && i == statements.len() - 1 {
@@ -234,7 +236,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                                           },
                                           Err(e) => {
                                           let error_msg = e.to_string();
-                                          println!("Statement {} failed: {}", i + 1, error_msg);
+                                          debug!("Statement {} failed: {}", i + 1, error_msg);
                                           execution_success = false;
                                           error_message = error_msg;
                                           break;
@@ -243,14 +245,14 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             }
                             
                             if execution_success {
-                                   println!("All statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
+                                   debug!("All statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
                                    return Some((final_headers, final_data));
                             } else {
-                                   println!("MySQL query failed on attempt {}: {}", attempts, error_message);
+                                   debug!("MySQL query failed on attempt {}: {}", attempts, error_message);
                                    
                                    // If it's a connection timeout/pool error and not the last attempt
                                    if (error_message.contains("timed out") || error_message.contains("pool")) && attempts < max_attempts {
-                                          println!("Removing cached pool and retrying...");
+                                          debug!("Removing cached pool and retrying...");
                                           tabular.connection_pools.remove(&connection_id);
                                           
                                           // Try to recreate the pool for next attempt
@@ -279,7 +281,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      ))
                      },
                      models::enums::DatabasePool::PostgreSQL(pg_pool) => {
-                     println!("Executing PostgreSQL query: {}", query);
+                     debug!("Executing PostgreSQL query: {}", query);
                      
                      // Split query by semicolons to handle multi-statement queries
                      let statements: Vec<&str> = query.split(';')
@@ -287,18 +289,18 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             .filter(|s| !s.is_empty())
                             .collect();
                      
-                     println!("Found {} SQL statements to execute", statements.len());
+                     debug!("Found {} SQL statements to execute", statements.len());
                      
                      let mut final_headers = Vec::new();
                      let mut final_data = Vec::new();
                      
                      // Execute each statement separately
                      for (i, statement) in statements.iter().enumerate() {
-                            println!("Executing PostgreSQL statement {}: {}", i + 1, statement);
+                            debug!("Executing PostgreSQL statement {}: {}", i + 1, statement);
                             
                             match sqlx::query(statement).fetch_all(pg_pool.as_ref()).await {
                                    Ok(rows) => {
-                                   println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                   debug!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
                                    
                                    // For the last statement that returns data, store the results
                                    if !rows.is_empty() && i == statements.len() - 1 {
@@ -318,7 +320,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                                    }
                                    },
                                    Err(e) => {
-                                   println!("PostgreSQL statement {} failed: {}", i + 1, e);
+                                   debug!("PostgreSQL statement {} failed: {}", i + 1, e);
                                    return Some((
                                           vec!["Error".to_string()],
                                           vec![vec![format!("Query error: {}", e)]]
@@ -330,7 +332,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                      Some((final_headers, final_data))
                      },
                      models::enums::DatabasePool::SQLite(sqlite_pool) => {
-                     println!("Executing SQLite query: {}", query);
+                     debug!("Executing SQLite query: {}", query);
                      
                      // Split query by semicolons to handle multi-statement queries
                      let statements: Vec<&str> = query.split(';')
@@ -338,18 +340,18 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             .filter(|s| !s.is_empty())
                             .collect();
                      
-                     println!("Found {} SQL statements to execute", statements.len());
+                     debug!("Found {} SQL statements to execute", statements.len());
                      
                      let mut final_headers = Vec::new();
                      let mut final_data = Vec::new();
                      
                      // Execute each statement separately
                      for (i, statement) in statements.iter().enumerate() {
-                            println!("Executing SQLite statement {}: {}", i + 1, statement);
+                            debug!("Executing SQLite statement {}: {}", i + 1, statement);
                             
                             match sqlx::query(statement).fetch_all(sqlite_pool.as_ref()).await {
                                    Ok(rows) => {
-                                   println!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
+                                   debug!("Statement {} executed successfully, {} rows returned", i + 1, rows.len());
                                    
                                    // For the last statement that returns data, store the results
                                    if !rows.is_empty() && i == statements.len() - 1 {
@@ -362,7 +364,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                                    }
                                    },
                                    Err(e) => {
-                                   println!("SQLite statement {} failed: {}", i + 1, e);
+                                   debug!("SQLite statement {} failed: {}", i + 1, e);
                                    return Some((
                                           vec!["Error".to_string()],
                                           vec![vec![format!("Query error: {}", e)]]
@@ -371,11 +373,11 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                             }
                      }
                      
-                     println!("All SQLite statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
+                     debug!("All SQLite statements executed successfully: {} headers, {} rows", final_headers.len(), final_data.len());
                      Some((final_headers, final_data))
                      },
                      models::enums::DatabasePool::Redis(redis_manager) => {
-                     println!("Executing Redis command: {}", query);
+                     debug!("Executing Redis command: {}", query);
                      
                      // For Redis, we need to handle commands differently
                      // Redis doesn't have SQL queries, so we'll treat the query as a Redis command
@@ -639,7 +641,7 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
               }
               },
               None => {
-              println!("Failed to get connection pool for connection_id: {}", connection_id);
+              debug!("Failed to get connection pool for connection_id: {}", connection_id);
               Some((
                      vec!["Error".to_string()],
                      vec![vec!["Failed to connect to database".to_string()]]
@@ -654,11 +656,11 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
 pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connection_id: i64) -> Option<models::enums::DatabasePool> {
        // First check if we already have a cached connection pool for this connection
        if let Some(cached_pool) = tabular.connection_pools.get(&connection_id) {
-       println!("✅ Using cached connection pool for connection {}", connection_id);
+       debug!("✅ Using cached connection pool for connection {}", connection_id);
        return Some(cached_pool.clone());
        }
 
-       println!("🔄 Creating new connection pool for connection {}", connection_id);
+       debug!("🔄 Creating new connection pool for connection {}", connection_id);
 
        // If not cached, create a new connection pool
        if let Some(connection) = tabular.connections.iter().find(|c| c.id == Some(connection_id)) {
@@ -673,7 +675,7 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
 
               // ping the host first
               if !helpers::ping_host(&connection.host) {
-                     println!("❌ Cannot ping host: {}", connection.host);
+                     debug!("❌ Cannot ping host: {}", connection.host);
                      return None;
               }
               
@@ -698,11 +700,11 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      Ok(pool) => {
                      let database_pool = models::enums::DatabasePool::MySQL(Arc::new(pool));
                      tabular.connection_pools.insert(connection_id, database_pool.clone());
-                     println!("✅ Created MySQL connection pool for connection {}", connection_id);
+                     debug!("✅ Created MySQL connection pool for connection {}", connection_id);
                      Some(database_pool)
                      },
                      Err(e) => {
-                     println!("❌ Failed to create MySQL pool for connection {}: {}", connection_id, e);
+                     debug!("❌ Failed to create MySQL pool for connection {}: {}", connection_id, e);
                      None
                      }
               }
@@ -731,7 +733,7 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      Some(database_pool)
                      },
                      Err(e) => {
-                     println!("Failed to create PostgreSQL pool: {}", e);
+                     debug!("Failed to create PostgreSQL pool: {}", e);
                      None
                      }
               }
@@ -757,7 +759,7 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      Some(database_pool)
                      },
                      Err(e) => {
-                     println!("Failed to create SQLite pool: {}", e);
+                     debug!("Failed to create SQLite pool: {}", e);
                      None
                      }
               }
@@ -769,7 +771,7 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                      format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
               };
               
-              println!("Creating new Redis connection manager for: {}", connection.name);
+              debug!("Creating new Redis connection manager for: {}", connection.name);
               match Client::open(connection_string) {
                      Ok(client) => {
                      match ConnectionManager::new(client).await {
@@ -779,13 +781,13 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
                                    Some(database_pool)
                             },
                             Err(e) => {
-                                   println!("Failed to create Redis connection manager: {}", e);
+                                   debug!("Failed to create Redis connection manager: {}", e);
                                    None
                             }
                      }
                      }
                      Err(e) => {
-                     println!("Failed to create Redis client: {}", e);
+                     debug!("Failed to create Redis client: {}", e);
                      None
                      }
               }
@@ -798,6 +800,6 @@ pub(crate) async fn get_or_create_connection_pool(tabular: &mut Tabular, connect
 
 // Function to cleanup and recreate connection pools
 pub(crate) fn cleanup_connection_pool(tabular: &mut Tabular, connection_id: i64) {
-       println!("🧹 Cleaning up connection pool for connection {}", connection_id);
+       debug!("🧹 Cleaning up connection pool for connection {}", connection_id);
        tabular.connection_pools.remove(&connection_id);
 }
