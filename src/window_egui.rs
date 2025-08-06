@@ -1,7 +1,7 @@
 
 use eframe::{egui, App, Frame};
 use sqlx::{SqlitePool, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
-use redis::{Client, aio::ConnectionManager};
+use redis::{Client};
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,8 +10,6 @@ use log::{debug, info, warn, error};
 
 use crate::{
     cache_data, directory, 
-    driver_mysql, driver_postgres, 
-    driver_redis, driver_sqlite, 
     export, helpers, models, modules,
     connection
 };
@@ -272,7 +270,7 @@ impl Tabular {
                 match task {
                     models::enums::BackgroundTask::RefreshConnection { connection_id } => {
                         let success = rt.block_on(async {
-                            Self::refresh_connection_background_async(
+                            connection::refresh_connection_background_async(
                                 connection_id,
                                 &db_pool
                             ).await
@@ -287,206 +285,6 @@ impl Tabular {
             }
         });
     }
-
-    async fn refresh_connection_background_async(
-        connection_id: i64,
-        db_pool: &Option<Arc<SqlitePool>>,
-    ) -> bool {
-
-        debug!("Refreshing connection with ID: {}", connection_id);
-
-        // Get connection from database
-        if let Some(cache_pool_arc) = db_pool {
-            let connection_result = sqlx::query_as::<_, (i64, String, String, String, String, String, String, String)>(
-                "SELECT id, name, host, port, username, password, database_name, connection_type FROM connections WHERE id = ?"
-            )
-            .bind(connection_id)
-            .fetch_optional(cache_pool_arc.as_ref())
-            .await;
-            
-            if let Ok(Some((id, name, host, port, username, password, database_name, connection_type))) = connection_result {
-                let connection = models::structs::ConnectionConfig {
-                    id: Some(id),
-                    name,
-                    host,
-                    port,
-                    username,
-                    password,
-                    database: database_name,
-                    connection_type: match connection_type.as_str() {
-                        "MySQL" => models::enums::DatabaseType::MySQL,
-                        "PostgreSQL" => models::enums::DatabaseType::PostgreSQL,
-                        "Redis" => models::enums::DatabaseType::Redis,
-                        _ => models::enums::DatabaseType::SQLite,
-                    },
-                    folder: None, // Will be loaded from database later
-                };
-                
-                // Clear cache
-                let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(cache_pool_arc.as_ref())
-                    .await;
-                
-                let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(cache_pool_arc.as_ref())
-                    .await;
-                
-                let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(cache_pool_arc.as_ref())
-                    .await;
-
-                // Create new connection pool
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(30), // 30 second timeout
-                    Self::create_database_pool(&connection)
-                ).await {
-                    Ok(Some(new_pool)) => {
-                        Self::fetch_and_cache_all_data(connection_id, &connection, &new_pool, cache_pool_arc.as_ref()).await
-                    }
-                    Ok(None) => {
-                        false
-                    }
-                    Err(_) => {
-                        false
-                    }
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    async fn create_database_pool(connection: &models::structs::ConnectionConfig) -> Option<models::enums::DatabasePool> {
-        match connection.connection_type {
-            models::enums::DatabaseType::MySQL => {
-                let encoded_username = modules::url_encode(&connection.username);
-                let encoded_password = modules::url_encode(&connection.password);
-                let connection_string = format!(
-                    "mysql://{}:{}@{}:{}/{}",
-                    encoded_username, encoded_password, connection.host, connection.port, connection.database
-                );
-                
-                match MySqlPoolOptions::new()
-                    .max_connections(3) // Reduced from 5 to 3
-                    .min_connections(1)
-                    .acquire_timeout(std::time::Duration::from_secs(10))
-                    .idle_timeout(std::time::Duration::from_secs(300))
-                    .connect(&connection_string)
-                    .await
-                {
-                    Ok(pool) => {
-                        Some(models::enums::DatabasePool::MySQL(Arc::new(pool)))
-                    }
-                    Err(_e) => {
-                        None
-                    }
-                }
-            }
-            models::enums::DatabaseType::PostgreSQL => {
-                let connection_string = format!(
-                    "postgresql://{}:{}@{}:{}/{}",
-                    connection.username, connection.password, connection.host, connection.port, connection.database
-                );
-                
-                match PgPoolOptions::new()
-                    .max_connections(3)
-                    .min_connections(1)
-                    .acquire_timeout(std::time::Duration::from_secs(10))
-                    .idle_timeout(std::time::Duration::from_secs(300))
-                    .connect(&connection_string)
-                    .await
-                {
-                    Ok(pool) => {
-                        Some(models::enums::DatabasePool::PostgreSQL(Arc::new(pool)))
-                    }
-                    Err(_e) => {
-                        None
-                    }
-                }
-            }
-            models::enums::DatabaseType::SQLite => {
-                let connection_string = format!("sqlite:{}", connection.host);
-                
-                
-                match SqlitePoolOptions::new()
-                    .max_connections(3)
-                    .min_connections(1)
-                    .acquire_timeout(std::time::Duration::from_secs(10))
-                    .idle_timeout(std::time::Duration::from_secs(300))
-                    .connect(&connection_string)
-                    .await
-                {
-                    Ok(pool) => {
-                        Some(models::enums::DatabasePool::SQLite(Arc::new(pool)))
-                    }
-                    Err(_e) => {
-                        None
-                    }
-                }
-            }
-            models::enums::DatabaseType::Redis => {
-                let connection_string = if connection.password.is_empty() {
-                    format!("redis://{}:{}", connection.host, connection.port)
-                } else {
-                    format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
-                };
-                
-                match Client::open(connection_string) {
-                    Ok(client) => {
-                        match ConnectionManager::new(client).await {
-                            Ok(manager) => Some(models::enums::DatabasePool::Redis(Arc::new(manager))),
-                            Err(_e) => None,
-                        }
-                    }
-                    Err(_e) => None,
-                }
-            }
-        }
-    }
-
-    async fn fetch_and_cache_all_data(
-        connection_id: i64,
-        connection: &models::structs::ConnectionConfig,
-        pool: &models::enums::DatabasePool,
-        cache_pool: &SqlitePool,
-    ) -> bool {
-        match &connection.connection_type {
-            models::enums::DatabaseType::MySQL => {
-                if let models::enums::DatabasePool::MySQL(mysql_pool) = pool {
-                    driver_mysql::fetch_mysql_data(connection_id, mysql_pool, cache_pool).await
-                } else {
-                    false
-                }
-            }
-            models::enums::DatabaseType::SQLite => {
-                if let models::enums::DatabasePool::SQLite(sqlite_pool) = pool {
-                    driver_sqlite::fetch_data(connection_id, sqlite_pool, cache_pool).await
-                } else {
-                    false
-                }
-            }
-            models::enums::DatabaseType::PostgreSQL => {
-                if let models::enums::DatabasePool::PostgreSQL(postgres_pool) = pool {
-                    driver_postgres::fetch_postgres_data(connection_id, postgres_pool, cache_pool).await
-                } else {
-                    false
-                }
-            }
-            models::enums::DatabaseType::Redis => {
-                if let models::enums::DatabasePool::Redis(redis_manager) = pool {
-                    driver_redis::fetch_redis_data(connection_id, redis_manager, cache_pool).await
-                } else {
-                    false
-                }
-            }
-        }
-    }
-
 
 
     fn initialize_database(&mut self) {
