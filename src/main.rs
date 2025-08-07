@@ -12,7 +12,6 @@ mod driver_postgres;
 mod driver_redis;
 mod directory;
 mod connection;
-mod autocomplete;
 
 fn main() -> Result<(), eframe::Error> {
     dotenv::dotenv().ok();
