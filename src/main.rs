@@ -12,11 +12,15 @@ mod driver_postgres;
 mod driver_redis;
 mod directory;
 mod connection;
+mod autocomplete;
 
 fn main() -> Result<(), eframe::Error> {
     dotenv::dotenv().ok();
-    // Initialize logger
-    env_logger::init();
+    // Initialize logger with filter to suppress winit debug logs
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .filter_module("tabular", log::LevelFilter::Debug)
+        .init();
     
     let mut options = eframe::NativeOptions::default();
     
