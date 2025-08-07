@@ -9,9 +9,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use log::{debug, info, warn, error};
 
 use crate::{
-    cache_data, directory, 
-    export, helpers, models, modules,
-    connection
+    cache_data, connection, directory, driver_mysql, driver_postgres, driver_redis, driver_sqlite, export, helpers, models, modules
 };
 
 
@@ -2839,147 +2837,6 @@ impl Tabular {
         
     }
 
-    // Cache functions for database structure
-    fn save_databases_to_cache(&self, connection_id: i64, databases: &[String]) {
-        for db_name in databases {
-            debug!("  - {}", db_name);
-        }
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let databases_clone = databases.to_vec();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            rt.block_on(async {
-                // Clear existing cache for this connection
-                let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(pool_clone.as_ref())
-                    .await;
-                
-                // Insert new database names
-                for db_name in databases_clone {
-                    let _ = sqlx::query("INSERT OR REPLACE INTO database_cache (connection_id, database_name) VALUES (?, ?)")
-                        .bind(connection_id)
-                        .bind(db_name)
-                        .execute(pool_clone.as_ref())
-                        .await;
-                }
-            });
-        }
-    }
-
-    fn get_databases_from_cache(&self, connection_id: i64) -> Option<Vec<String>> {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result = rt.block_on(async {
-                sqlx::query_as::<_, (String,)>("SELECT database_name FROM database_cache WHERE connection_id = ? ORDER BY database_name")
-                    .bind(connection_id)
-                    .fetch_all(pool_clone.as_ref())
-                    .await
-            });
-            
-            match result {
-                Ok(rows) => {
-                    let databases: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                    Some(databases)
-                },
-                Err(e) => {
-                    debug!("Error reading from cache: {}", e);
-                    None
-                }
-            }
-        } else {
-            debug!("No database pool available for cache lookup");
-            None
-        }
-    }
-
-    fn save_tables_to_cache(&self, connection_id: i64, database_name: &str, tables: &[(String, String)]) {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let tables_clone = tables.to_vec();
-            let database_name = database_name.to_string();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            rt.block_on(async {
-                // Clear existing cache for this database
-                let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ? AND database_name = ?")
-                    .bind(connection_id)
-                    .bind(&database_name)
-                    .execute(pool_clone.as_ref())
-                    .await;
-                
-                // Insert new table names with types
-                for (table_name, table_type) in tables_clone {
-                    let _ = sqlx::query("INSERT OR REPLACE INTO table_cache (connection_id, database_name, table_name, table_type) VALUES (?, ?, ?, ?)")
-                        .bind(connection_id)
-                        .bind(&database_name)
-                        .bind(table_name)
-                        .bind(table_type)
-                        .execute(pool_clone.as_ref())
-                        .await;
-                }
-            });
-        }
-    }
-
-    fn save_columns_to_cache(&self, connection_id: i64, database_name: &str, table_name: &str, columns: &[(String, String)]) {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let columns_clone = columns.to_vec();
-            let database_name = database_name.to_string();
-            let table_name = table_name.to_string();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            rt.block_on(async {
-                // Clear existing cache for this table
-                let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ? AND database_name = ? AND table_name = ?")
-                    .bind(connection_id)
-                    .bind(&database_name)
-                    .bind(&table_name)
-                    .execute(pool_clone.as_ref())
-                    .await;
-                
-                // Insert new column names with types
-                for (i, (column_name, data_type)) in columns_clone.iter().enumerate() {
-                    let _ = sqlx::query("INSERT OR REPLACE INTO column_cache (connection_id, database_name, table_name, column_name, data_type, ordinal_position) VALUES (?, ?, ?, ?, ?, ?)")
-                        .bind(connection_id)
-                        .bind(&database_name)
-                        .bind(&table_name)
-                        .bind(column_name)
-                        .bind(data_type)
-                        .bind(i as i64)
-                        .execute(pool_clone.as_ref())
-                        .await;
-                }
-            });
-        }
-    }
-
-    fn get_columns_from_cache(&self, connection_id: i64, database_name: &str, table_name: &str) -> Option<Vec<(String, String)>> {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result = rt.block_on(async {
-                sqlx::query_as::<_, (String, String)>("SELECT column_name, data_type FROM column_cache WHERE connection_id = ? AND database_name = ? AND table_name = ? ORDER BY ordinal_position")
-                    .bind(connection_id)
-                    .bind(database_name)
-                    .bind(table_name)
-                    .fetch_all(pool_clone.as_ref())
-                    .await
-            });
-            
-            match result {
-                Ok(rows) => Some(rows),
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
-    }
 
     fn find_connection_node_recursive(nodes: &mut [models::structs::TreeNode], connection_id: i64) -> Option<&mut models::structs::TreeNode> {
         for node in nodes.iter_mut() {
@@ -3028,96 +2885,17 @@ impl Tabular {
                 debug!("Failed to send background refresh task: {}", e);
                 // Fallback to synchronous refresh if background thread is not available
                 self.refreshing_connections.remove(&connection_id);
-                self.fetch_and_cache_connection_data(connection_id);
+                cache_data::fetch_and_cache_connection_data(self, connection_id);
             } else {
                 debug!("Background refresh task sent for connection {}", connection_id);
             }
         } else {
             // Fallback to synchronous refresh if background system is not initialized
             self.refreshing_connections.remove(&connection_id);
-            self.fetch_and_cache_connection_data(connection_id);
+            cache_data::fetch_and_cache_connection_data(self, connection_id);
         }
     }
 
-    fn fetch_and_cache_connection_data(&mut self, connection_id: i64) {
-        
-        // Clone connection info to avoid borrowing issues
-        let connection = if let Some(conn) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-            conn.clone()
-        } else {
-            debug!("Connection not found for ID: {}", connection_id);
-            return;
-        };
-        
-        // Fetch databases from server
-        let databases_result = self.fetch_databases_from_connection(connection_id);
-        
-        if let Some(databases) = databases_result {
-            
-            // Save databases to cache
-            self.save_databases_to_cache(connection_id, &databases);
-            
-            // For each database, fetch tables and columns
-            for database_name in &databases {
-                
-                // Fetch different types of tables based on database type
-                let table_types = match connection.connection_type {
-                    models::enums::DatabaseType::MySQL => vec!["table", "view", "procedure", "function", "trigger", "event"],
-                    models::enums::DatabaseType::PostgreSQL => vec!["table", "view"], // Add PostgreSQL support later
-                    models::enums::DatabaseType::SQLite => vec!["table", "view"],
-                    models::enums::DatabaseType::Redis => vec!["info_section", "redis_keys"], // Redis specific types
-                };
-                
-                let mut all_tables = Vec::new();
-                
-                for table_type in table_types {
-                    let tables_result = match connection.connection_type {
-                        models::enums::DatabaseType::MySQL => {
-                            self.fetch_tables_from_mysql_connection(connection_id, database_name, table_type)
-                        },
-                        models::enums::DatabaseType::SQLite => {
-                            self.fetch_tables_from_sqlite_connection(connection_id, table_type)
-                        },
-                        models::enums::DatabaseType::PostgreSQL => {
-                            // TODO: Add PostgreSQL support
-                            None
-                        },
-                        models::enums::DatabaseType::Redis => {
-                            self.fetch_tables_from_redis_connection(connection_id, database_name, table_type)
-                        },
-                    };
-                    
-                    if let Some(tables) = tables_result {
-                        for table_name in tables {
-                            all_tables.push((table_name, table_type.to_string()));
-                        }
-                    }
-                }
-                
-                if !all_tables.is_empty() {
-                    
-                    // Save tables to cache
-                    self.save_tables_to_cache(connection_id, database_name, &all_tables);
-                    
-                    // For each table, fetch columns
-                    for (table_name, table_type) in &all_tables {
-                        if table_type == "table" { // Only fetch columns for actual tables, not views/procedures
-
-                            let columns_result = self.fetch_columns_from_database(connection_id, database_name, table_name, &connection);
-                            
-                            if let Some(columns) = columns_result {                                
-                                // Save columns to cache
-                                self.save_columns_to_cache(connection_id, database_name, table_name, &columns);
-                            }
-                        }
-                    }
-                }
-            }
-            
-        } else {
-            debug!("Failed to fetch databases from server for connection_id: {}", connection_id);
-        }
-    }
 
     // Function to clear cache for a connection (useful for refresh)
     fn clear_connection_cache(&self, connection_id: i64) {
@@ -3151,7 +2929,7 @@ impl Tabular {
         debug!("Loading connection tables for ID: {}", connection_id);
 
         // First check if we have cached data
-        if let Some(databases) = self.get_databases_from_cache(connection_id) {
+        if let Some(databases) = cache_data::get_databases_from_cache(self, connection_id) {
             debug!("Found cached databases for connection {}: {:?}", connection_id, databases);
             if !databases.is_empty() {
                 self.build_connection_structure_from_cache(connection_id, node, &databases);
@@ -3163,10 +2941,10 @@ impl Tabular {
         debug!("🔄 Cache empty or not found, fetching databases from server for connection {}", connection_id);
         
         // Try to fetch from actual database server
-        if let Some(fresh_databases) = self.fetch_databases_from_connection(connection_id) {
+        if let Some(fresh_databases) = connection::fetch_databases_from_connection(self, connection_id) {
             debug!("✅ Successfully fetched {} databases from server", fresh_databases.len());
             // Save to cache for future use
-            self.save_databases_to_cache(connection_id, &fresh_databases);
+            cache_data::save_databases_to_cache(self, connection_id, &fresh_databases);
             // Build structure from fresh data
             self.build_connection_structure_from_cache(connection_id, node, &fresh_databases);
             node.is_loaded = true;
@@ -3183,16 +2961,16 @@ impl Tabular {
             // Create the main structure based on database type
             match connection.connection_type {
                 models::enums::DatabaseType::MySQL => {
-                    self.load_mysql_structure(connection_id, &connection, node);
+                    driver_mysql::load_mysql_structure(connection_id, &connection, node);
                 },
                 models::enums::DatabaseType::PostgreSQL => {
-                    self.load_postgresql_structure(connection_id, &connection, node);
+                    driver_postgres::load_postgresql_structure(connection_id, &connection, node);
                 },
                 models::enums::DatabaseType::SQLite => {
-                    self.load_sqlite_structure(connection_id, &connection, node);
+                    driver_sqlite::load_sqlite_structure(connection_id, &connection, node);
                 },
                 models::enums::DatabaseType::Redis => {
-                    self.load_redis_structure(connection_id, &connection, node);
+                    driver_redis::load_redis_structure(self, connection_id, &connection, node);
                 }
             }
             
@@ -3344,7 +3122,7 @@ impl Tabular {
                 },
                 models::enums::DatabaseType::Redis => {
                     // Redis structure with databases
-                    self.build_redis_structure_from_cache(connection_id, node, databases);
+                    cache_data::build_redis_structure_from_cache(self, connection_id, node, databases);
                     return;
                 }
             }
@@ -3353,61 +3131,7 @@ impl Tabular {
         }
     }
 
-    fn build_redis_structure_from_cache(&mut self, connection_id: i64, node: &mut models::structs::TreeNode, databases: &[String]) {
-        let mut main_children = Vec::new();
-        
-        // Create databases folder for Redis
-        let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
-        databases_folder.connection_id = Some(connection_id);
-        databases_folder.is_expanded = false;
-        databases_folder.is_loaded = true;
-        
-        // Add each Redis database from cache (db0, db1, etc.)
-        for db_name in databases {
-            if db_name.starts_with("db") {
-                let mut db_node = models::structs::TreeNode::new(db_name.clone(), models::enums::NodeType::Database);
-                db_node.connection_id = Some(connection_id);
-                db_node.database_name = Some(db_name.clone());
-                db_node.is_loaded = false; // Keys will be loaded when clicked
-                
-                // Check if this database has keys by looking for the marker
-                let has_keys = self.check_redis_database_has_keys(connection_id, db_name);
-                if has_keys {
-                    // Add a placeholder for keys that will be loaded on expansion
-                    let loading_node = models::structs::TreeNode::new("Loading keys...".to_string(), models::enums::NodeType::Table);
-                    db_node.children.push(loading_node);
-                }
-                
-                databases_folder.children.push(db_node);
-            }
-        }
-        
-        main_children.push(databases_folder);
-        node.children = main_children;
-    }
 
-    fn check_redis_database_has_keys(&self, connection_id: i64, database_name: &str) -> bool {
-        if let Some(ref pool) = self.db_pool {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let pool_clone = pool.clone();
-            let database_name = database_name.to_string();
-            
-            let result = rt.block_on(async move {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM table_cache WHERE connection_id = ? AND database_name = ? AND table_name = '_has_keys'"
-                )
-                .bind(connection_id)
-                .bind(database_name)
-                .fetch_one(pool_clone.as_ref())
-                .await
-                .unwrap_or(0)
-            });
-            
-            result > 0
-        } else {
-            false
-        }
-    }
 
     // More specific function to find folder node with exact type and database name
     fn find_specific_folder_node<'a>(node: &'a mut models::structs::TreeNode, connection_id: i64, folder_type: &models::enums::NodeType, database_name: &Option<String>) -> Option<&'a mut models::structs::TreeNode> {
@@ -3443,7 +3167,7 @@ impl Tabular {
         databases_folder.children.clear();
         
         // First check cache
-        if let Some(cached_databases) = self.get_databases_from_cache(connection_id) {
+        if let Some(cached_databases) = cache_data::get_databases_from_cache(self, connection_id) {
             if !cached_databases.is_empty() {
                 
                 for db_name in cached_databases {
@@ -3486,10 +3210,10 @@ impl Tabular {
         }
                 
         // Try to fetch real databases from the connection
-        if let Some(real_databases) = self.fetch_databases_from_connection(connection_id) {
+        if let Some(real_databases) = connection::fetch_databases_from_connection(self, connection_id) {
             
             // Save to cache for future use
-            self.save_databases_to_cache(connection_id, &real_databases);
+            cache_data::save_databases_to_cache(self, connection_id, &real_databases);
             
             // Create tree nodes from fetched data
             for db_name in real_databases {
@@ -3617,7 +3341,7 @@ impl Tabular {
         databases_folder.children.clear();
 
         // Ambil daftar database Redis dari cache
-        if let Some(cached_databases) = self.get_databases_from_cache(connection_id) {
+        if let Some(cached_databases) = cache_data::get_databases_from_cache(self, connection_id) {
             for db_name in cached_databases {
                 if db_name.starts_with("db") {
                     let mut db_node = models::structs::TreeNode::new(db_name.clone(), models::enums::NodeType::Database);
@@ -3782,7 +3506,7 @@ impl Tabular {
         
         // Cache is invalid or doesn't exist, fetch fresh data
         // But do this in background to avoid blocking UI
-        if let Some(databases) = self.fetch_databases_from_connection(connection_id) {
+        if let Some(databases) = connection::fetch_databases_from_connection(self, connection_id) {
             // Update cache
             self.database_cache.insert(connection_id, databases.clone());
             self.database_cache_time.insert(connection_id, std::time::Instant::now());
@@ -3793,550 +3517,6 @@ impl Tabular {
         }
     }
     
-
-    fn fetch_databases_from_connection(&mut self, connection_id: i64) -> Option<Vec<String>> {
-        
-        // Find the connection configuration
-        let _connection = self.connections.iter().find(|c| c.id == Some(connection_id))?.clone();
-        
-        // Create a new runtime for the database query
-        let rt = tokio::runtime::Runtime::new().ok()?;
-        
-        rt.block_on(async {
-            // Get or create connection pool
-            let pool = connection::get_or_create_connection_pool(self, connection_id).await?;
-            
-            match pool {
-                models::enums::DatabasePool::MySQL(mysql_pool) => {
-                    let result = sqlx::query_as::<_, (String,)>("SHOW DATABASES")
-                        .fetch_all(mysql_pool.as_ref())
-                        .await;
-                        
-                    match result {
-                        Ok(rows) => {
-                            let databases: Vec<String> = rows.into_iter()
-                                .map(|(db_name,)| db_name)
-                                .filter(|db| !["information_schema", "performance_schema", "mysql", "sys"].contains(&db.as_str()))
-                                .collect();
-                            Some(databases)
-                        },
-                        Err(e) => {
-                            debug!("Error querying MySQL databases: {}", e);
-                            None
-                        }
-                    }
-                },
-                models::enums::DatabasePool::PostgreSQL(pg_pool) => {
-                    let result = sqlx::query_as::<_, (String,)>(
-                        "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1')"
-                    )
-                    .fetch_all(pg_pool.as_ref())
-                    .await;
-                    
-                    match result {
-                        Ok(rows) => {
-                            let databases: Vec<String> = rows.into_iter().map(|(db_name,)| db_name).collect();
-                            Some(databases)
-                        },
-                        Err(e) => {
-                            debug!("Error querying PostgreSQL databases: {}", e);
-                            None
-                        }
-                    }
-                },
-                models::enums::DatabasePool::SQLite(sqlite_pool) => {
-                    // For SQLite, we'll query the actual database for table information
-                    let result = sqlx::query_as::<_, (String,)>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-                        .fetch_all(sqlite_pool.as_ref())
-                        .await;
-                        
-                    match result {
-                        Ok(rows) => {
-                            let table_count = rows.len();
-                            if table_count > 0 {
-                                // Since SQLite has tables, return main database
-                                Some(vec!["main".to_string()])
-                            } else {
-                                debug!("No tables found in SQLite database, returning 'main' database anyway");
-                                Some(vec!["main".to_string()])
-                            }
-                        },
-                        Err(e) => {
-                            debug!("Error querying SQLite tables: {}", e);
-                            Some(vec!["main".to_string()]) // Fallback to main
-                        }
-                    }
-                },
-                models::enums::DatabasePool::Redis(redis_manager) => {
-                    // For Redis, get actual databases (db0, db1, etc.)
-                    let mut conn = redis_manager.as_ref().clone();
-                    
-                    // Get CONFIG GET databases to determine max database count
-                    let max_databases = match redis::cmd("CONFIG").arg("GET").arg("databases").query_async::<_, Vec<String>>(&mut conn).await {
-                        Ok(config_result) if config_result.len() >= 2 => {
-                            config_result[1].parse::<i32>().unwrap_or(16)
-                        }
-                        _ => 16 // Default fallback
-                    };
-                    
-                    debug!("Redis max databases: {}", max_databases);
-                    
-                    // Create list of all Redis databases (db0 to db15 by default)
-                    let mut databases = Vec::new();
-                    for db_num in 0..max_databases {
-                        let db_name = format!("db{}", db_num);
-                        databases.push(db_name);
-                    }
-                    
-                    debug!("Generated Redis databases: {:?}", databases);
-                    Some(databases)
-                }
-            }
-        })
-    }
-    
-    fn fetch_tables_from_mysql_connection(&mut self, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
-        
-        // Create a new runtime for the database query
-        let rt = tokio::runtime::Runtime::new().ok()?;
-        
-        rt.block_on(async {
-            // Get or create connection pool
-            let pool = connection::get_or_create_connection_pool(self, connection_id).await?;
-            
-            match pool {
-                models::enums::DatabasePool::MySQL(mysql_pool) => {
-                    let query = match table_type {
-                        "table" => format!("SHOW TABLES FROM `{}`", database_name),
-                        "view" => format!("SELECT table_name FROM information_schema.views WHERE table_schema = '{}'", database_name),
-                        "procedure" => format!("SELECT routine_name FROM information_schema.routines WHERE routine_schema = '{}' AND routine_type = 'PROCEDURE'", database_name),
-                        "function" => format!("SELECT routine_name FROM information_schema.routines WHERE routine_schema = '{}' AND routine_type = 'FUNCTION'", database_name),
-                        "trigger" => format!("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = '{}'", database_name),
-                        "event" => format!("SELECT event_name FROM information_schema.events WHERE event_schema = '{}'", database_name),
-                        _ => {
-                            debug!("Unsupported table type: {}", table_type);
-                            return None;
-                        }
-                    };
-                    
-                    let result = sqlx::query_as::<_, (String,)>(&query)
-                        .fetch_all(mysql_pool.as_ref())
-                        .await;
-                        
-                    match result {
-                        Ok(rows) => {
-                            let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                            Some(items)
-                        },
-                        Err(e) => {
-                            debug!("Error querying MySQL {} from database {}: {}", table_type, database_name, e);
-                            None
-                        }
-                    }
-                },
-                _ => {
-                    debug!("Wrong pool type for MySQL connection");
-                    None
-                }
-            }
-        })
-    }
-    
-    fn fetch_tables_from_sqlite_connection(&mut self, connection_id: i64, table_type: &str) -> Option<Vec<String>> {
-        
-        // Create a new runtime for the database query
-        let rt = tokio::runtime::Runtime::new().ok()?;
-        
-        rt.block_on(async {
-            // Get or create connection pool
-            let pool = connection::get_or_create_connection_pool(self, connection_id).await?;
-            
-            match pool {
-                models::enums::DatabasePool::SQLite(sqlite_pool) => {
-                    let query = match table_type {
-                        "table" => "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-                        "view" => "SELECT name FROM sqlite_master WHERE type='view'",
-                        _ => {
-                            debug!("Unsupported table type for SQLite: {}", table_type);
-                            return None;
-                        }
-                    };
-                    
-                    let result = sqlx::query_as::<_, (String,)>(query)
-                        .fetch_all(sqlite_pool.as_ref())
-                        .await;
-                        
-                    match result {
-                        Ok(rows) => {
-                            let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
-                            Some(items)
-                        },
-                        Err(e) => {
-                            debug!("Error querying SQLite {} from database: {}", table_type, e);
-                            None
-                        }
-                    }
-                },
-                _ => {
-                    debug!("Wrong pool type for SQLite connection");
-                    None
-                }
-            }
-        })
-    }
-    
-    fn fetch_tables_from_redis_connection(&mut self, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
-        
-        // Create a new runtime for the database query
-        let rt = tokio::runtime::Runtime::new().ok()?;
-        
-        rt.block_on(async {
-            // Get or create connection pool
-            let pool = connection::get_or_create_connection_pool(self, connection_id).await?;
-            
-            match pool {
-                models::enums::DatabasePool::Redis(redis_manager) => {
-                    let mut conn = redis_manager.as_ref().clone();
-                    match table_type {
-                                "info_section" => {
-                                    // Return the info sections we cached
-                                    if database_name == "info" {
-                                        // Get Redis INFO sections
-                                        match redis::cmd("INFO").query_async::<_, String>(&mut conn).await {
-                                            Ok(info_result) => {
-                                                let sections: Vec<String> = info_result
-                                                    .lines()
-                                                    .filter(|line| line.starts_with('#') && !line.is_empty())
-                                                    .map(|line| line.trim_start_matches('#').trim().to_string())
-                                                    .filter(|section| !section.is_empty())
-                                                    .collect();
-                                                Some(sections)
-                                            },
-                                            Err(e) => {
-                                                debug!("Error getting Redis INFO: {}", e);
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                },
-                                "redis_keys" => {
-                                    // Get sample keys from Redis
-                                    if database_name.starts_with("db") {
-                                        // Select the specific database
-                                        if let Ok(db_num) = database_name.trim_start_matches("db").parse::<i32>() {
-                                            if let Ok(_) = redis::cmd("SELECT").arg(db_num).query_async::<_, String>(&mut conn).await {
-                                                // Get a sample of keys (limit to first 100)
-                                                match redis::cmd("SCAN").arg(0).arg("COUNT").arg(100).query_async::<_, Vec<String>>(&mut conn).await {
-                                                    Ok(keys) => Some(keys),
-                                                    Err(e) => {
-                                                        debug!("Error scanning Redis keys: {}", e);
-                                                        Some(vec!["keys".to_string()]) // Return generic "keys" entry
-                                                    }
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                },
-                                _ => {
-                                    debug!("Unsupported Redis table type: {}", table_type);
-                                    None
-                                }
-                            }
-                },
-                _ => {
-                    debug!("Wrong pool type for Redis connection");
-                    None
-                }
-            }
-        })
-    }
-
-    fn fetch_columns_from_database(&self, _connection_id: i64, database_name: &str, table_name: &str, connection: &models::structs::ConnectionConfig) -> Option<Vec<(String, String)>> {
-        
-        // Create a new runtime for the database query
-        let rt = tokio::runtime::Runtime::new().ok()?;
-        
-        // Clone data to move into async block
-        let connection_clone = connection.clone();
-        let database_name = database_name.to_string();
-        let table_name = table_name.to_string();
-        
-        rt.block_on(async {
-            match connection_clone.connection_type {
-                models::enums::DatabaseType::MySQL => {
-                    // Create MySQL connection
-                    let encoded_username = modules::url_encode(&connection_clone.username);
-                    let encoded_password = modules::url_encode(&connection_clone.password);
-                    let connection_string = format!(
-                        "mysql://{}:{}@{}:{}/{}",
-                        encoded_username, encoded_password, connection_clone.host, connection_clone.port, database_name
-                    );
-                    
-                    match MySqlPoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            let query = "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
-                            match sqlx::query_as::<_, (String, String)>(query)
-                                .bind(&database_name)
-                                .bind(&table_name)
-                                .fetch_all(&pool)
-                                .await
-                            {
-                                Ok(rows) => {
-                                    let columns: Vec<(String, String)> = rows.into_iter().collect();
-                                    Some(columns)
-                                },
-                                Err(e) => {
-                                    debug!("Error querying MySQL columns for table {}: {}", table_name, e);
-                                    None
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            debug!("Error connecting to MySQL database: {}", e);
-                            None
-                        }
-                    }
-                },
-                models::enums::DatabaseType::SQLite => {
-                    // Create SQLite connection
-                    let connection_string = format!("sqlite:{}", connection_clone.host);
-                    
-                    match SqlitePoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            let query = format!("PRAGMA table_info({})", table_name);
-                            match sqlx::query_as::<_, (i32, String, String, i32, String, i32)>(&query)
-                                .fetch_all(&pool)
-                                .await
-                            {
-                                Ok(rows) => {
-                                    let columns: Vec<(String, String)> = rows.into_iter()
-                                        .map(|(_, name, data_type, _, _, _)| (name, data_type))
-                                        .collect();
-                                    Some(columns)
-                                },
-                                Err(e) => {
-                                    debug!("Error querying SQLite columns for table {}: {}", table_name, e);
-                                    None
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            debug!("Error connecting to SQLite database: {}", e);
-                            None
-                        }
-                    }
-                },
-                models::enums::DatabaseType::PostgreSQL => {
-                    // Create PostgreSQL connection
-                    let connection_string = format!(
-                        "postgresql://{}:{}@{}:{}/{}",
-                        connection_clone.username, connection_clone.password, connection_clone.host, connection_clone.port, database_name
-                    );
-                    
-                    match PgPoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? ORDER BY ordinal_position";
-                            match sqlx::query_as::<_, (String, String)>(query)
-                                .bind(&table_name)
-                                .fetch_all(&pool)
-                                .await
-                            {
-                                Ok(rows) => {
-                                    let columns: Vec<(String, String)> = rows.into_iter().collect();
-                                    Some(columns)
-                                },
-                                Err(e) => {
-                                    debug!("Error querying PostgreSQL columns for table {}: {}", table_name, e);
-                                    None
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            debug!("Error connecting to PostgreSQL database: {}", e);
-                            None
-                        }
-                    }
-                },
-                models::enums::DatabaseType::Redis => {
-                    // Redis doesn't have traditional tables/columns
-                    // Return some generic "columns" for Redis key-value structure
-                    Some(vec![
-                        ("key".to_string(), "String".to_string()),
-                        ("value".to_string(), "Any".to_string()),
-                        ("type".to_string(), "String".to_string()),
-                        ("ttl".to_string(), "Integer".to_string()),
-                    ])
-                }
-            }
-        })
-    }
-
-    fn load_mysql_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
-
-        debug!("Loading MySQL structure for connection ID: {}", connection_id);
-        
-        // Since we can't use block_on in an async context, we'll create a simple structure
-        // and populate it with cached data or show a loading message
-        
-        // Create basic structure immediately
-        let mut main_children = Vec::new();
-        
-        // 1. Databases folder
-        let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
-        databases_folder.connection_id = Some(connection_id);
-        databases_folder.is_loaded = false; // Will be loaded when expanded
-        
-        // 2. DBA Views folder
-        let mut dba_folder = models::structs::TreeNode::new("DBA Views".to_string(), models::enums::NodeType::DBAViewsFolder);
-        dba_folder.connection_id = Some(connection_id);
-        
-        let mut dba_children = Vec::new();
-        
-        // Users
-        let mut users_folder = models::structs::TreeNode::new("Users".to_string(), models::enums::NodeType::UsersFolder);
-        users_folder.connection_id = Some(connection_id);
-        users_folder.is_loaded = false;
-        dba_children.push(users_folder);
-        
-        // Privileges
-        let mut priv_folder = models::structs::TreeNode::new("Privileges".to_string(), models::enums::NodeType::PrivilegesFolder);
-        priv_folder.connection_id = Some(connection_id);
-        priv_folder.is_loaded = false;
-        dba_children.push(priv_folder);
-        
-        // Processes
-        let mut proc_folder = models::structs::TreeNode::new("Processes".to_string(), models::enums::NodeType::ProcessesFolder);
-        proc_folder.connection_id = Some(connection_id);
-        proc_folder.is_loaded = false;
-        dba_children.push(proc_folder);
-        
-        // Status
-        let mut status_folder = models::structs::TreeNode::new("Status".to_string(), models::enums::NodeType::StatusFolder);
-        status_folder.connection_id = Some(connection_id);
-        status_folder.is_loaded = false;
-        dba_children.push(status_folder);
-        
-        dba_folder.children = dba_children;
-        
-        main_children.push(databases_folder);
-        main_children.push(dba_folder);
-        
-        node.children = main_children;
-        
-        // Trigger async loading in background (we'll need to implement this differently)
-        // For now, we'll rely on the expansion mechanism to load databases when needed
-    }
-
-    fn load_postgresql_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
-        
-        // Create basic structure for PostgreSQL
-        let mut main_children = Vec::new();
-        
-        // Databases folder
-        let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
-        databases_folder.connection_id = Some(connection_id);
-        
-        // Add a loading indicator
-        let loading_node = models::structs::TreeNode::new("Loading databases...".to_string(), models::enums::NodeType::Database);
-        databases_folder.children.push(loading_node);
-        
-        main_children.push(databases_folder);
-        
-        node.children = main_children;
-    }
-
-    fn load_sqlite_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
-        
-        // Create basic structure for SQLite
-        let mut main_children = Vec::new();
-        
-        // Tables folder
-        let mut tables_folder = models::structs::TreeNode::new("Tables".to_string(), models::enums::NodeType::TablesFolder);
-        tables_folder.connection_id = Some(connection_id);
-        tables_folder.database_name = Some("main".to_string());
-        tables_folder.is_loaded = false;
-        
-        // Add a loading indicator
-        let loading_node = models::structs::TreeNode::new("Loading tables...".to_string(), models::enums::NodeType::Table);
-        tables_folder.children.push(loading_node);
-        
-        main_children.push(tables_folder);
-        
-        // Views folder
-        let mut views_folder = models::structs::TreeNode::new("Views".to_string(), models::enums::NodeType::ViewsFolder);
-        views_folder.connection_id = Some(connection_id);
-        views_folder.database_name = Some("main".to_string());
-        views_folder.is_loaded = false;
-        main_children.push(views_folder);
-        
-        node.children = main_children;
-    }
-
-    fn load_redis_structure(&mut self, connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
-        // Check if we have cached databases
-        if let Some(databases) = self.get_databases_from_cache(connection_id) {
-            debug!("🔍 Found cached Redis databases: {:?}", databases);
-            if !databases.is_empty() {
-                self.build_redis_structure_from_cache(connection_id, node, &databases);
-                node.is_loaded = true;
-                return;
-            }
-        }
-        
-        debug!("🔄 No cached Redis databases found, fetching from server...");
-        
-        // Fetch fresh data from Redis server
-        self.fetch_and_cache_connection_data(connection_id);
-        
-        // Try again to get from cache after fetching
-        if let Some(databases) = self.get_databases_from_cache(connection_id) {
-            debug!("✅ Successfully loaded Redis databases from server: {:?}", databases);
-            if !databases.is_empty() {
-                self.build_redis_structure_from_cache(connection_id, node, &databases);
-                node.is_loaded = true;
-                return;
-            }
-        }
-        
-        // Create basic structure for Redis with databases as fallback
-        let mut main_children = Vec::new();
-        
-        // Add databases folder for Redis
-        let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
-        databases_folder.connection_id = Some(connection_id);
-        databases_folder.is_loaded = false;
-        
-        // Add a loading indicator
-        let loading_node = models::structs::TreeNode::new("Loading databases...".to_string(), models::enums::NodeType::Database);
-        databases_folder.children.push(loading_node);
-        
-        main_children.push(databases_folder);
-        
-        node.children = main_children;
-    }
 
     fn load_folder_content(&mut self, connection_id: i64, node: &mut models::structs::TreeNode, folder_type: models::enums::NodeType) {        
         // Find the connection by ID
@@ -4409,12 +3589,12 @@ impl Tabular {
         }
         
         // If cache is empty, fetch from actual database        
-        if let Some(real_items) = self.fetch_tables_from_mysql_connection(connection_id, database_name, table_type) {
+        if let Some(real_items) = driver_mysql::fetch_tables_from_mysql_connection(self, connection_id, database_name, table_type) {
             debug!("Successfully fetched {} {} from MySQL database", real_items.len(), table_type);
             
             // Save to cache for future use
             let table_data: Vec<(String, String)> = real_items.iter().map(|name| (name.clone(), table_type.to_string())).collect();
-            self.save_tables_to_cache(connection_id, database_name, &table_data);
+            cache_data::save_tables_to_cache(self, connection_id, database_name, &table_data);
             
             // Create tree nodes from fetched data
             let child_nodes: Vec<models::structs::TreeNode> = real_items.into_iter().map(|item_name| {
@@ -4515,12 +3695,12 @@ impl Tabular {
         // If cache is empty, fetch from actual SQLite database
         debug!("Cache miss, fetching {} from actual SQLite database", table_type);
         
-        if let Some(real_items) = self.fetch_tables_from_sqlite_connection(connection_id, table_type) {
+        if let Some(real_items) = driver_sqlite::fetch_tables_from_sqlite_connection(self, connection_id, table_type) {
             debug!("Successfully fetched {} {} from SQLite database", real_items.len(), table_type);
             
             // Save to cache for future use
             let table_data: Vec<(String, String)> = real_items.iter().map(|name| (name.clone(), table_type.to_string())).collect();
-            self.save_tables_to_cache(connection_id, "main", &table_data);
+            cache_data::save_tables_to_cache(self, connection_id, "main", &table_data);
             
             // Create tree nodes from fetched data
             let child_nodes: Vec<models::structs::TreeNode> = real_items.into_iter().map(|item_name| {
@@ -4621,9 +3801,9 @@ impl Tabular {
         debug!("Loaded {} items into {:?} folder for Redis", node.children.len(), folder_type);
     }
 
-    fn load_table_columns_sync(&self, connection_id: i64, table_name: &str, connection: &models::structs::ConnectionConfig, database_name: &str) -> Vec<models::structs::TreeNode> {
+    fn load_table_columns_sync(&mut self, connection_id: i64, table_name: &str, connection: &models::structs::ConnectionConfig, database_name: &str) -> Vec<models::structs::TreeNode> {
         // First try to get from cache
-        if let Some(cached_columns) = self.get_columns_from_cache(connection_id, database_name, table_name) {
+        if let Some(cached_columns) = cache_data::get_columns_from_cache(self, connection_id, database_name, table_name) {
             if !cached_columns.is_empty() {
                 return cached_columns.into_iter().map(|(column_name, data_type)| {
                     models::structs::TreeNode::new(format!("{} ({})", column_name, data_type), models::enums::NodeType::Column)
@@ -4632,9 +3812,9 @@ impl Tabular {
         }
         
         // If cache is empty, fetch from actual database
-        if let Some(real_columns) = self.fetch_columns_from_database(connection_id, database_name, table_name, connection) {
+        if let Some(real_columns) = connection::fetch_columns_from_database(connection_id, database_name, table_name, connection) {
             // Save to cache for future use
-            self.save_columns_to_cache(connection_id, database_name, table_name, &real_columns);
+            cache_data::save_columns_to_cache(self, connection_id, database_name, table_name, &real_columns);
             
             // Convert to models::structs::TreeNode
             real_columns.into_iter().map(|(column_name, data_type)| {

@@ -1,4 +1,7 @@
+use log::debug;
 use sqlx::{SqlitePool, Row};
+
+use crate::{connection, models, window_egui};
 
 pub async fn fetch_data(connection_id: i64, pool: &SqlitePool, cache_pool: &SqlitePool) -> bool {
        // For SQLite, we typically work with the main database, but we can get table info
@@ -211,3 +214,76 @@ pub(crate) fn convert_sqlite_rows_to_table_data(rows: Vec<sqlx::sqlite::SqliteRo
        table_data
 }
 
+
+pub(crate) fn load_sqlite_structure(connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
+
+       // Create basic structure for SQLite
+       let mut main_children = Vec::new();
+       
+       // Tables folder
+       let mut tables_folder = models::structs::TreeNode::new("Tables".to_string(), models::enums::NodeType::TablesFolder);
+       tables_folder.connection_id = Some(connection_id);
+       tables_folder.database_name = Some("main".to_string());
+       tables_folder.is_loaded = false;
+       
+       // Add a loading indicator
+       let loading_node = models::structs::TreeNode::new("Loading tables...".to_string(), models::enums::NodeType::Table);
+       tables_folder.children.push(loading_node);
+       
+       main_children.push(tables_folder);
+       
+       // Views folder
+       let mut views_folder = models::structs::TreeNode::new("Views".to_string(), models::enums::NodeType::ViewsFolder);
+       views_folder.connection_id = Some(connection_id);
+       views_folder.database_name = Some("main".to_string());
+       views_folder.is_loaded = false;
+       main_children.push(views_folder);
+       
+       node.children = main_children;
+}
+
+
+
+
+pub(crate) fn fetch_tables_from_sqlite_connection(tabular: &mut window_egui::Tabular, connection_id: i64, table_type: &str) -> Option<Vec<String>> {
+       
+       // Create a new runtime for the database query
+       let rt = tokio::runtime::Runtime::new().ok()?;
+       
+       rt.block_on(async {
+       // Get or create connection pool
+       let pool = connection::get_or_create_connection_pool(tabular, connection_id).await?;
+       
+       match pool {
+              models::enums::DatabasePool::SQLite(sqlite_pool) => {
+              let query = match table_type {
+                     "table" => "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+                     "view" => "SELECT name FROM sqlite_master WHERE type='view'",
+                     _ => {
+                     debug!("Unsupported table type for SQLite: {}", table_type);
+                     return None;
+                     }
+              };
+              
+              let result = sqlx::query_as::<_, (String,)>(query)
+                     .fetch_all(sqlite_pool.as_ref())
+                     .await;
+                     
+              match result {
+                     Ok(rows) => {
+                     let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
+                     Some(items)
+                     },
+                     Err(e) => {
+                     debug!("Error querying SQLite {} from database: {}", table_type, e);
+                     None
+                     }
+              }
+              },
+              _ => {
+              debug!("Wrong pool type for SQLite connection");
+              None
+              }
+       }
+       })
+}

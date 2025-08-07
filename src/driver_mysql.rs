@@ -2,6 +2,8 @@ use sqlx::{MySqlPool};
 use sqlx::{SqlitePool, Row, Column};
 use log::{debug};
 
+use crate::{connection, models, window_egui};
+
 
 
 // Helper function for final fallback when all type-specific conversions fail
@@ -318,3 +320,107 @@ pub(crate) async fn fetch_mysql_data(connection_id: i64, pool: &MySqlPool, cache
        }
 }
 
+
+pub(crate) fn fetch_tables_from_mysql_connection(tabular: &mut window_egui::Tabular, connection_id: i64, database_name: &str, table_type: &str) -> Option<Vec<String>> {
+       
+       // Create a new runtime for the database query
+       let rt = tokio::runtime::Runtime::new().ok()?;
+       
+       rt.block_on(async {
+       // Get or create connection pool
+       let pool = connection::get_or_create_connection_pool(tabular, connection_id).await?;
+       
+       match pool {
+              models::enums::DatabasePool::MySQL(mysql_pool) => {
+              let query = match table_type {
+                     "table" => format!("SHOW TABLES FROM `{}`", database_name),
+                     "view" => format!("SELECT table_name FROM information_schema.views WHERE table_schema = '{}'", database_name),
+                     "procedure" => format!("SELECT routine_name FROM information_schema.routines WHERE routine_schema = '{}' AND routine_type = 'PROCEDURE'", database_name),
+                     "function" => format!("SELECT routine_name FROM information_schema.routines WHERE routine_schema = '{}' AND routine_type = 'FUNCTION'", database_name),
+                     "trigger" => format!("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = '{}'", database_name),
+                     "event" => format!("SELECT event_name FROM information_schema.events WHERE event_schema = '{}'", database_name),
+                     _ => {
+                     debug!("Unsupported table type: {}", table_type);
+                     return None;
+                     }
+              };
+              
+              let result = sqlx::query_as::<_, (String,)>(&query)
+                     .fetch_all(mysql_pool.as_ref())
+                     .await;
+                     
+              match result {
+                     Ok(rows) => {
+                     let items: Vec<String> = rows.into_iter().map(|(name,)| name).collect();
+                     Some(items)
+                     },
+                     Err(e) => {
+                     debug!("Error querying MySQL {} from database {}: {}", table_type, database_name, e);
+                     None
+                     }
+              }
+              },
+              _ => {
+              debug!("Wrong pool type for MySQL connection");
+              None
+              }
+       }
+       })
+}
+
+
+pub(crate) fn load_mysql_structure(connection_id: i64, _connection: &models::structs::ConnectionConfig, node: &mut models::structs::TreeNode) {
+
+       debug!("Loading MySQL structure for connection ID: {}", connection_id);
+       
+       // Since we can't use block_on in an async context, we'll create a simple structure
+       // and populate it with cached data or show a loading message
+       
+       // Create basic structure immediately
+       let mut main_children = Vec::new();
+       
+       // 1. Databases folder
+       let mut databases_folder = models::structs::TreeNode::new("Databases".to_string(), models::enums::NodeType::DatabasesFolder);
+       databases_folder.connection_id = Some(connection_id);
+       databases_folder.is_loaded = false; // Will be loaded when expanded
+       
+       // 2. DBA Views folder
+       let mut dba_folder = models::structs::TreeNode::new("DBA Views".to_string(), models::enums::NodeType::DBAViewsFolder);
+       dba_folder.connection_id = Some(connection_id);
+       
+       let mut dba_children = Vec::new();
+       
+       // Users
+       let mut users_folder = models::structs::TreeNode::new("Users".to_string(), models::enums::NodeType::UsersFolder);
+       users_folder.connection_id = Some(connection_id);
+       users_folder.is_loaded = false;
+       dba_children.push(users_folder);
+       
+       // Privileges
+       let mut priv_folder = models::structs::TreeNode::new("Privileges".to_string(), models::enums::NodeType::PrivilegesFolder);
+       priv_folder.connection_id = Some(connection_id);
+       priv_folder.is_loaded = false;
+       dba_children.push(priv_folder);
+       
+       // Processes
+       let mut proc_folder = models::structs::TreeNode::new("Processes".to_string(), models::enums::NodeType::ProcessesFolder);
+       proc_folder.connection_id = Some(connection_id);
+       proc_folder.is_loaded = false;
+       dba_children.push(proc_folder);
+       
+       // Status
+       let mut status_folder = models::structs::TreeNode::new("Status".to_string(), models::enums::NodeType::StatusFolder);
+       status_folder.connection_id = Some(connection_id);
+       status_folder.is_loaded = false;
+       dba_children.push(status_folder);
+       
+       dba_folder.children = dba_children;
+       
+       main_children.push(databases_folder);
+       main_children.push(dba_folder);
+       
+       node.children = main_children;
+       
+       // Trigger async loading in background (we'll need to implement this differently)
+       // For now, we'll rely on the expansion mechanism to load databases when needed
+}

@@ -36,7 +36,7 @@ fn write_csv_file(
     writer.write_record(current_table_headers)?;
     
     // Write data rows
-    for (_, row) in all_table_data.iter().enumerate() {
+    for row in all_table_data.iter() {
         writer.write_record(row)?;
     }
     

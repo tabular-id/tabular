@@ -1,5 +1,5 @@
 use crate::{
-              driver_mysql, driver_postgres, driver_redis, driver_sqlite, helpers, models, modules, window_egui::Tabular
+              connection, driver_mysql, driver_postgres, driver_redis, driver_sqlite, helpers, models, modules, window_egui::{self, Tabular}
        };
 use eframe::egui;
 use sqlx::{mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions, Column, Row, SqlitePool};
@@ -255,11 +255,9 @@ pub(crate) fn execute_table_query_sync(tabular: &mut Tabular, connection_id: i64
                                           tabular.connection_pools.remove(&connection_id);
                                           
                                           // Try to recreate the pool for next attempt
-                                          if let Some(new_pool) = get_or_create_connection_pool(tabular, connection_id).await {
-                                                 if let models::enums::DatabasePool::MySQL(new_mysql_pool) = new_pool {
-                                                        mysql_pool = new_mysql_pool;
-                                                        continue;
-                                                 }
+                                          if let Some(models::enums::DatabasePool::MySQL(new_mysql_pool)) = get_or_create_connection_pool(tabular, connection_id).await {
+                                                 mysql_pool = new_mysql_pool;
+                                                 continue;
                                           }
                                    }
                                    
@@ -1004,5 +1002,246 @@ async fn fetch_and_cache_all_data(
               }
        }
        }
+}
+
+
+
+pub(crate) fn fetch_databases_from_connection(tabular: &mut window_egui::Tabular, connection_id: i64) -> Option<Vec<String>> {
+       
+       // Find the connection configuration
+       let _connection = tabular.connections.iter().find(|c| c.id == Some(connection_id))?.clone();
+       
+       // Create a new runtime for the database query
+       let rt = tokio::runtime::Runtime::new().ok()?;
+       
+       rt.block_on(async {
+       // Get or create connection pool
+       let pool = connection::get_or_create_connection_pool(tabular, connection_id).await?;
+       
+       match pool {
+              models::enums::DatabasePool::MySQL(mysql_pool) => {
+              let result = sqlx::query_as::<_, (String,)>("SHOW DATABASES")
+                     .fetch_all(mysql_pool.as_ref())
+                     .await;
+                     
+              match result {
+                     Ok(rows) => {
+                     let databases: Vec<String> = rows.into_iter()
+                            .map(|(db_name,)| db_name)
+                            .filter(|db| !["information_schema", "performance_schema", "mysql", "sys"].contains(&db.as_str()))
+                            .collect();
+                     Some(databases)
+                     },
+                     Err(e) => {
+                     debug!("Error querying MySQL databases: {}", e);
+                     None
+                     }
+              }
+              },
+              models::enums::DatabasePool::PostgreSQL(pg_pool) => {
+              let result = sqlx::query_as::<_, (String,)>(
+                     "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres', 'template0', 'template1')"
+              )
+              .fetch_all(pg_pool.as_ref())
+              .await;
+              
+              match result {
+                     Ok(rows) => {
+                     let databases: Vec<String> = rows.into_iter().map(|(db_name,)| db_name).collect();
+                     Some(databases)
+                     },
+                     Err(e) => {
+                     debug!("Error querying PostgreSQL databases: {}", e);
+                     None
+                     }
+              }
+              },
+              models::enums::DatabasePool::SQLite(sqlite_pool) => {
+              // For SQLite, we'll query the actual database for table information
+              let result = sqlx::query_as::<_, (String,)>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                     .fetch_all(sqlite_pool.as_ref())
+                     .await;
+                     
+              match result {
+                     Ok(rows) => {
+                     let table_count = rows.len();
+                     if table_count > 0 {
+                            // Since SQLite has tables, return main database
+                            Some(vec!["main".to_string()])
+                     } else {
+                            debug!("No tables found in SQLite database, returning 'main' database anyway");
+                            Some(vec!["main".to_string()])
+                     }
+                     },
+                     Err(e) => {
+                     debug!("Error querying SQLite tables: {}", e);
+                     Some(vec!["main".to_string()]) // Fallback to main
+                     }
+              }
+              },
+              models::enums::DatabasePool::Redis(redis_manager) => {
+              // For Redis, get actual databases (db0, db1, etc.)
+              let mut conn = redis_manager.as_ref().clone();
+              
+              // Get CONFIG GET databases to determine max database count
+              let max_databases = match redis::cmd("CONFIG").arg("GET").arg("databases").query_async::<_, Vec<String>>(&mut conn).await {
+                     Ok(config_result) if config_result.len() >= 2 => {
+                     config_result[1].parse::<i32>().unwrap_or(16)
+                     }
+                     _ => 16 // Default fallback
+              };
+              
+              debug!("Redis max databases: {}", max_databases);
+              
+              // Create list of all Redis databases (db0 to db15 by default)
+              let mut databases = Vec::new();
+              for db_num in 0..max_databases {
+                     let db_name = format!("db{}", db_num);
+                     databases.push(db_name);
+              }
+              
+              debug!("Generated Redis databases: {:?}", databases);
+              Some(databases)
+              }
+       }
+       })
+}
+
+
+
+
+pub(crate) fn fetch_columns_from_database(_connection_id: i64, database_name: &str, table_name: &str, connection: &models::structs::ConnectionConfig) -> Option<Vec<(String, String)>> {
+       
+       // Create a new runtime for the database query
+       let rt = tokio::runtime::Runtime::new().ok()?;
+       
+       // Clone data to move into async block
+       let connection_clone = connection.clone();
+       let database_name = database_name.to_string();
+       let table_name = table_name.to_string();
+       
+       rt.block_on(async {
+       match connection_clone.connection_type {
+              models::enums::DatabaseType::MySQL => {
+              // Create MySQL connection
+              let encoded_username = modules::url_encode(&connection_clone.username);
+              let encoded_password = modules::url_encode(&connection_clone.password);
+              let connection_string = format!(
+                     "mysql://{}:{}@{}:{}/{}",
+                     encoded_username, encoded_password, connection_clone.host, connection_clone.port, database_name
+              );
+              
+              match MySqlPoolOptions::new()
+                     .max_connections(1)
+                     .acquire_timeout(std::time::Duration::from_secs(10))
+                     .connect(&connection_string)
+                     .await
+              {
+                     Ok(pool) => {
+                     let query = "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
+                     match sqlx::query_as::<_, (String, String)>(query)
+                            .bind(&database_name)
+                            .bind(&table_name)
+                            .fetch_all(&pool)
+                            .await
+                     {
+                            Ok(rows) => {
+                                   let columns: Vec<(String, String)> = rows.into_iter().collect();
+                                   Some(columns)
+                            },
+                            Err(e) => {
+                                   debug!("Error querying MySQL columns for table {}: {}", table_name, e);
+                                   None
+                            }
+                     }
+                     },
+                     Err(e) => {
+                     debug!("Error connecting to MySQL database: {}", e);
+                     None
+                     }
+              }
+              },
+              models::enums::DatabaseType::SQLite => {
+              // Create SQLite connection
+              let connection_string = format!("sqlite:{}", connection_clone.host);
+              
+              match SqlitePoolOptions::new()
+                     .max_connections(1)
+                     .acquire_timeout(std::time::Duration::from_secs(10))
+                     .connect(&connection_string)
+                     .await
+              {
+                     Ok(pool) => {
+                     let query = format!("PRAGMA table_info({})", table_name);
+                     match sqlx::query_as::<_, (i32, String, String, i32, String, i32)>(&query)
+                            .fetch_all(&pool)
+                            .await
+                     {
+                            Ok(rows) => {
+                                   let columns: Vec<(String, String)> = rows.into_iter()
+                                   .map(|(_, name, data_type, _, _, _)| (name, data_type))
+                                   .collect();
+                                   Some(columns)
+                            },
+                            Err(e) => {
+                                   debug!("Error querying SQLite columns for table {}: {}", table_name, e);
+                                   None
+                            }
+                     }
+                     },
+                     Err(e) => {
+                     debug!("Error connecting to SQLite database: {}", e);
+                     None
+                     }
+              }
+              },
+              models::enums::DatabaseType::PostgreSQL => {
+              // Create PostgreSQL connection
+              let connection_string = format!(
+                     "postgresql://{}:{}@{}:{}/{}",
+                     connection_clone.username, connection_clone.password, connection_clone.host, connection_clone.port, database_name
+              );
+              
+              match PgPoolOptions::new()
+                     .max_connections(1)
+                     .acquire_timeout(std::time::Duration::from_secs(10))
+                     .connect(&connection_string)
+                     .await
+              {
+                     Ok(pool) => {
+                     let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? ORDER BY ordinal_position";
+                     match sqlx::query_as::<_, (String, String)>(query)
+                            .bind(&table_name)
+                            .fetch_all(&pool)
+                            .await
+                     {
+                            Ok(rows) => {
+                                   let columns: Vec<(String, String)> = rows.into_iter().collect();
+                                   Some(columns)
+                            },
+                            Err(e) => {
+                                   debug!("Error querying PostgreSQL columns for table {}: {}", table_name, e);
+                                   None
+                            }
+                     }
+                     },
+                     Err(e) => {
+                     debug!("Error connecting to PostgreSQL database: {}", e);
+                     None
+                     }
+              }
+              },
+              models::enums::DatabaseType::Redis => {
+              // Redis doesn't have traditional tables/columns
+              // Return some generic "columns" for Redis key-value structure
+              Some(vec![
+                     ("key".to_string(), "String".to_string()),
+                     ("value".to_string(), "Any".to_string()),
+                     ("type".to_string(), "String".to_string()),
+                     ("ttl".to_string(), "Integer".to_string()),
+              ])
+              }
+       }
+       })
 }
 
