@@ -16,7 +16,7 @@ info = "Your SQL Editor, Forged with Rust: Fast, Safe, Efficient."
 eframe = "0.31"
 image = "0.24"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-sqlx = { version = "0.7", features = [
+sqlx = { version = "0.8.6", features = [
        "runtime-tokio-native-tls",
        "sqlite",
        "mysql",
