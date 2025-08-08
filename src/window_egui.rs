@@ -1,15 +1,14 @@
 
 use eframe::{egui, App, Frame};
-use sqlx::{SqlitePool, mysql::MySqlPoolOptions, postgres::PgPoolOptions, sqlite::SqlitePoolOptions};
-use redis::{Client};
+use sqlx::SqlitePool;
 use egui_code_editor::{CodeEditor, ColorTheme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use log::{debug, info, warn, error};
+use log::{debug, error};
 
 use crate::{
-    cache_data, connection, directory, driver_mysql, driver_postgres, driver_redis, driver_sqlite, export, helpers, models, modules
+    cache_data, connection, directory, driver_mysql, driver_postgres, driver_redis, driver_sqlite, editor, export, models, sidebar_database, sidebar_history, sidebar_query
 };
 
 
@@ -109,7 +108,6 @@ pub struct Tabular {
     // Column width management for resizable columns
     pub column_widths: Vec<f32>, // Store individual column widths
     pub min_column_width: f32,
-    pub max_column_width: f32,
     // Gear menu and about dialog
     pub show_about_dialog: bool,
     // Logo texture
@@ -209,7 +207,6 @@ impl Tabular {
             // Column width management
             column_widths: Vec::new(),
             min_column_width: 50.0,
-            max_column_width: 600.0,
             // Gear menu and about dialog
             show_about_dialog: false,
             // Logo texture
@@ -223,14 +220,14 @@ impl Tabular {
         app.connection_pools.clear();
         
         // Initialize database and sample data FIRST
-        app.initialize_database();
-        app.initialize_sample_data();
+        sidebar_database::initialize_database(&mut app);
+        sidebar_database::initialize_sample_data(&mut app);
         
         // Load saved queries from directory
-        app.load_queries_from_directory();
+        sidebar_query::load_queries_from_directory(&mut app);
         
         // Create initial query tab
-        app.create_new_tab("Untitled Query".to_string(), String::new());
+        editor::create_new_tab(&mut app, "Untitled Query".to_string(), String::new());
         
         // Start background thread AFTER database is initialized
         app.start_background_worker(background_receiver, result_sender);
@@ -282,588 +279,6 @@ impl Tabular {
                 }
             }
         });
-    }
-
-
-    fn initialize_database(&mut self) {
-        // Ensure app directories exist
-        if let Err(e) = directory::ensure_app_directories() {
-            error!("Failed to create app directories: {}", e);
-            return;
-        }
-        
-        // Initialize SQLite database
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool_result = rt.block_on(async {
-            // Get the data directory path
-            let data_dir = directory::get_data_dir();
-            let db_path = data_dir.join("connections.db");
-                        
-            // Convert path to string and use file:// prefix for SQLite
-            let db_path_str = db_path.to_string_lossy();
-            let connection_string = format!("sqlite://{}?mode=rwc", db_path_str);
-            let pool = SqlitePool::connect(&connection_string).await;
-            
-            match pool {
-                Ok(pool) => {
-                    info!("Database connection successful");
-                    
-                    // Create connections table
-                    let create_connections_result = sqlx::query(
-                        r#"
-                        CREATE TABLE IF NOT EXISTS connections (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            name TEXT NOT NULL,
-                            host TEXT NOT NULL,
-                            port TEXT NOT NULL,
-                            username TEXT NOT NULL,
-                            password TEXT NOT NULL,
-                            database_name TEXT NOT NULL,
-                            connection_type TEXT NOT NULL,
-                            folder TEXT DEFAULT NULL
-                        )
-                        "#
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    // Add folder column if it doesn't exist (for existing databases)
-                    let _ = sqlx::query(
-                        "ALTER TABLE connections ADD COLUMN folder TEXT DEFAULT NULL"
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    
-                    // Create database cache table
-                    let create_db_cache_result = sqlx::query(
-                        r#"
-                        CREATE TABLE IF NOT EXISTS database_cache (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            connection_id INTEGER NOT NULL,
-                            database_name TEXT NOT NULL,
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY (connection_id) REFERENCES connections (id) ON DELETE CASCADE,
-                            UNIQUE(connection_id, database_name)
-                        )
-                        "#
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    // Create table cache table
-                    let create_table_cache_result = sqlx::query(
-                        r#"
-                        CREATE TABLE IF NOT EXISTS table_cache (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            connection_id INTEGER NOT NULL,
-                            database_name TEXT NOT NULL,
-                            table_name TEXT NOT NULL,
-                            table_type TEXT NOT NULL, -- 'table', 'view', 'procedure', etc.
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY (connection_id) REFERENCES connections (id) ON DELETE CASCADE,
-                            UNIQUE(connection_id, database_name, table_name, table_type)
-                        )
-                        "#
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    // Create column cache table
-                    let create_column_cache_result = sqlx::query(
-                        r#"
-                        CREATE TABLE IF NOT EXISTS column_cache (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            connection_id INTEGER NOT NULL,
-                            database_name TEXT NOT NULL,
-                            table_name TEXT NOT NULL,
-                            column_name TEXT NOT NULL,
-                            data_type TEXT NOT NULL,
-                            ordinal_position INTEGER NOT NULL,
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY (connection_id) REFERENCES connections (id) ON DELETE CASCADE,
-                            UNIQUE(connection_id, database_name, table_name, column_name)
-                        )
-                        "#
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    // Create query history table
-                    let create_history_result = sqlx::query(
-                        r#"
-                        CREATE TABLE IF NOT EXISTS query_history (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            query_text TEXT NOT NULL,
-                            connection_id INTEGER NOT NULL,
-                            connection_name TEXT NOT NULL,
-                            executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY (connection_id) REFERENCES connections (id) ON DELETE CASCADE
-                        )
-                        "#
-                    )
-                    .execute(&pool)
-                    .await;
-                    
-                    match (create_connections_result, create_db_cache_result, create_table_cache_result, create_column_cache_result, create_history_result) {
-                        (Ok(_), Ok(_), Ok(_), Ok(_), Ok(_)) => {
-                            Some(pool)
-                        },
-                        _ => {
-                            warn!("Error creating some tables");
-                            None
-                        }
-                    }
-                },
-                Err(e) => {
-                    error!("Database connection failed: {}", e);
-                    None
-                }
-            }
-        });
-        
-        if let Some(pool) = pool_result {
-            self.db_pool = Some(Arc::new(pool));
-            // Load existing connections from database
-            self.load_connections();
-            // Load query history from database
-            self.load_query_history();
-        }
-    }
-
-    fn initialize_sample_data(&mut self) {
-        // Initialize with connections as root nodes
-        self.refresh_connections_tree();
-
-        // Don't add sample queries - let load_queries_from_directory handle the real structure
-        // self.queries_tree will be populated by load_queries_from_directory()
-
-        // Initialize empty history tree (will be loaded from database)
-        self.refresh_history_tree();
-    }
-
-    fn refresh_connections_tree(&mut self) {
-                
-        // Clear existing tree
-        self.items_tree.clear();
-
-        // Create folder structure for connections
-        self.items_tree = self.create_connections_folder_structure();
-            
-        
-    }
-
-    fn create_connections_folder_structure(&self) -> Vec<models::structs::TreeNode> {
-        // Group connections by custom folder first, then by database type
-        let mut folder_groups: std::collections::HashMap<String, Vec<&models::structs::ConnectionConfig>> = std::collections::HashMap::new();
-        
-        // Group connections by custom folder
-        for conn in &self.connections {
-            let folder_name = conn.folder.as_ref().unwrap_or(&"Default".to_string()).clone();
-            folder_groups.entry(folder_name).or_insert_with(Vec::new).push(conn);
-        }
-        
-        let mut result = Vec::new();
-        
-        // Create folder structure for each custom folder
-        for (folder_name, connections) in folder_groups {
-            if connections.is_empty() {
-                continue;
-            }
-            
-            // Create custom folder node
-            let mut custom_folder = models::structs::TreeNode::new(folder_name.clone(), models::enums::NodeType::CustomFolder);
-            custom_folder.is_expanded = false; // Start collapsed
-            
-            // Within each custom folder, group by database type
-            let mut mysql_connections = Vec::new();
-            let mut postgresql_connections = Vec::new();
-            let mut sqlite_connections = Vec::new();
-            let mut redis_connections = Vec::new();
-            
-            for conn in connections {
-                if let Some(id) = conn.id {
-                    let node = models::structs::TreeNode::new_connection(conn.name.clone(), id);
-                    match conn.connection_type {
-                        models::enums::DatabaseType::MySQL => {
-                            mysql_connections.push(node);
-                        },
-                        models::enums::DatabaseType::PostgreSQL => {
-                            postgresql_connections.push(node);
-                        },
-                        models::enums::DatabaseType::SQLite => {
-                            sqlite_connections.push(node);
-                        },
-                        models::enums::DatabaseType::Redis => {
-                            redis_connections.push(node);
-                        },
-                    }
-                } else {
-                    debug!("  -> Skipping connection with no ID");
-                }
-            }
-            
-            // Create database type folders within custom folder
-            let mut db_type_folders = Vec::new();
-                        
-            if !mysql_connections.is_empty() {
-                let _ = mysql_connections.len();
-                let mut mysql_folder = models::structs::TreeNode::new("MySQL".to_string(), models::enums::NodeType::MySQLFolder);
-                mysql_folder.children = mysql_connections;
-                mysql_folder.is_expanded = false;
-                db_type_folders.push(mysql_folder);
-            }
-            
-            if !postgresql_connections.is_empty() {
-                let _ = postgresql_connections.len();
-                let mut postgresql_folder = models::structs::TreeNode::new("PostgreSQL".to_string(), models::enums::NodeType::PostgreSQLFolder);
-                postgresql_folder.children = postgresql_connections;
-                postgresql_folder.is_expanded = false;
-                db_type_folders.push(postgresql_folder);
-            }
-            
-            if !sqlite_connections.is_empty() {
-                let _ = sqlite_connections.len();
-                let mut sqlite_folder = models::structs::TreeNode::new("SQLite".to_string(), models::enums::NodeType::SQLiteFolder);
-                sqlite_folder.children = sqlite_connections;
-                sqlite_folder.is_expanded = false;
-                db_type_folders.push(sqlite_folder);
-            }
-            
-            if !redis_connections.is_empty() {
-                let _ = redis_connections.len();
-                let mut redis_folder = models::structs::TreeNode::new("Redis".to_string(), models::enums::NodeType::RedisFolder);
-                redis_folder.children = redis_connections;
-                redis_folder.is_expanded = false;
-                db_type_folders.push(redis_folder);
-            }
-            
-            custom_folder.children = db_type_folders;
-            result.push(custom_folder);
-        }
-        
-        // Sort folders alphabetically, but put "Default" first
-        result.sort_by(|a, b| {
-            if a.name == "Default" {
-                std::cmp::Ordering::Less
-            } else if b.name == "Default" {
-                std::cmp::Ordering::Greater
-            } else {
-                a.name.cmp(&b.name)
-            }
-        });
-        
-        if result.is_empty() {
-            debug!("No connections found, returning empty tree");
-        }
-        
-        result
-    }
-
-    // Tab management methods
-    fn create_new_tab(&mut self, title: String, content: String) -> usize {
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
-        
-        let new_tab = models::structs::QueryTab {
-            title,
-            content: content.clone(),
-            file_path: None,
-            is_saved: false,
-            is_modified: false,
-            connection_id: None, // No connection assigned by default
-            database_name: None, // No database assigned by default
-            has_executed_query: false, // New tab hasn't executed any query yet
-        };
-        
-        self.query_tabs.push(new_tab);
-        let new_index = self.query_tabs.len() - 1;
-        self.active_tab_index = new_index;
-        
-        // Update editor with new tab content
-        self.editor_text = content;
-        
-        tab_id
-    }
-
-    fn create_new_tab_with_connection(&mut self, title: String, content: String, connection_id: Option<i64>) -> usize {
-        self.create_new_tab_with_connection_and_database(title, content, connection_id, None)
-    }
-    
-    fn create_new_tab_with_connection_and_database(&mut self, title: String, content: String, connection_id: Option<i64>, database_name: Option<String>) -> usize {
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
-        
-        let new_tab = models::structs::QueryTab {
-            title,
-            content: content.clone(),
-            file_path: None,
-            is_saved: false,
-            is_modified: false,
-            connection_id,
-            database_name,
-            has_executed_query: false, // New tab hasn't executed any query yet
-        };
-        
-        self.query_tabs.push(new_tab);
-        let new_index = self.query_tabs.len() - 1;
-        self.active_tab_index = new_index;
-        
-        // Update editor with new tab content
-        self.editor_text = content;
-        
-        tab_id
-    }
-
-    fn close_tab(&mut self, tab_index: usize) {
-        if self.query_tabs.len() <= 1 {
-            // Don't close the last tab, just clear it
-            if let Some(tab) = self.query_tabs.get_mut(0) {
-                tab.content.clear();
-                tab.title = "Untitled Query".to_string();
-                tab.file_path = None;
-                tab.is_saved = false;
-                tab.is_modified = false;
-                tab.connection_id = None; // Clear connection as well
-                tab.database_name = None; // Clear database as well
-            }
-            self.editor_text.clear();
-            return;
-        }
-
-        if tab_index < self.query_tabs.len() {
-            self.query_tabs.remove(tab_index);
-            
-            // Adjust active tab index
-            if self.active_tab_index >= self.query_tabs.len() {
-                self.active_tab_index = self.query_tabs.len() - 1;
-            } else if self.active_tab_index > tab_index {
-                self.active_tab_index -= 1;
-            }
-            
-            // Update editor with active tab content
-            if let Some(active_tab) = self.query_tabs.get(self.active_tab_index) {
-                self.editor_text = active_tab.content.clone();
-            }
-        }
-    }
-
-    fn switch_to_tab(&mut self, tab_index: usize) {
-        if tab_index < self.query_tabs.len() {
-            // Save current tab content
-            if let Some(current_tab) = self.query_tabs.get_mut(self.active_tab_index) {
-                if current_tab.content != self.editor_text {
-                    current_tab.content = self.editor_text.clone();
-                    current_tab.is_modified = true;
-                }
-            }
-            
-            // Switch to new tab
-            self.active_tab_index = tab_index;
-            if let Some(new_tab) = self.query_tabs.get(tab_index) {
-                self.editor_text = new_tab.content.clone();
-            }
-        }
-    }
-
-    fn save_current_tab(&mut self) -> Result<(), String> {
-        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
-            tab.content = self.editor_text.clone();
-            
-            if tab.file_path.is_some() {
-                // File already exists, save directly
-                let file_path = tab.file_path.as_ref().unwrap().clone();
-                std::fs::write(&file_path, &tab.content)
-                    .map_err(|e| format!("Failed to save file: {}", e))?;
-                
-                tab.is_saved = true;
-                tab.is_modified = false;
-                
-                Ok(())
-            } else {
-                // Show save dialog for new file
-                self.save_filename = tab.title.replace("Untitled Query", "").trim().to_string();
-                if self.save_filename.is_empty() {
-                    self.save_filename = "new_query".to_string();
-                }
-                if !self.save_filename.ends_with(".sql") {
-                    self.save_filename.push_str(".sql");
-                }
-                self.show_save_dialog = true;
-                Ok(())
-            }
-        } else {
-            Err("No active tab".to_string())
-        }
-    }
-
-    fn save_current_tab_with_name(&mut self, filename: String) -> Result<(), String> {
-        if let Some(tab) = self.query_tabs.get_mut(self.active_tab_index) {
-            // Get query directory and ensure it exists
-            let query_dir = directory::get_query_dir();
-            std::fs::create_dir_all(&query_dir).map_err(|e| format!("Failed to create query directory: {}", e))?;
-            
-            let mut clean_filename = filename.trim().to_string();
-            if !clean_filename.ends_with(".sql") {
-                clean_filename.push_str(".sql");
-            }
-            
-            let file_path = query_dir.join(&clean_filename);
-            
-            std::fs::write(&file_path, &tab.content)
-                .map_err(|e| format!("Failed to save file: {}", e))?;
-            
-            tab.file_path = Some(file_path.to_string_lossy().to_string());
-            tab.title = clean_filename;
-            tab.is_saved = true;
-            tab.is_modified = false;
-            
-            // Refresh queries tree to show the new file
-            self.load_queries_from_directory();
-            
-            Ok(())
-        } else {
-            Err("No active tab".to_string())
-        }
-    }
-
-    fn load_queries_from_directory(&mut self) {
-        self.queries_tree.clear();
-
-        let query_dir = directory::get_query_dir();
-        self.queries_tree = directory::load_directory_recursive(&query_dir);
-        
-        // Sort folders and files alphabetically
-        self.queries_tree.sort_by(|a, b| {
-            match (&a.node_type, &b.node_type) {
-                (models::enums::NodeType::QueryFolder, models::enums::NodeType::Query) => std::cmp::Ordering::Less, // Folders first
-                (models::enums::NodeType::Query, models::enums::NodeType::QueryFolder) => std::cmp::Ordering::Greater, // Files after folders
-                _ => a.name.cmp(&b.name), // Alphabetical within same type
-            }
-        });
-    }
-
-    fn create_query_folder(&mut self, folder_name: &str) -> Result<(), String> {
-        if folder_name.trim().is_empty() {
-            return Err("Folder name cannot be empty".to_string());
-        }
-
-        let query_dir = directory::get_query_dir();
-        let folder_path = query_dir.join(folder_name);
-        
-        if folder_path.exists() {
-            return Err("Folder already exists".to_string());
-        }
-        
-        std::fs::create_dir_all(&folder_path)
-            .map_err(|e| format!("Failed to create folder: {}", e))?;
-            
-        // Refresh the queries tree
-        self.load_queries_from_directory();
-        
-        Ok(())
-    }
-
-    fn create_query_folder_in_parent(&mut self, folder_name: &str, parent_folder: &str) -> Result<(), String> {
-        if folder_name.trim().is_empty() {
-            return Err("Folder name cannot be empty".to_string());
-        }
-
-        let query_dir = directory::get_query_dir();
-        let parent_path = query_dir.join(parent_folder);
-        
-        if !parent_path.exists() || !parent_path.is_dir() {
-            return Err(format!("Parent folder '{}' does not exist", parent_folder));
-        }
-        
-        let folder_path = parent_path.join(folder_name);
-        
-        if folder_path.exists() {
-            return Err(format!("Folder '{}' already exists in '{}'", folder_name, parent_folder));
-        }
-        
-        std::fs::create_dir_all(&folder_path)
-            .map_err(|e| format!("Failed to create folder: {}", e))?;
-            
-        // Refresh the queries tree
-        self.load_queries_from_directory();
-        
-        Ok(())
-    }
-
-    fn move_query_to_folder(&mut self, query_file_path: &str, target_folder: &str) -> Result<(), String> {
-        let source_path = std::path::Path::new(query_file_path);
-        let file_name = source_path.file_name()
-            .ok_or("Invalid file path")?;
-            
-        let query_dir = directory::get_query_dir();
-        let target_folder_path = query_dir.join(target_folder);
-        let target_file_path = target_folder_path.join(file_name);
-        
-        // Create target folder if it doesn't exist
-        std::fs::create_dir_all(&target_folder_path)
-            .map_err(|e| format!("Failed to create target folder: {}", e))?;
-            
-        // Move the file
-        std::fs::rename(source_path, &target_file_path)
-            .map_err(|e| format!("Failed to move file: {}", e))?;
-            
-        // Close any open tabs for this file and update with new path
-        self.close_tabs_for_file(query_file_path);
-        
-        // Refresh the queries tree
-        self.load_queries_from_directory();
-        
-        Ok(())
-    }
-
-    fn move_query_to_root(&mut self, query_file_path: &str) -> Result<(), String> {
-        let source_path = std::path::Path::new(query_file_path);
-        let file_name = source_path.file_name()
-            .ok_or("Invalid file path")?;
-            
-        let query_dir = directory::get_query_dir();
-        let target_file_path = query_dir.join(file_name);
-        
-        // Move the file to root
-        std::fs::rename(source_path, &target_file_path)
-            .map_err(|e| format!("Failed to move file: {}", e))?;
-            
-        // Close any open tabs for this file and update with new path
-        self.close_tabs_for_file(query_file_path);
-        
-        // Refresh the queries tree
-        self.load_queries_from_directory();
-        
-        Ok(())
-    }
-
-    fn render_save_dialog(&mut self, ctx: &egui::Context) {
-        if self.show_save_dialog {
-            egui::Window::new("Save Query")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label("Enter filename:");
-                    ui.text_edit_singleline(&mut self.save_filename);
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() && !self.save_filename.is_empty() {
-                            if let Err(err) = self.save_current_tab_with_name(self.save_filename.clone()) {
-                                error!("Failed to save: {}", err);
-                            }
-                            self.show_save_dialog = false;
-                            self.save_filename.clear();
-                        }
-                        
-                        if ui.button("Cancel").clicked() {
-                            self.show_save_dialog = false;
-                            self.save_filename.clear();
-                        }
-                    });
-                });
-        }
     }
 
     fn render_error_dialog(&mut self, ctx: &egui::Context) {
@@ -927,150 +342,6 @@ impl Tabular {
                     });
                 });
         }
-    }
-
-    fn render_create_folder_dialog(&mut self, ctx: &egui::Context) {
-        if self.show_create_folder_dialog {
-            let window_title = if let Some(ref parent) = self.parent_folder_for_creation {
-                format!("Create Folder in '{}'", parent)
-            } else {
-                "Create Query Folder".to_string()
-            };
-            
-            egui::Window::new(window_title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    if let Some(ref parent) = self.parent_folder_for_creation {
-                        ui.label(format!("Creating folder inside: {}", parent));
-                        ui.separator();
-                    }
-                    
-                    ui.label("Folder name:");
-                    ui.text_edit_singleline(&mut self.new_folder_name);
-                    ui.separator();
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
-                            let folder_name = self.new_folder_name.clone();
-                            let parent_folder = self.parent_folder_for_creation.clone();
-                            
-                            let result = if let Some(parent) = parent_folder {
-                                self.create_query_folder_in_parent(&folder_name, &parent)
-                            } else {
-                                self.create_query_folder(&folder_name)
-                            };
-                            
-                            if let Err(err) = result {
-                                self.error_message = err;
-                                self.show_error_message = true;
-                            } else {
-                                // Force immediate UI repaint after successful folder creation
-                                ui.ctx().request_repaint();
-                            }
-                            
-                            self.show_create_folder_dialog = false;
-                            self.new_folder_name.clear();
-                            self.parent_folder_for_creation = None;
-                        }
-                        
-                        if ui.button("Cancel").clicked() {
-                            self.show_create_folder_dialog = false;
-                            self.new_folder_name.clear();
-                            self.parent_folder_for_creation = None;
-                        }
-                    });
-                });
-        }
-    }
-
-    fn render_move_to_folder_dialog(&mut self, ctx: &egui::Context) {
-        if self.show_move_to_folder_dialog {
-            egui::Window::new("Move Query to Folder")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    if let Some(query_path) = &self.selected_query_for_move {
-                        let file_name = std::path::Path::new(query_path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Unknown");
-                        ui.label(format!("Moving: {}", file_name));
-                        ui.separator();
-                    }
-                    
-                    ui.label("Target folder:");
-                    ui.text_edit_singleline(&mut self.target_folder_name);
-                    ui.small("(Leave empty to move to root, or enter folder name)");
-                    ui.separator();
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Move").clicked() {
-                            if let Some(query_path) = self.selected_query_for_move.clone() {
-                                if self.target_folder_name.trim().is_empty() {
-                                    // Move to root
-                                    if let Err(err) = self.move_query_to_root(&query_path) {
-                                        self.error_message = err;
-                                        self.show_error_message = true;
-                                    }
-                                } else if let Err(err) = self.move_query_to_folder(&query_path, &self.target_folder_name.clone()) {
-                                    self.error_message = err;
-                                    self.show_error_message = true;
-                                }
-                            }
-                            self.show_move_to_folder_dialog = false;
-                            self.selected_query_for_move = None;
-                            self.target_folder_name.clear();
-                        }
-                        
-                        if ui.button("Cancel").clicked() {
-                            self.show_move_to_folder_dialog = false;
-                            self.selected_query_for_move = None;
-                            self.target_folder_name.clear();
-                        }
-                    });
-                });
-        }
-    }
-
-    fn open_query_file(&mut self, file_path: &str) -> Result<(), String> {
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-        
-        let filename = std::path::Path::new(file_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Unknown")
-            .to_string();
-        
-        // Check if file is already open
-        for (index, tab) in self.query_tabs.iter().enumerate() {
-            if tab.file_path.as_deref() == Some(file_path) {
-                self.switch_to_tab(index);
-                return Ok(());
-            }
-        }
-        
-        // Create new tab for the file
-        let new_tab = models::structs::QueryTab {
-            title: filename,
-            content: content.clone(),
-            file_path: Some(file_path.to_string()),
-            is_saved: true,
-            is_modified: false,
-            connection_id: None, // File queries don't have connection by default
-            database_name: None, // File queries don't have database by default
-            has_executed_query: false, // New tab hasn't executed any query yet
-        };
-        
-        self.query_tabs.push(new_tab);
-        let new_index = self.query_tabs.len() - 1;
-        self.active_tab_index = new_index;
-        self.editor_text = content;
-        
-        Ok(())
     }
 
     fn get_active_tab_title(&self) -> String {
@@ -1164,7 +435,7 @@ impl Tabular {
             
             // Create new tab with this connection pre-selected
             let tab_title = format!("Query - {}", connection_name);
-            self.create_new_tab_with_connection(tab_title, String::new(), Some(connection_id));
+            editor::create_new_tab_with_connection(self, tab_title, String::new(), Some(connection_id));
             
             debug!("Created new tab with connection ID: {}", connection_id);
         }
@@ -1328,7 +599,7 @@ impl Tabular {
                                 };
                                 
                                 let tab_title = format!("Redis Key: {} ({})", table_name, k_type);
-                                self.create_new_tab_with_connection_and_database(tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
+                                editor::create_new_tab_with_connection_and_database(self, tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
                                 
                                 // Set current connection ID and database for Redis query execution
                                 self.current_connection_id = Some(connection_id);
@@ -1359,7 +630,7 @@ impl Tabular {
                                 }
                             };
                             let tab_title = format!("Redis {}", table_name);
-                            self.create_new_tab_with_connection_and_database(tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
+                            editor::create_new_tab_with_connection_and_database(self, tab_title, redis_command.clone(), Some(connection_id), database_name.clone());
                             
                             // Set database and auto-execute
                             self.current_connection_id = Some(connection_id);
@@ -1390,7 +661,7 @@ impl Tabular {
                         };
                         
                         let tab_title = format!("Table: {}", table_name);
-                        self.create_new_tab_with_connection_and_database(tab_title, query_content.clone(), Some(connection_id), database_name.clone());
+                        editor::create_new_tab_with_connection_and_database(self, tab_title, query_content.clone(), Some(connection_id), database_name.clone());
                         
                         // Set database context for current tab and auto-execute the query and display results in bottom
                         self.current_connection_id = Some(connection_id);
@@ -1414,11 +685,11 @@ impl Tabular {
             if file_path.is_empty() {
                 // This is a placeholder query without a file path - create a new unsaved tab
                 debug!("📝 Creating new tab for placeholder query: {}", filename);
-                self.create_new_tab(filename, content);
+                editor::create_new_tab(self, filename, content);
             } else {
                 // Use existing open_query_file logic which checks for already open tabs
                 debug!("📁 Opening query file: {}", file_path);
-                if let Err(err) = self.open_query_file(&file_path) {
+                if let Err(err) = sidebar_query::open_query_file(self, &file_path) {
                     debug!("❌ Failed to open query file: {}", err);
                 } else {
                     debug!("✅ Successfully opened query file: {}", file_path);
@@ -1469,7 +740,7 @@ impl Tabular {
                 debug!("🗑️ Remove query operation with hash: {}", hash);
                 if self.handle_query_remove_request_by_hash(hash) {
                     // Force refresh of queries tree if removal was successful
-                    self.load_queries_from_directory();
+                    sidebar_query::load_queries_from_directory(self);
                     
                     // Force immediate UI repaint - this is crucial!
                     ui.ctx().request_repaint();
@@ -1482,11 +753,11 @@ impl Tabular {
                 // ID > 10000 means copy connection (connection_id = context_id - 10000)
                 let connection_id = context_id - 10000;
                 debug!("📋 Copy connection operation for connection: {}", connection_id);
-                self.copy_connection(connection_id);
+                sidebar_database::copy_connection(self, connection_id);
                 
                 // Force immediate tree refresh and UI update
                 self.items_tree.clear();
-                self.refresh_connections_tree();
+                sidebar_database::refresh_connections_tree(self);
                 needs_full_refresh = true;
                 ui.ctx().request_repaint();
                 
@@ -1503,17 +774,17 @@ impl Tabular {
                 }
             } else if context_id > 0 {
                 // Positive ID means edit connection
-                self.start_edit_connection(context_id);
+                sidebar_database::start_edit_connection(self, context_id);
             } else {
                 // Negative ID means remove connection
                 let connection_id = -context_id;
                 if !processed_removals.contains(&connection_id) {
                     processed_removals.insert(connection_id);
-                    self.remove_connection(connection_id);
+                    connection::remove_connection(self, connection_id);
                     
                     // Force immediate tree refresh and UI update
                     self.items_tree.clear();
-                    self.refresh_connections_tree();
+                    sidebar_database::refresh_connections_tree(self);
                     needs_full_refresh = true;
                     ui.ctx().request_repaint();
                     
@@ -1527,7 +798,7 @@ impl Tabular {
         if needs_full_refresh {
             // Completely clear and rebuild the tree
             self.items_tree.clear();
-            self.refresh_connections_tree();
+            sidebar_database::refresh_connections_tree(self);
             self.needs_refresh = true; // Set flag for next update cycle
             ui.ctx().request_repaint();
             
@@ -2036,317 +1307,13 @@ impl Tabular {
         (expansion_request, table_expansion, context_menu_request, table_click_request, connection_click_request, query_file_to_open, folder_name_for_removal, parent_folder_for_creation, folder_removal_mapping)
     }
 
-    fn render_connection_dialog(&mut self, ctx: &egui::Context, is_edit_mode: bool) {
-        let should_show = if is_edit_mode { self.show_edit_connection } else { self.show_add_connection };
-        
-        if !should_show {
-            return;
-        }
-        
-        let mut open = true;
-        let title = if is_edit_mode { "Edit Connection" } else { "Add New Connection" };
-        
-        // Clone the connection data to work with
-        let mut connection_data = if is_edit_mode {
-            self.edit_connection.clone()
-        } else {
-            self.new_connection.clone()
-        };
-        
-        egui::Window::new(title)
-            .resizable(false)
-            .default_width(600.0)
-            .collapsible(false)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    egui::Grid::new("connection_form")
-                        .num_columns(2)
-                        .spacing([10.0, 8.0])
-                        .show(ui, |ui| {
-                            ui.label("Connection Name:");
-                            ui.text_edit_singleline(&mut connection_data.name);
-                            ui.end_row();
-
-                            ui.label("Database Type:");
-                            egui::ComboBox::from_label("")
-                                .selected_text(match connection_data.connection_type {
-                                    models::enums::DatabaseType::MySQL => "MySQL",
-                                    models::enums::DatabaseType::PostgreSQL => "PostgreSQL",
-                                    models::enums::DatabaseType::SQLite => "SQLite",
-                                    models::enums::DatabaseType::Redis => "Redis",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::MySQL, "MySQL");
-                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::PostgreSQL, "PostgreSQL");
-                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::SQLite, "SQLite");
-                                    ui.selectable_value(&mut connection_data.connection_type, models::enums::DatabaseType::Redis, "Redis");
-                                });
-                            ui.end_row();
-
-                            ui.label("Host:");
-                            ui.text_edit_singleline(&mut connection_data.host);
-                            ui.end_row();
-
-                            ui.label("Port:");
-                            ui.text_edit_singleline(&mut connection_data.port);
-                            ui.end_row();
-
-                            ui.label("Username:");
-                            ui.text_edit_singleline(&mut connection_data.username);
-                            ui.end_row();
-
-                            ui.label("Password:");
-                            ui.add(egui::TextEdit::singleline(&mut connection_data.password).password(true));
-                            ui.end_row();
-
-                            ui.label("Database:");
-                            ui.text_edit_singleline(&mut connection_data.database);
-                            ui.end_row();
-
-                            ui.label("Folder (Optional):");
-                            let mut folder_text = connection_data.folder.as_ref().unwrap_or(&String::new()).clone();
-                            ui.text_edit_singleline(&mut folder_text);
-                            connection_data.folder = if folder_text.trim().is_empty() { None } else { Some(folder_text.trim().to_string()) };
-                            ui.end_row();
-                        });
-
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        let save_button_text = if is_edit_mode { "Update" } else { "Save" };
-                        if ui.button(save_button_text).clicked() && !connection_data.name.is_empty() {
-                            if is_edit_mode {
-                                // Update existing connection
-                                if let Some(id) = connection_data.id {
-                                    
-                                    if self.update_connection_in_database(&connection_data) {
-                                        self.load_connections();
-                                        self.refresh_connections_tree();
-                                    } else {
-                                        // Fallback to in-memory update
-                                        if let Some(existing) = self.connections.iter_mut().find(|c| c.id == Some(id)) {
-                                            *existing = connection_data.clone();
-                                            self.refresh_connections_tree();
-                                        } else {
-                                            debug!("ERROR: Could not find connection {} in memory", id);
-                                        }
-                                    }
-                                } else {
-                                    debug!("ERROR: Connection has no ID, cannot update");
-                                }
-                                self.show_edit_connection = false;
-                            } else {
-                                // Add new connection
-                                let mut connection_to_add = connection_data.clone();
-                                
-                                // Try to save to database first
-                                if self.save_connection_to_database(&connection_to_add) {
-                                    // If database save successful, reload from database to get ID
-                                    self.load_connections();
-                                    self.refresh_connections_tree();
-                                } else {
-                                    // Fallback to in-memory storage
-                                    let new_id = self.connections.iter()
-                                        .filter_map(|c| c.id)
-                                        .max()
-                                        .unwrap_or(0) + 1;
-                                    connection_to_add.id = Some(new_id);
-                                    self.connections.push(connection_to_add);
-                                    self.refresh_connections_tree();
-                                }
-                                
-                                self.new_connection = models::structs::ConnectionConfig::default();
-                                self.test_connection_status = None;
-                                self.test_connection_in_progress = false;
-                                self.show_add_connection = false;
-                            }
-                        }
-
-                        // Push Test Connection button ke kanan
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // Test Connection button (untuk kedua mode add dan edit)
-                            if self.test_connection_in_progress {
-                                ui.spinner();
-                                ui.label("Testing connection...");
-                            } else if ui.button("Test Connection").clicked() {
-                                self.test_connection_in_progress = true;
-                                self.test_connection_status = None;
-                                
-                                // Test connection based on database type
-                                let result = self.test_database_connection(&connection_data);
-                                self.test_connection_in_progress = false;
-                                self.test_connection_status = Some(result);
-                            }
-                        });
-                    });
-                    
-                    // Display test connection status (untuk kedua mode add dan edit)
-                    if let Some((success, message)) = &self.test_connection_status {
-                        ui.separator();
-                        if *success {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(egui::Color32::GREEN, "✓");
-                                ui.colored_label(egui::Color32::GREEN, message);
-                            });
-                        } else {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(egui::Color32::RED, "✗");
-                                ui.colored_label(egui::Color32::RED, message);
-                            });
-                        }
-                    }
-                });
-            });
-        
-        // Update the original data with any changes made in the dialog
-        if is_edit_mode {
-            self.edit_connection = connection_data;
-        } else {
-            self.new_connection = connection_data;
-        }
-        
-        // Handle window close via X button
-        if !open {
-            if is_edit_mode {
-                self.show_edit_connection = false;
-            } else {
-                self.new_connection = models::structs::ConnectionConfig::default();
-                self.test_connection_status = None;
-                self.test_connection_in_progress = false;
-                self.show_add_connection = false;
-            }
-        }
-    }
-
-    fn render_add_connection_dialog(&mut self, ctx: &egui::Context) {
-        self.render_connection_dialog(ctx, false);
-    }
-
-    fn render_edit_connection_dialog(&mut self, ctx: &egui::Context) {
-        self.render_connection_dialog(ctx, true);
-    }
-
-    fn load_connections(&mut self) {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let connections_result = rt.block_on(async {
-                sqlx::query_as::<_, (i64, String, String, String, String, String, String, String, Option<String>)>(
-                    "SELECT id, name, host, port, username, password, database_name, connection_type, folder FROM connections"
-                )
-                .fetch_all(pool_clone.as_ref())
-                .await
-            });
-            
-            if let Ok(rows) = connections_result {
-
-                self.connections = rows.into_iter().map(|(id, name, host, port, username, password, database_name, connection_type, folder)| {
-                    models::structs::ConnectionConfig {
-                        id: Some(id),
-                        name,
-                        host,
-                        port,
-                        username,
-                        password,
-                        database: database_name,
-                        connection_type: match connection_type.as_str() {
-                            "MySQL" => models::enums::DatabaseType::MySQL,
-                            "PostgreSQL" => models::enums::DatabaseType::PostgreSQL,
-                            "Redis" => models::enums::DatabaseType::Redis,
-                            _ => models::enums::DatabaseType::SQLite,
-                        },
-                        folder,
-                    }
-                }).collect();
-            }
-        }
-        
-        // Refresh the tree after loading connections
-        self.refresh_connections_tree();
-    }
-
-
-    fn save_connection_to_database(&self, connection: &models::structs::ConnectionConfig) -> bool {
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let connection = connection.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result = rt.block_on(async {
-                sqlx::query(
-                    "INSERT INTO connections (name, host, port, username, password, database_name, connection_type, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                )
-                .bind(connection.name)
-                .bind(connection.host)
-                .bind(connection.port)
-                .bind(connection.username)
-                .bind(connection.password)
-                .bind(connection.database)
-                .bind(format!("{:?}", connection.connection_type))
-                .bind(connection.folder)
-                .execute(pool_clone.as_ref())
-                .await
-            });
-            
-            result.is_ok()
-        } else {
-            false
-        }
-    }
-
-    fn start_edit_connection(&mut self, connection_id: i64) {
-        // Find the connection to edit
-        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-            self.edit_connection = connection.clone();
-            // Reset test connection status saat buka edit dialog
-            self.test_connection_status = None;
-            self.test_connection_in_progress = false;
-            self.show_edit_connection = true;
-        } else {
-            for conn in &self.connections {
-                debug!("  - {} (ID: {:?})", conn.name, conn.id);
-            }
-        }
-    }
-
-    fn copy_connection(&mut self, connection_id: i64) {
-        // Find the connection to copy
-        if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)).cloned() {
-            let mut copied_connection = connection.clone();
-            
-            // Reset ID and modify name to indicate it's a copy
-            copied_connection.id = None;
-            copied_connection.name = format!("{} - Copy", copied_connection.name);
-            
-            
-            // Try to save to database first
-            if self.save_connection_to_database(&copied_connection) {
-                // If database save successful, reload from database to get ID
-                self.load_connections();
-            } else {
-                // Fallback to in-memory storage
-                let new_id = self.connections.iter()
-                    .filter_map(|c| c.id)
-                    .max()
-                    .unwrap_or(0) + 1;
-                copied_connection.id = Some(new_id);
-                self.connections.push(copied_connection);
-            }
-            
-        } else {
-            debug!("❌ Connection with ID {} not found for copying", connection_id);
-        }
-    }
-
     fn handle_query_edit_request(&mut self, hash: i64) {
         
         // Find the query file by hash
         if let Some(query_file_path) = self.find_query_file_by_hash(hash) {
             
             // Open the query file in a new tab for editing
-            if let Err(err) = self.open_query_file(&query_file_path) {
+            if let Err(err) = sidebar_query::open_query_file(self, &query_file_path) {
                 debug!("Failed to open query file for editing: {}", err);
             }
         } else {
@@ -2432,7 +1399,7 @@ impl Tabular {
         search_in_dir(&query_dir, hash)
     }
 
-    fn close_tabs_for_file(&mut self, file_path: &str) {
+    pub(crate) fn close_tabs_for_file(&mut self, file_path: &str) {
         // Find all tabs that have this file open and close them
         let mut indices_to_close = Vec::new();
         
@@ -2444,7 +1411,7 @@ impl Tabular {
         
         // Close tabs in reverse order to maintain correct indices
         for &index in indices_to_close.iter().rev() {
-            self.close_tab(index);
+            editor::close_tab(self, index);
         }
     }
 
@@ -2543,7 +1510,7 @@ impl Tabular {
                     match std::fs::remove_dir(&folder_path) {
                         Ok(()) => {
                             // Refresh the queries tree
-                            self.load_queries_from_directory();
+                            sidebar_query::load_queries_from_directory(self);
                             // Force UI refresh
                             self.needs_refresh = true;
                         }
@@ -2582,7 +1549,7 @@ impl Tabular {
                     if is_empty {
                         match std::fs::remove_dir(&folder_path) {
                             Ok(()) => {
-                                self.load_queries_from_directory();
+                                sidebar_query::load_queries_from_directory(self);
                                 self.needs_refresh = true;
                             }
                             Err(e) => {
@@ -2616,227 +1583,6 @@ impl Tabular {
             false
         }
     }
-
-    fn test_database_connection(&self, connection: &models::structs::ConnectionConfig) -> (bool, String) {
-
-        // ping the host first
-        if !helpers::ping_host(&connection.host) {
-            return (false, format!("Failed to ping host: {}", connection.host));
-        }
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        
-        rt.block_on(async {
-            match connection.connection_type {
-                models::enums::DatabaseType::MySQL => {
-                    let encoded_username = modules::url_encode(&connection.username);
-                    let encoded_password = modules::url_encode(&connection.password);
-                    let connection_string = format!(
-                        "mysql://{}:{}@{}:{}/{}",
-                        encoded_username, encoded_password, connection.host, connection.port, connection.database
-                    );
-                    
-                    match MySqlPoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            // Test with a simple query
-                            match sqlx::query("SELECT 1").execute(&pool).await {
-                                Ok(_) => (true, "MySQL connection successful!".to_string()),
-                                Err(e) => (false, format!("MySQL query failed: {}", e)),
-                            }
-                        },
-                        Err(e) => (false, format!("MySQL connection failed: {}", e)),
-                    }
-                },
-                models::enums::DatabaseType::PostgreSQL => {
-                    let connection_string = format!(
-                        "postgresql://{}:{}@{}:{}/{}",
-                        connection.username, connection.password, connection.host, connection.port, connection.database
-                    );
-                    
-                    match PgPoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            // Test with a simple query
-                            match sqlx::query("SELECT 1").execute(&pool).await {
-                                Ok(_) => (true, "PostgreSQL connection successful!".to_string()),
-                                Err(e) => (false, format!("PostgreSQL query failed: {}", e)),
-                            }
-                        },
-                        Err(e) => (false, format!("PostgreSQL connection failed: {}", e)),
-                    }
-                },
-                models::enums::DatabaseType::SQLite => {
-                    let connection_string = format!("sqlite:{}", connection.host);
-                    
-                    match SqlitePoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(std::time::Duration::from_secs(10))
-                        .connect(&connection_string)
-                        .await
-                    {
-                        Ok(pool) => {
-                            // Test with a simple query
-                            match sqlx::query("SELECT 1").execute(&pool).await {
-                                Ok(_) => (true, "SQLite connection successful!".to_string()),
-                                Err(e) => (false, format!("SQLite query failed: {}", e)),
-                            }
-                        },
-                        Err(e) => (false, format!("SQLite connection failed: {}", e)),
-                    }
-                },
-                models::enums::DatabaseType::Redis => {
-                    let connection_string = if connection.password.is_empty() {
-                        format!("redis://{}:{}", connection.host, connection.port)
-                    } else {
-                        format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
-                    };
-                    
-                    match Client::open(connection_string) {
-                        Ok(client) => {
-                            match client.get_connection() {
-                                Ok(mut conn) => {
-                                    // Test with a simple PING command
-                                    match redis::cmd("PING").query::<String>(&mut conn) {
-                                        Ok(response) => {
-                                            if response == "PONG" {
-                                                (true, "Redis connection successful!".to_string())
-                                            } else {
-                                                (false, "Redis PING returned unexpected response".to_string())
-                                            }
-                                        },
-                                        Err(e) => (false, format!("Redis PING failed: {}", e)),
-                                    }
-                                },
-                                Err(e) => (false, format!("Redis connection failed: {}", e)),
-                            }
-                        },
-                        Err(e) => (false, format!("Redis client creation failed: {}", e)),
-                    }
-                }
-            }
-        })
-    }
-
-    fn update_connection_in_database(&self, connection: &models::structs::ConnectionConfig) -> bool {
-        if let Some(ref pool) = self.db_pool {
-            if let Some(id) = connection.id {
-                let pool_clone = pool.clone();
-                let connection = connection.clone();
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                
-                
-                let result = rt.block_on(async {
-                    sqlx::query(
-                        "UPDATE connections SET name = ?, host = ?, port = ?, username = ?, password = ?, database_name = ?, connection_type = ?, folder = ? WHERE id = ?"
-                    )
-                    .bind(connection.name)
-                    .bind(connection.host)
-                    .bind(connection.port)
-                    .bind(connection.username)
-                    .bind(connection.password)
-                    .bind(connection.database)
-                    .bind(format!("{:?}", connection.connection_type))
-                    .bind(connection.folder)
-                    .bind(id)
-                    .execute(pool_clone.as_ref())
-                    .await
-                });
-                
-                match &result {
-                    Ok(query_result) => {
-                        debug!("Update successful: {} rows affected", query_result.rows_affected());
-                    }
-                    Err(e) => {
-                        debug!("Update failed: {}", e);
-                    }
-                }
-                
-                result.is_ok()
-            } else {
-                debug!("Cannot update connection: no ID found");
-                false
-            }
-        } else {
-            debug!("Cannot update connection: no database pool available");
-            false
-        }
-    }
-
-
-
-    fn remove_connection(&mut self, connection_id: i64) {
-        
-        // Remove from database first with explicit transaction
-        if let Some(ref pool) = self.db_pool {
-            let pool_clone = pool.clone();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result: Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> = rt.block_on(async {
-                // Begin transaction
-                let mut tx = pool_clone.begin().await?;
-                
-                // Delete cache data first (foreign key constraints will handle this automatically due to CASCADE)
-                let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(&mut *tx)
-                    .await;
-                
-                let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(&mut *tx)
-                    .await;
-                
-                let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ?")
-                    .bind(connection_id)
-                    .execute(&mut *tx)
-                    .await;
-                
-                // Delete the connection
-                let delete_result = sqlx::query("DELETE FROM connections WHERE id = ?")
-                    .bind(connection_id)
-                    .execute(&mut *tx)
-                    .await?;
-                
-                // Commit transaction
-                tx.commit().await?;
-                
-                Ok(delete_result)
-            });
-            
-            match result {
-                Ok(delete_result) => {
-                    
-                    // Only proceed if we actually deleted something
-                    if delete_result.rows_affected() == 0 {
-                        debug!("Warning: No rows were deleted from database!");
-                        return;
-                    }
-                },
-                Err(e) => {
-                    debug!("Failed to delete from database: {}", e);
-                    return; // Don't proceed if database deletion failed
-                }
-            }
-        }
-        
-        self.connections.retain(|c| c.id != Some(connection_id));
-        // Remove from connection pool cache
-        self.connection_pools.remove(&connection_id);
-                
-        // Set flag to force refresh on next update
-        self.needs_refresh = true;
-        
-    }
-
 
     fn find_connection_node_recursive(nodes: &mut [models::structs::TreeNode], connection_id: i64) -> Option<&mut models::structs::TreeNode> {
         for node in nodes.iter_mut() {
@@ -4488,7 +3234,7 @@ impl Tabular {
                 debug!("============================");
                 
                 // Save query to history after successful execution
-                self.save_query_to_history(&query, connection_id);
+                sidebar_history::save_query_to_history(self, &query, connection_id);
             } else {
                 self.current_table_name = "Query execution failed".to_string();
                 self.current_table_headers.clear();
@@ -5150,85 +3896,6 @@ impl Tabular {
         );
     }
 
-    fn load_query_history(&mut self) {
-        if let Some(pool) = &self.db_pool {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            
-            let result = rt.block_on(async {
-                match sqlx::query_as::<_, (i64, String, i64, String, String)>(
-                    "SELECT id, query_text, connection_id, connection_name, executed_at FROM query_history ORDER BY executed_at DESC LIMIT 100"
-                )
-                .fetch_all(pool.as_ref())
-                .await
-                {
-                    Ok(rows) => {
-                        let mut history_items = Vec::new();
-                        for row in rows {
-                            history_items.push(models::structs::HistoryItem {
-                                id: Some(row.0),
-                                query: row.1,
-                                connection_id: row.2,
-                                connection_name: row.3,
-                                executed_at: row.4,
-                            });
-                        }
-                        history_items
-                    }
-                    Err(e) => {
-                        debug!("Failed to load query history: {}", e);
-                        Vec::new()
-                    }
-                }
-            });
-            
-            self.history_items = result;
-            self.refresh_history_tree();
-        }
-    }
-
-    fn save_query_to_history(&mut self, query: &str, connection_id: i64) {
-        if let Some(pool) = &self.db_pool {
-            if let Some(connection) = self.connections.iter().find(|c| c.id == Some(connection_id)) {
-                let connection_name = connection.name.clone();
-
-                
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    let _ = sqlx::query(
-                        "INSERT INTO query_history (query_text, connection_id, connection_name) VALUES (?, ?, ?)"
-                    )
-                    .bind(query.to_string())
-                    .bind(connection_id)
-                    .bind(&connection_name)
-                    .execute(pool.as_ref())
-                    .await;
-                    
-                    // Clean up old history entries if we have more than 150 entries
-                    let _ = sqlx::query(
-                        "DELETE FROM query_history WHERE id NOT IN (
-                            SELECT id FROM query_history ORDER BY executed_at DESC LIMIT 150
-                        )"
-                    )
-                    .execute(pool.as_ref())
-                    .await;
-                });
-                
-                // Reload history to update UI
-                self.load_query_history();
-            }
-        }
-    }
-
-    fn refresh_history_tree(&mut self) {
-        self.history_tree.clear();
-        
-        for item in &self.history_items {
-            let mut node = models::structs::TreeNode::new(item.query.clone(), models::enums::NodeType::QueryHistItem);
-            node.connection_id = Some(item.connection_id);
-            
-            self.history_tree.push(node);
-        }
-    }
 
     fn render_advanced_editor(&mut self, ui: &mut egui::Ui) {
         // Find & Replace panel
@@ -5657,7 +4324,7 @@ impl App for Tabular {
             self.needs_refresh = false;
             
             // Force refresh of query tree
-            self.load_queries_from_directory();
+            sidebar_query::load_queries_from_directory(self);
             
             // Request UI repaint
             ctx.request_repaint();
@@ -5692,7 +4359,7 @@ impl App for Tabular {
         ctx.input(|i| {
             // CMD+W or CTRL+W to close current tab
             if (i.modifiers.mac_cmd || i.modifiers.ctrl) && i.key_pressed(egui::Key::W) && !self.query_tabs.is_empty() {
-                self.close_tab(self.active_tab_index);
+                editor::close_tab(self, self.active_tab_index);
             }
             
             // CMD+Q or CTRL+Q to quit application
@@ -5801,14 +4468,14 @@ impl App for Tabular {
             ctx.request_repaint();
         }
         
-        self.render_add_connection_dialog(ctx);
-        self.render_edit_connection_dialog(ctx);
-        self.render_save_dialog(ctx);
+        sidebar_database::render_add_connection_dialog(self, ctx);
+        sidebar_database::render_edit_connection_dialog(self, ctx);
+        editor::render_save_dialog(self, ctx);
         connection::render_connection_selector(self, ctx);
         self.render_error_dialog(ctx);
         self.render_about_dialog(ctx);
-        self.render_create_folder_dialog(ctx);
-        self.render_move_to_folder_dialog(ctx);
+        sidebar_query::render_create_folder_dialog(self, ctx);
+        sidebar_query::render_move_to_folder_dialog(self, ctx);
 
         egui::SidePanel::left("sidebar")
             .resizable(true)
@@ -5947,7 +4614,7 @@ impl App for Tabular {
                             //             .fill(egui::Color32::RED)
                             //     ).on_hover_text("New Query File").clicked() {
                             //         // Create new tab instead of clearing editor
-                            //         self.create_new_tab("Untitled Query".to_string(), String::new());
+                            //         editor::create_new_tab(self, "Untitled Query".to_string(), String::new());
                             //     }
                             // },
                             _ => {
@@ -6073,7 +4740,7 @@ impl App for Tabular {
                                     egui::Button::new("+")
                                         .fill(egui::Color32::BLACK)
                                 ).clicked() {
-                                    self.create_new_tab("Untitled Query".to_string(), String::new());
+                                    editor::create_new_tab(self, "Untitled Query".to_string(), String::new());
                                 }
                                 
                                 // Push gear icon to the far right
@@ -6111,10 +4778,10 @@ impl App for Tabular {
                                 
                                 // Handle tab operations
                                 if let Some(index) = tab_to_close {
-                                    self.close_tab(index);
+                                    editor::close_tab(self, index);
                                 }
                                 if let Some(index) = tab_to_switch {
-                                    self.switch_to_tab(index);
+                                    editor::switch_to_tab(self, index);
                                 }
                             });
                             
@@ -6165,7 +4832,7 @@ impl App for Tabular {
                                     if ui.input(|i| {
                                         (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::S)
                                     }) {
-                                        if let Err(err) = self.save_current_tab() {
+                                        if let Err(err) = editor::save_current_tab(self) {
                                             error!("Failed to save: {}", err);
                                         }
                                     }

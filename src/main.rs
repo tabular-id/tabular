@@ -12,6 +12,10 @@ mod driver_postgres;
 mod driver_redis;
 mod directory;
 mod connection;
+mod sidebar_database;
+mod sidebar_history;
+mod sidebar_query;
+mod editor;
 
 fn main() -> Result<(), eframe::Error> {
     dotenv::dotenv().ok();

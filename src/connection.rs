@@ -1245,3 +1245,227 @@ pub(crate) fn fetch_columns_from_database(_connection_id: i64, database_name: &s
        })
 }
 
+
+
+
+
+pub(crate) fn update_connection_in_database(tabular: &mut window_egui::Tabular, connection: &models::structs::ConnectionConfig) -> bool {
+        if let Some(ref pool) = tabular.db_pool {
+            if let Some(id) = connection.id {
+                let pool_clone = pool.clone();
+                let connection = connection.clone();
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                
+                
+                let result = rt.block_on(async {
+                    sqlx::query(
+                        "UPDATE connections SET name = ?, host = ?, port = ?, username = ?, password = ?, database_name = ?, connection_type = ?, folder = ? WHERE id = ?"
+                    )
+                    .bind(connection.name)
+                    .bind(connection.host)
+                    .bind(connection.port)
+                    .bind(connection.username)
+                    .bind(connection.password)
+                    .bind(connection.database)
+                    .bind(format!("{:?}", connection.connection_type))
+                    .bind(connection.folder)
+                    .bind(id)
+                    .execute(pool_clone.as_ref())
+                    .await
+                });
+                
+                match &result {
+                    Ok(query_result) => {
+                        debug!("Update successful: {} rows affected", query_result.rows_affected());
+                    }
+                    Err(e) => {
+                        debug!("Update failed: {}", e);
+                    }
+                }
+                
+                result.is_ok()
+            } else {
+                debug!("Cannot update connection: no ID found");
+                false
+            }
+        } else {
+            debug!("Cannot update connection: no database pool available");
+            false
+        }
+    }
+
+
+
+pub(crate) fn remove_connection(tabular: &mut window_egui::Tabular, connection_id: i64) {
+        
+        // Remove from database first with explicit transaction
+        if let Some(ref pool) = tabular.db_pool {
+            let pool_clone = pool.clone();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            
+            let result: Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> = rt.block_on(async {
+                // Begin transaction
+                let mut tx = pool_clone.begin().await?;
+                
+                // Delete cache data first (foreign key constraints will handle this automatically due to CASCADE)
+                let _ = sqlx::query("DELETE FROM database_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(&mut *tx)
+                    .await;
+                
+                let _ = sqlx::query("DELETE FROM table_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(&mut *tx)
+                    .await;
+                
+                let _ = sqlx::query("DELETE FROM column_cache WHERE connection_id = ?")
+                    .bind(connection_id)
+                    .execute(&mut *tx)
+                    .await;
+                
+                // Delete the connection
+                let delete_result = sqlx::query("DELETE FROM connections WHERE id = ?")
+                    .bind(connection_id)
+                    .execute(&mut *tx)
+                    .await?;
+                
+                // Commit transaction
+                tx.commit().await?;
+                
+                Ok(delete_result)
+            });
+            
+            match result {
+                Ok(delete_result) => {
+                    
+                    // Only proceed if we actually deleted something
+                    if delete_result.rows_affected() == 0 {
+                        debug!("Warning: No rows were deleted from database!");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    debug!("Failed to delete from database: {}", e);
+                    return; // Don't proceed if database deletion failed
+                }
+            }
+        }
+        
+        tabular.connections.retain(|c| c.id != Some(connection_id));
+        // Remove from connection pool cache
+        tabular.connection_pools.remove(&connection_id);
+                
+        // Set flag to force refresh on next update
+        tabular.needs_refresh = true;
+        
+    }
+
+
+pub(crate) fn test_database_connection(connection: &models::structs::ConnectionConfig) -> (bool, String) {
+
+        // ping the host first
+        if !helpers::ping_host(&connection.host) {
+            return (false, format!("Failed to ping host: {}", connection.host));
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        
+        rt.block_on(async {
+            match connection.connection_type {
+                models::enums::DatabaseType::MySQL => {
+                    let encoded_username = modules::url_encode(&connection.username);
+                    let encoded_password = modules::url_encode(&connection.password);
+                    let connection_string = format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        encoded_username, encoded_password, connection.host, connection.port, connection.database
+                    );
+                    
+                    match MySqlPoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(std::time::Duration::from_secs(10))
+                        .connect(&connection_string)
+                        .await
+                    {
+                        Ok(pool) => {
+                            // Test with a simple query
+                            match sqlx::query("SELECT 1").execute(&pool).await {
+                                Ok(_) => (true, "MySQL connection successful!".to_string()),
+                                Err(e) => (false, format!("MySQL query failed: {}", e)),
+                            }
+                        },
+                        Err(e) => (false, format!("MySQL connection failed: {}", e)),
+                    }
+                },
+                models::enums::DatabaseType::PostgreSQL => {
+                    let connection_string = format!(
+                        "postgresql://{}:{}@{}:{}/{}",
+                        connection.username, connection.password, connection.host, connection.port, connection.database
+                    );
+                    
+                    match PgPoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(std::time::Duration::from_secs(10))
+                        .connect(&connection_string)
+                        .await
+                    {
+                        Ok(pool) => {
+                            // Test with a simple query
+                            match sqlx::query("SELECT 1").execute(&pool).await {
+                                Ok(_) => (true, "PostgreSQL connection successful!".to_string()),
+                                Err(e) => (false, format!("PostgreSQL query failed: {}", e)),
+                            }
+                        },
+                        Err(e) => (false, format!("PostgreSQL connection failed: {}", e)),
+                    }
+                },
+                models::enums::DatabaseType::SQLite => {
+                    let connection_string = format!("sqlite:{}", connection.host);
+                    
+                    match SqlitePoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(std::time::Duration::from_secs(10))
+                        .connect(&connection_string)
+                        .await
+                    {
+                        Ok(pool) => {
+                            // Test with a simple query
+                            match sqlx::query("SELECT 1").execute(&pool).await {
+                                Ok(_) => (true, "SQLite connection successful!".to_string()),
+                                Err(e) => (false, format!("SQLite query failed: {}", e)),
+                            }
+                        },
+                        Err(e) => (false, format!("SQLite connection failed: {}", e)),
+                    }
+                },
+                models::enums::DatabaseType::Redis => {
+                    let connection_string = if connection.password.is_empty() {
+                        format!("redis://{}:{}", connection.host, connection.port)
+                    } else {
+                        format!("redis://{}:{}@{}:{}", connection.username, connection.password, connection.host, connection.port)
+                    };
+                    
+                    match Client::open(connection_string) {
+                        Ok(client) => {
+                            match client.get_connection() {
+                                Ok(mut conn) => {
+                                    // Test with a simple PING command
+                                    match redis::cmd("PING").query::<String>(&mut conn) {
+                                        Ok(response) => {
+                                            if response == "PONG" {
+                                                (true, "Redis connection successful!".to_string())
+                                            } else {
+                                                (false, "Redis PING returned unexpected response".to_string())
+                                            }
+                                        },
+                                        Err(e) => (false, format!("Redis PING failed: {}", e)),
+                                    }
+                                },
+                                Err(e) => (false, format!("Redis connection failed: {}", e)),
+                            }
+                        },
+                        Err(e) => (false, format!("Redis client creation failed: {}", e)),
+                    }
+                }
+            }
+        })
+    }
