@@ -1,5 +1,6 @@
 use eframe::egui;
-use log::error;
+use egui_code_editor::{CodeEditor, ColorTheme};
+use log::{debug, error};
 
 use crate::{directory, editor, models, sidebar_query, window_egui};
 
@@ -198,4 +199,426 @@ pub(crate) fn render_save_dialog(tabular: &mut window_egui::Tabular, ctx: &egui:
                     });
                 });
         }
+    }
+
+
+
+
+pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mut egui::Ui) {
+        // Find & Replace panel
+        if tabular.advanced_editor.show_find_replace {
+            ui.horizontal(|ui| {
+                ui.label("Find:");
+                ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut tabular.advanced_editor.find_text));
+                
+                ui.label("Replace:");
+                ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut tabular.advanced_editor.replace_text));
+                
+                ui.checkbox(&mut tabular.advanced_editor.case_sensitive, "Case Sensitive");
+                ui.checkbox(&mut tabular.advanced_editor.use_regex, "Regex");
+                
+                if ui.button("Replace All").clicked() {
+                    perform_replace_all(tabular);
+                }
+                
+                if ui.button("Find Next").clicked() {
+                    find_next(tabular);
+                }
+                
+                if ui.button("✕").clicked() {
+                    tabular.advanced_editor.show_find_replace = false;
+                }
+            });
+        }
+
+        // Main code editor using egui_code_editor
+        let mut editor = CodeEditor::default()
+            .id_source("sql_editor")
+            .with_rows(25)
+            .with_fontsize(tabular.advanced_editor.font_size)
+            .with_theme(tabular.advanced_editor.theme)
+            .with_syntax(egui_code_editor::Syntax::sql())
+            .with_numlines(tabular.advanced_editor.show_line_numbers);
+
+        let response = editor.show(ui, &mut tabular.editor_text);
+        
+        // Try to capture selected text from the response
+        // Note: This is a simplified approach. The actual implementation may vary depending on the CodeEditor version
+        if let Some(text_cursor_range) = response.cursor_range {
+            let start = text_cursor_range.primary.ccursor.index.min(text_cursor_range.secondary.ccursor.index);
+            let end = text_cursor_range.primary.ccursor.index.max(text_cursor_range.secondary.ccursor.index);
+            
+            // Store cursor position (use primary cursor position)
+            tabular.cursor_position = text_cursor_range.primary.ccursor.index;
+            
+            if start != end {
+                // There is a selection
+                if let Some(selected) = tabular.editor_text.get(start..end) {
+                    tabular.selected_text = selected.to_string();
+                } else {
+                    tabular.selected_text.clear();
+                }
+            } else {
+                // No selection
+                tabular.selected_text.clear();
+            }
+        } else {
+            // No cursor range available, clear selection
+            tabular.selected_text.clear();
+        }
+        
+        // If you get a type error here, try:
+        // let mut buffer = egui_code_editor::SimpleTextBuffer::from(&tabular.editor_text);
+        // let response = editor.show(ui, &mut buffer);
+        // tabular.editor_text = buffer.text().to_string();
+        
+        // Update tab content when editor changes
+        if response.response.changed() {
+            if let Some(tab) = tabular.query_tabs.get_mut(tabular.active_tab_index) {
+                tab.content = tabular.editor_text.clone();
+                tab.is_modified = true;
+            }
+        }
+    }
+
+pub(crate) fn perform_replace_all(tabular: &mut window_egui::Tabular) {
+        if tabular.advanced_editor.find_text.is_empty() {
+            return;
+        }
+
+        let find_text = &tabular.advanced_editor.find_text;
+        let replace_text = &tabular.advanced_editor.replace_text;
+
+        if tabular.advanced_editor.use_regex {
+            // Use regex replacement
+            if let Ok(re) = regex::Regex::new(find_text) {
+                tabular.editor_text = re.replace_all(&tabular.editor_text, replace_text).into_owned();
+            }
+        } else {
+            // Simple string replacement
+            if tabular.advanced_editor.case_sensitive {
+                tabular.editor_text = tabular.editor_text.replace(find_text, replace_text);
+            } else {
+                // Case insensitive replacement
+                let find_lower = find_text.to_lowercase();
+                let mut result = String::new();
+                let mut last_end = 0;
+                
+                for (start, part) in tabular.editor_text.match_indices(&find_lower) {
+                    result.push_str(&tabular.editor_text[last_end..start]);
+                    result.push_str(replace_text);
+                    last_end = start + part.len();
+                }
+                result.push_str(&tabular.editor_text[last_end..]);
+                tabular.editor_text = result;
+            }
+        }
+
+        // Update current tab content
+        if let Some(tab) = tabular.query_tabs.get_mut(tabular.active_tab_index) {
+            tab.content = tabular.editor_text.clone();
+            tab.is_modified = true;
+        }
+    }
+
+pub(crate) fn find_next(tabular: &mut window_egui::Tabular) {
+        // This is a simplified find implementation
+        // In a real implementation, you'd want to track cursor position and highlight matches
+        if !tabular.advanced_editor.find_text.is_empty() {
+            if let Some(_pos) = tabular.editor_text.find(&tabular.advanced_editor.find_text) {
+                // In a full implementation, you would scroll to and highlight the match
+                debug!("Found match for: {}", tabular.advanced_editor.find_text);
+            }
+        }
+    }
+
+pub(crate) fn open_command_palette(tabular: &mut window_egui::Tabular) {
+        tabular.show_command_palette = true;
+        tabular.command_palette_input.clear();
+        tabular.show_theme_selector = false;
+        tabular.command_palette_selected_index = 0;
+        
+        // Initialize command palette items
+        tabular.command_palette_items = vec![
+            "Preferences: Color Theme".to_string(),
+            "View: Toggle Word Wrap".to_string(),
+            "View: Toggle Line Numbers".to_string(),
+            "View: Toggle Find and Replace".to_string(),
+        ];
+    }
+
+pub(crate) fn navigate_command_palette(tabular: &mut window_egui::Tabular, direction: i32) {
+        // Filter commands based on current input
+        let filtered_commands: Vec<String> = if tabular.command_palette_input.is_empty() {
+            tabular.command_palette_items.clone()
+        } else {
+            tabular.command_palette_items
+                .iter()
+                .filter(|cmd| cmd.to_lowercase().contains(&tabular.command_palette_input.to_lowercase()))
+                .cloned()
+                .collect()
+        };
+
+        if filtered_commands.is_empty() {
+            return;
+        }
+
+        // Update selected index with wrapping
+        if direction > 0 {
+            // Down arrow
+            tabular.command_palette_selected_index = (tabular.command_palette_selected_index + 1) % filtered_commands.len();
+        } else {
+            // Up arrow
+            if tabular.command_palette_selected_index == 0 {
+                tabular.command_palette_selected_index = filtered_commands.len() - 1;
+            } else {
+                tabular.command_palette_selected_index -= 1;
+            }
+        }
+    }
+
+pub(crate) fn execute_selected_command(tabular: &mut window_egui::Tabular) {
+        // Filter commands based on current input
+        let filtered_commands: Vec<String> = if tabular.command_palette_input.is_empty() {
+            tabular.command_palette_items.clone()
+        } else {
+            tabular.command_palette_items
+                .iter()
+                .filter(|cmd| cmd.to_lowercase().contains(&tabular.command_palette_input.to_lowercase()))
+                .cloned()
+                .collect()
+        };
+
+        if tabular.command_palette_selected_index < filtered_commands.len() {
+            let selected_command = filtered_commands[tabular.command_palette_selected_index].clone();
+            execute_command(tabular, &selected_command);
+        }
+    }
+
+pub(crate) fn navigate_theme_selector(tabular: &mut window_egui::Tabular, direction: i32) {
+        // There are 3 themes available
+        let theme_count = 3;
+
+        // Update selected index with wrapping
+        if direction > 0 {
+            // Down arrow
+            tabular.theme_selector_selected_index = (tabular.theme_selector_selected_index + 1) % theme_count;
+        } else {
+            // Up arrow
+            if tabular.theme_selector_selected_index == 0 {
+                tabular.theme_selector_selected_index = theme_count - 1;
+            } else {
+                tabular.theme_selector_selected_index -= 1;
+            }
+        }
+    }
+
+pub(crate) fn select_current_theme(tabular: &mut window_egui::Tabular) {
+        // Map index to theme
+        let theme = match tabular.theme_selector_selected_index {
+            0 => ColorTheme::GITHUB_DARK,
+            1 => ColorTheme::GITHUB_LIGHT,
+            2 => ColorTheme::GRUVBOX,
+            _ => ColorTheme::GITHUB_DARK, // fallback
+        };
+
+        tabular.advanced_editor.theme = theme;
+        tabular.show_theme_selector = false;
+    }
+
+pub(crate) fn render_command_palette(tabular: &mut window_egui::Tabular, ctx: &egui::Context) {
+        // Create a centered modal dialog
+        egui::Area::new(egui::Id::new("command_palette"))
+            .fixed_pos(egui::pos2(
+                ctx.screen_rect().center().x - 300.0,
+                ctx.screen_rect().center().y - 200.0,
+            ))
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(ui.style().visuals.window_fill)
+                    .stroke(ui.style().visuals.window_stroke)
+                    .shadow(egui::epaint::Shadow::default())
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        
+                        ui.vertical(|ui| {                            
+                            // Search input
+                            let response = ui.add_sized(
+                                [580.0, 25.0],
+                                egui::TextEdit::singleline(&mut tabular.command_palette_input)
+                                    .hint_text("Type command name...")
+                            );
+                            
+                            // Reset selection when text changes
+                            if response.changed() {
+                                tabular.command_palette_selected_index = 0;
+                            }
+                            
+                            // Auto-focus the input when palette opens
+                            if tabular.command_palette_input.is_empty() {
+                                response.request_focus();
+                            }
+                            
+                            ui.separator();
+                            
+                            // Filter commands based on input
+                            let filtered_commands: Vec<String> = if tabular.command_palette_input.is_empty() {
+                                tabular.command_palette_items.clone()
+                            } else {
+                                tabular.command_palette_items
+                                    .iter()
+                                    .filter(|cmd| cmd.to_lowercase().contains(&tabular.command_palette_input.to_lowercase()))
+                                    .cloned()
+                                    .collect()
+                            };
+
+                            // Ensure selected index is within bounds when filtering
+                            if tabular.command_palette_selected_index >= filtered_commands.len() && !filtered_commands.is_empty() {
+                                tabular.command_palette_selected_index = 0;
+                            }
+                            
+                            // Command list
+                            egui::ScrollArea::vertical()
+                                .max_height(500.0)
+                                .show(ui, |ui| {
+                                    for (index, command) in filtered_commands.iter().enumerate() {
+                                        let is_selected = index == tabular.command_palette_selected_index;
+                                        
+                                        // Highlight selected item
+                                        let text = if is_selected {
+                                            egui::RichText::new(command)
+                                                .background_color(ui.style().visuals.selection.bg_fill)
+                                                .color(ui.style().visuals.selection.stroke.color)
+                                        } else {
+                                            egui::RichText::new(command)
+                                        };
+                                        
+                                        if ui.selectable_label(is_selected, text).clicked() {
+                                            execute_command(tabular, command);
+                                        }
+                                    }
+                                });
+                            
+                        });
+                    });
+            });
+    }
+
+pub(crate) fn execute_command(tabular: &mut window_egui::Tabular, command: &str) {
+        match command {
+            "Preferences: Color Theme" => {
+                tabular.show_command_palette = false;
+                // Instead of directly setting show_theme_selector, use a flag
+                tabular.request_theme_selector = true;
+                tabular.theme_selector_selected_index = 0; // Reset to first theme
+            }
+            "View: Toggle Word Wrap" => {
+                tabular.advanced_editor.word_wrap = !tabular.advanced_editor.word_wrap;
+                tabular.show_command_palette = false;
+            }
+            "View: Toggle Line Numbers" => {
+                tabular.advanced_editor.show_line_numbers = !tabular.advanced_editor.show_line_numbers;
+                tabular.show_command_palette = false;
+            }
+            "View: Toggle Find and Replace" => {
+                tabular.advanced_editor.show_find_replace = !tabular.advanced_editor.show_find_replace;
+                tabular.show_command_palette = false;
+            }
+            _ => {
+                debug!("Unknown command: {}", command);
+                tabular.show_command_palette = false;
+            }
+        }
+    }
+
+pub(crate) fn render_theme_selector(tabular: &mut window_egui::Tabular, ctx: &egui::Context) {
+        // Create a centered modal dialog for theme selection
+        egui::Area::new(egui::Id::new("theme_selector"))
+            .fixed_pos(egui::pos2(
+                ctx.screen_rect().center().x - 200.0,
+                ctx.screen_rect().center().y - 150.0,
+            ))
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(ui.style().visuals.window_fill)
+                    .stroke(ui.style().visuals.window_stroke)
+                    .shadow(egui::epaint::Shadow::default())
+                    .inner_margin(egui::Margin::same(15))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(400.0, 300.0));
+                        
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Select Color Theme").heading());
+                            ui.separator();
+                            
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            
+                            // Available themes with descriptions
+                            let themes = vec![
+                                (ColorTheme::GITHUB_DARK, "GitHub Dark", "Dark theme with blue accents"),
+                                (ColorTheme::GITHUB_LIGHT, "GitHub Light", "Light theme with subtle colors"),
+                                (ColorTheme::GRUVBOX, "Gruvbox", "Retro warm theme with earthy colors"),
+                            ];
+                            
+                            for (index, (theme, name, description)) in themes.iter().enumerate() {
+                                let is_current = tabular.advanced_editor.theme == *theme;
+                                let is_selected = index == tabular.theme_selector_selected_index;
+                                
+                                // Create horizontal layout for theme item
+                                ui.horizontal(|ui| {
+                                    // Current theme indicator (checkmark)
+                                    if is_current {
+                                        ui.label("✓");
+                                    } else {
+                                        ui.label(" "); // Space for alignment
+                                    }
+                                    
+                                    // Theme name with different styling based on selection
+                                    let text = if is_selected {
+                                        // Highlight the selected item for keyboard navigation
+                                        egui::RichText::new(*name)
+                                            .size(16.0)
+                                            .background_color(ui.style().visuals.selection.bg_fill)
+                                            .color(ui.style().visuals.selection.stroke.color)
+                                    } else if is_current {
+                                        // Bold text for current theme
+                                        egui::RichText::new(*name)
+                                            .size(16.0)
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(0, 150, 255)) // Blue for current
+                                    } else {
+                                        // Normal text for other themes
+                                        egui::RichText::new(*name).size(16.0)
+                                    };
+                                    
+                                    let response = ui.label(text);
+                                    
+                                    // Handle click to select theme
+                                    if response.clicked() && !is_current {
+                                        tabular.advanced_editor.theme = *theme;
+                                        tabular.show_theme_selector = false;
+                                    }
+                                });
+                                
+                                // Show description with indentation
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0); // Indent description
+                                    ui.label(egui::RichText::new(*description).size(12.0).weak());
+                                });
+                                ui.add_space(5.0);
+                            }
+                            
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Use");
+                                ui.code("↑↓");
+                                ui.label("to navigate,");
+                                ui.code("Enter");
+                                ui.label("to select,");
+                                ui.code("Escape");
+                                ui.label("to close");
+                            });
+                        });
+                    });
+            });
     }
