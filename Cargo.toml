@@ -68,3 +68,4 @@ self_update = { version = "0.42", features = ["archive-tar", "archive-zip"], def
 # Currently the implementation still falls back to single replace & full rope rebuild.
 # Enabling this feature today does not change behavior yet, but provides a stable knob.
 granular_edit = []
+default = ["granular_edit"]

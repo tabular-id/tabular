@@ -86,6 +86,122 @@ pub fn show(
         ui.memory_mut(|m| m.request_focus(id));
     }
 
+    // Basic metrics for mapping pointer -> document offset (monospace assumption)
+    let char_w = ui.fonts(|f| f.glyph_width(&egui::TextStyle::Monospace.resolve(ui.style()), 'M'));
+    let line_count_now = buffer.line_count().max(1);
+    let gutter_w = if state.show_line_numbers { 8.0 * (line_count_now.to_string().len() as f32 + 1.0) } else { 0.0 };
+    let rect_left = available.min.x;
+    let rect_top = available.min.y;
+    let text_origin_for_hit = egui::pos2(
+        rect_left + gutter_w + 6.0 - state.view.scroll_x,
+        rect_top + 4.0 - state.view.scroll_y,
+    );
+
+    // Helper: map pointer position to nearest text offset (UTF-8 boundary safe)
+    let pos_to_offset = |pos: egui::Pos2| -> usize {
+        // Compute line index
+        let y_rel = (pos.y - text_origin_for_hit.y).max(0.0);
+        let mut line_idx = (y_rel / line_height).floor() as usize;
+        line_idx = line_idx.min(buffer.line_count().saturating_sub(1));
+        let line_start = buffer.line_start(line_idx).min(buffer.text.len());
+        let line_end = if line_idx + 1 < buffer.line_count() {
+            buffer.line_start(line_idx + 1).saturating_sub(1).min(buffer.text.len())
+        } else {
+            buffer.text.len()
+        };
+        let line_len = line_end.saturating_sub(line_start);
+        // Compute column approximated by monospace width
+        let x_rel = pos.x - text_origin_for_hit.x;
+        let mut col = if x_rel <= 0.0 { 0 } else { (x_rel / char_w).round() as usize };
+        col = col.min(line_len);
+        let mut off = line_start + col;
+        // Snap to char boundary
+        if off > buffer.text.len() { off = buffer.text.len(); }
+        while off > 0 && !buffer.text.is_char_boundary(off) { off -= 1; }
+        off
+    };
+
+    // Mouse selection: click to set caret, drag to select
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let off = pos_to_offset(pos);
+            let shift_pressed = ui.input(|i| i.modifiers.shift);
+            if shift_pressed {
+                selection.ensure_primary(off);
+                if let Some(primary) = selection.primary_mut() {
+                    primary.head = off; // anchor tetap
+                }
+            } else {
+                selection.clear();
+                selection.add_collapsed(off);
+            }
+            signals.caret_moved = true;
+        }
+    }
+
+    // Double-click: select word under cursor
+    if response.double_clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let off = pos_to_offset(pos);
+            let text = &buffer.text;
+            let bytes = text.as_bytes();
+            let is_word = |b: u8| -> bool { b.is_ascii_alphanumeric() || b == b'_' };
+            let mut start = off.min(text.len());
+            while start > 0 && !text.is_char_boundary(start) { start -= 1; }
+            while start > 0 && {
+                let p = start - 1; bytes.get(p).map(|&b| is_word(b)).unwrap_or(false)
+            } {
+                start -= 1;
+                while start > 0 && !text.is_char_boundary(start) { start -= 1; }
+            }
+            let mut end = off.min(text.len());
+            while end < text.len() && !text.is_char_boundary(end) { end += 1; }
+            while end < text.len() && bytes.get(end).map(|&b| is_word(b)).unwrap_or(false) {
+                end += 1;
+                while end < text.len() && !text.is_char_boundary(end) { end += 1; }
+            }
+            if start < end {
+                selection.clear();
+                selection.add_caret(crate::editor_selection::Caret { anchor: start, head: end });
+                signals.caret_moved = true;
+            }
+        }
+    }
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let off = pos_to_offset(pos);
+            selection.ensure_primary(off);
+            if let Some(primary) = selection.primary_mut() {
+                primary.anchor = off;
+                primary.head = off;
+            }
+            signals.caret_moved = true;
+        }
+    }
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            // Auto-scroll while dragging near/over edges
+            let margin = 12.0;
+            let view_bottom = rect_top + state.view.viewport_h;
+            if pos.y > view_bottom - margin {
+                state.view.scroll_y += (pos.y - (view_bottom - margin)) * 0.5;
+            } else if pos.y < rect_top + margin {
+                state.view.scroll_y = state.view.scroll_y.saturating_sub_f32(((rect_top + margin) - pos.y) * 0.5);
+            }
+            let view_right = rect_left + state.view.viewport_w;
+            if pos.x > view_right - margin {
+                state.view.scroll_x += (pos.x - (view_right - margin)) * 0.5;
+            } else if pos.x < rect_left + margin {
+                state.view.scroll_x = (state.view.scroll_x - ((rect_left + margin) - pos.x) * 0.5).max(0.0);
+            }
+            let off = pos_to_offset(pos);
+            if let Some(primary) = selection.primary_mut() {
+                primary.head = off;
+            }
+            signals.caret_moved = true;
+        }
+    }
+
     ui.input(|i| {
         for ev in &i.events {
             match ev {
@@ -186,13 +302,47 @@ pub fn show(
             signals.text_changed = true;
         }
     } else if !inserted_batch.is_empty() {
-        selection.apply_insert_text(&mut buffer.text, &inserted_batch);
-        buffer.notify_bulk_text_changed();
+        // Apply same insertion at each collapsed caret using rope-first replace
+        let positions = selection.caret_positions();
+        for &pos in positions.iter().rev() {
+            let at = pos.min(buffer.text.len());
+            buffer.apply_single_replace(at..at, &inserted_batch);
+        }
+        // Update selection positions after insertion: bump each caret/anchor >= its own pos
+        let ins_len = inserted_batch.len();
+        for &pos in &positions {
+            selection.apply_simple_insert(pos, ins_len);
+        }
         signals.text_changed = true;
         signals.inserted_char = inserted_batch.chars().last();
     } else if backspace {
-        selection.apply_backspace(&mut buffer.text);
-        buffer.notify_bulk_text_changed();
+        // Backspace one character to the left for each caret
+        let positions = selection.caret_positions();
+        // Determine deletion spans based on current text (before edits)
+        let mut performed: Vec<(usize, usize)> = Vec::new(); // (start,len)
+        for &pos in &positions {
+            if pos == 0 { continue; }
+            let mut real_start = pos - 1;
+            while real_start > 0 && !buffer.text.is_char_boundary(real_start) {
+                real_start -= 1;
+            }
+            let mut real_end = pos;
+            while real_end < buffer.text.len() && !buffer.text.is_char_boundary(real_end) {
+                real_end += 1;
+            }
+            if real_start < real_end && real_end <= buffer.text.len() {
+                performed.push((real_start, real_end - real_start));
+            }
+        }
+        // Apply rope edits from right to left to keep indices valid
+        for &(start, len) in performed.iter().rev() {
+            buffer.apply_single_replace(start..(start + len), "");
+        }
+        // Update selection using exact spans, from last to first
+        performed.sort_by_key(|(s, _)| *s);
+        for (start, len) in performed.into_iter().rev() {
+            selection.apply_simple_delete(start, len);
+        }
         signals.text_changed = true;
     }
     // No full clear; stale entries become unreachable because line_version changes.
