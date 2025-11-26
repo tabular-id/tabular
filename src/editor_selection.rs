@@ -1,4 +1,4 @@
-//! Lightweight multi-selection abstraction independent of lapce-core.
+//! Multi-selection support powered by lapce-core concepts.
 //! Provides a minimal API used by the editor for multi-caret typing and backspace.
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -20,6 +20,10 @@ impl SelRegion {
     #[inline]
     pub fn max(&self) -> usize {
         self.anchor.max(self.head)
+    }
+    #[inline]
+    pub fn is_caret(&self) -> bool {
+        self.anchor == self.head
     }
 }
 

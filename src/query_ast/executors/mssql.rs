@@ -21,7 +21,7 @@ impl MssqlExecutor {
     /// Get MS SQL config wrapper from global connection pools
     fn get_config(
         connection_id: i64,
-    ) -> Result<Arc<crate::driver_mssql::MssqlConfigWrapper>, QueryAstError> {
+    ) -> Result<Arc<crate::models::structs::MssqlConfigWrapper>, QueryAstError> {
         // This will be accessed from global state in actual implementation
         Err(QueryAstError::Execution {
             query: format!("connection_id: {}", connection_id),

@@ -17,7 +17,7 @@ copyright = "Copyright © 2025 Y.N Pamungkas Jayuda"
 info = "Your SQL Editor, Forged with Rust: Fast, Safe, Efficient."
 
 [dependencies]
-eframe = "0.32.3"
+eframe = { version = "0.32.3", optional = true }
 image = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.8.6", features = [
@@ -41,7 +41,7 @@ bson = { version = "3", features = ["uuid-1"] }
 mongodb = { version = "3.3.0", features = ["zlib-compression"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-egui_extras = "0.32.3"
+egui_extras = { version = "0.32.3", optional = true }
 colorful = "0.3.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -89,8 +89,15 @@ thiserror = "1"
 async-trait = "0.1.89"
 cargo-deb = "3.6.2"
 
+# Lapce-core Rope for efficient text operations
+lapce-xi-rope = { version = "0.3", optional = true }
+
+# Floem UI framework
+floem = { git = "https://github.com/lapce/floem", branch = "main", optional = true }
+floem-editor-core = { git = "https://github.com/lapce/floem", branch = "main", optional = true }
+
 [features]
-default = ["tree_sitter_sequel", "query_ast"]
+default = ["floem_ui", "tree_sitter_sequel", "query_ast"]
 
 # Enable experimental tree-sitter SQL highlighting / structural parsing.
 # Activate with: `cargo run --features tree_sitter_sequel` (nama feature memakai underscore)
@@ -100,7 +107,11 @@ tree_sitter_sequel = ["tree-sitter", "tree-sitter-sequel", "anyhow"]
 query_ast = ["sqlparser"]
 sqlparser = ["dep:sqlparser"]
 
-# removed lapce_core in egui-only mode
+# Floem UI (new default)
+floem_ui = ["floem", "floem-editor-core", "lapce-xi-rope"]
+
+# Legacy egui UI (for backward compatibility during migration)
+egui_ui = ["eframe", "egui_extras"]
 
 [package.metadata.deb]
 name = "tabular"

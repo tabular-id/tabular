@@ -1,12 +1,12 @@
-/// Lightweight text buffer for egui-only mode (String-backed).
-/// Provides basic editing, undo/redo, and line index maintenance.
+/// Powerful text buffer using Rope from lapce-xi-rope.
+/// Provides efficient editing, undo/redo, and line index maintenance.
 pub struct EditorBuffer {
-    /// Cached full text for egui TextEdit binding (temporary until full custom editor)
+    /// Core rope data structure for efficient text manipulation
+    rope: lapce_xi_rope::Rope,
+    /// Cached full text for egui TextEdit binding (synced from rope)
     pub text: String,
     /// Dirty flag: when true, rope has diverged from cached text (pending sync to String)
     dirty_to_string: bool,
-    /// Dirty flag: when true, cached text has diverged from rope (pending apply to rope)
-    dirty_to_rope: bool,
     /// Last known revision of the underlying buffer (for incremental features later)
     pub last_revision: u64,
     /// Undo stack (Vec of Edit record). Most recent at end.
@@ -37,11 +37,12 @@ impl Default for EditorBuffer {
 
 impl EditorBuffer {
     pub fn new(initial: &str) -> Self {
+        let rope = lapce_xi_rope::Rope::from(initial);
         let line_starts = Self::compute_line_starts(initial);
         Self {
+            rope,
             text: initial.to_string(),
             dirty_to_string: false,
-            dirty_to_rope: false,
             last_revision: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -53,7 +54,7 @@ impl EditorBuffer {
 
     /// Get a fresh snapshot of the current rope as a String (for UI bindings or export).
     pub fn text_snapshot(&self) -> String {
-        self.text.clone()
+        String::from(&self.rope)
     }
 
     /// Replace whole content (used by tab switching / file load)
@@ -63,6 +64,10 @@ impl EditorBuffer {
         }
         let old = std::mem::take(&mut self.text);
         let old_len = old.len();
+        
+        // Update rope
+        self.rope = lapce_xi_rope::Rope::from(&new_text);
+        
         self.undo_stack.push(EditRecord {
             range: 0..old_len,
             inserted: new_text.clone(),
@@ -72,7 +77,6 @@ impl EditorBuffer {
         self.text = new_text.clone();
         self.last_revision = 0;
         self.dirty_to_string = false;
-        self.dirty_to_rope = false;
         self.recompute_line_starts();
         for v in &mut self.line_versions {
             *v = v.wrapping_add(1);
@@ -82,9 +86,9 @@ impl EditorBuffer {
 
     /// Mark that egui-bound text mutated externally (not used heavily now but kept for compatibility)
     pub fn mark_text_modified(&mut self) {
-        // In egui-only mode, just recompute indices and clear flags
+        // Sync text -> rope
+        self.rope = lapce_xi_rope::Rope::from(&self.text);
         self.notify_bulk_text_changed();
-        self.dirty_to_rope = false;
         self.dirty_to_string = false;
     }
 
@@ -146,10 +150,6 @@ impl EditorBuffer {
         }
     }
 
-    // (granular edit path removed in egui-only mode)
-
-    /// When the feature is disabled we still expose a no-op wrapper for code paths compiled
-    /// without the feature; this avoids conditional call sites. (Same behavior for now.)
     // Core primitive replace used by UI & feature-gated granular path fallback.
     pub fn apply_single_replace(&mut self, old_range: std::ops::Range<usize>, replacement: &str) {
         let start = old_range.start.min(self.text.len());
@@ -160,10 +160,16 @@ impl EditorBuffer {
         let (start_line, _sc) = self.offset_to_line_col(start);
         let (end_line, _ec) = self.offset_to_line_col(end);
         let single_line_edit = !removed_has_nl && !replacement_has_nl && start_line == end_line;
-        // Mutate the String and keep our indices in sync
-        self.text.replace_range(start..end, replacement);
+        
+        // Update rope using its efficient edit method
+        use lapce_xi_rope::interval::Interval;
+        let iv = Interval::new(start, end);
+        self.rope.edit(iv, replacement);
+        
+        // Sync rope back to text
+        self.text = String::from(&self.rope);
+        
         self.last_revision = 0;
-        self.dirty_to_rope = false;
         self.dirty_to_string = false;
         self.undo_stack.push(EditRecord {
             range: start..start + replacement.len(),
@@ -397,6 +403,15 @@ impl EditorBuffer {
             // Replace inserted with original removed text
             if end <= self.text.len() {
                 self.text.replace_range(start..end, &edit.removed);
+                
+                // Update rope
+                use lapce_xi_rope::interval::Interval;
+                let iv = Interval::new(start, end);
+                self.rope.edit(iv, &edit.removed);
+                
+                // Sync rope back to text
+                self.text = String::from(&self.rope);
+                
                 self.last_revision = 0;
                 // Push inverse onto redo stack
                 let inverse = EditRecord {
@@ -423,6 +438,15 @@ impl EditorBuffer {
             let end = start + edit.inserted.len();
             if end <= self.text.len() {
                 self.text.replace_range(start..end, &edit.removed);
+                
+                // Update rope
+                use lapce_xi_rope::interval::Interval;
+                let iv = Interval::new(start, end);
+                self.rope.edit(iv, &edit.removed);
+                
+                // Sync rope back to text
+                self.text = String::from(&self.rope);
+                
                 self.last_revision = 0;
                 // Push inverse back to undo
                 let inverse = EditRecord {

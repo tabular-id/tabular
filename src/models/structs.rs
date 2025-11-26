@@ -2,6 +2,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{self, enums::NodeType};
 
+/// MsSQL configuration wrapper (extracted to avoid driver_mssql dependency)
+#[derive(Clone, Debug)]
+pub struct MssqlConfigWrapper {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl MssqlConfigWrapper {
+    pub fn new(
+        host: String,
+        port: String,
+        database: String,
+        username: String,
+        password: String,
+    ) -> Self {
+        let port_num: u16 = port.parse().unwrap_or(1433);
+        Self {
+            host,
+            port: port_num,
+            database,
+            username,
+            password,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TreeNode {
     pub name: String,

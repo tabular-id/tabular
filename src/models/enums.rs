@@ -155,6 +155,6 @@ pub enum DatabasePool {
     SQLite(Arc<SqlitePool>),
     Redis(Arc<ConnectionManager>),
     // For MsSQL we store a lightweight config (connections opened per query for now)
-    MsSQL(Arc<crate::driver_mssql::MssqlConfigWrapper>),
+    MsSQL(Arc<crate::models::structs::MssqlConfigWrapper>),
     MongoDB(Arc<MongoClient>),
 }
