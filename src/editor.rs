@@ -2533,10 +2533,6 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         .and_then(|t| t.file_path.as_ref())
         .map(|p| crate::syntax_ts::detect_language_from_name(p))
         .unwrap_or(crate::syntax_ts::LanguageKind::Sql);
-    let dark = matches!(
-        tabular.advanced_editor.theme,
-        models::structs::EditorColorTheme::GithubDark | models::structs::EditorColorTheme::Gruvbox
-    );
 
     // Word wrap setting
     let word_wrap = tabular.advanced_editor.word_wrap;
@@ -2608,7 +2604,9 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
     // Create layouter for syntax highlighting
     let layouter_fn: editor_widget::LayouterFn = Box::new(move |ui: &egui::Ui, text: &str, wrap_width: f32| {
         // Use direct highlighting without cache for lapce widget
-        let mut job = crate::syntax_ts::highlight_text(text, lang, dark);
+        // IMPORTANT: Re-evaluate dark mode INSIDE the closure to ensure theme is always active
+        let dark_mode = ui.visuals().dark_mode;
+        let mut job = crate::syntax_ts::highlight_text(text, lang, dark_mode);
         job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
         ui.fonts(|f| f.layout_job(job))
     });

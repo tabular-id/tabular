@@ -506,15 +506,12 @@ fn render_text(
     if selection_start != selection_end {
         let start = selection_start.min(selection_end);
         let end = selection_start.max(selection_end);
-        paint_selection_simple(painter, rect, rope, start, end, row_height);
+        let sel_color = ui.style().visuals.selection.bg_fill;
+        paint_selection_simple(painter, rect, rope, start, end, row_height, sel_color);
     }
 
     // Render text line by line (outside fonts lock)
-    let text_color = if ui.style().visuals.dark_mode {
-        egui::Color32::from_rgb(220, 220, 220) // Light gray untuk dark mode
-    } else {
-        egui::Color32::from_rgb(30, 30, 30)    // Dark gray untuk light mode
-    };
+    let text_color = ui.style().visuals.text_color();
     
     for line_idx in 0..num_lines {
         let line_start = rope.offset_of_line(line_idx);
@@ -570,7 +567,8 @@ fn render_text_with_layouter(
     if selection_start != selection_end {
         let start = selection_start.min(selection_end);
         let end = selection_start.max(selection_end);
-        paint_selection_simple(painter, rect, rope, start, end, row_height);
+        let sel_color = ui.style().visuals.selection.bg_fill;
+        paint_selection_simple(painter, rect, rope, start, end, row_height, sel_color);
     }
 
     // Render text line by line with syntax highlighting
@@ -587,11 +585,9 @@ fn render_text_with_layouter(
 
         // Use layouter for syntax highlighting (returns Arc<Galley>)
         let galley = layouter(ui, line_str, f32::INFINITY);
-        painter.galley(
-            Pos2::new(rect.min.x, y),
-            galley,
-            ui.style().visuals.text_color(),
-        );
+        // Don't apply any tint - the layouter already provides proper themed colors
+        // Using Color32::WHITE would override all syntax colors to white (invisible on light bg)
+        painter.galley(Pos2::new(rect.min.x, y), galley, ui.style().visuals.text_color());
 
         y += row_height;
         if y > rect.max.y {
@@ -638,6 +634,7 @@ fn paint_selection_simple(
     start: usize,
     end: usize,
     row_height: f32,
+    fill: Color32,
 ) {
     let start_line = rope.line_of_offset(start);
     let end_line = rope.line_of_offset(end);
@@ -681,6 +678,6 @@ fn paint_selection_simple(
             Vec2::new(sel_width, row_height),
         );
 
-        painter.rect_filled(sel_rect, 0.0, Color32::from_rgb(60, 120, 200));
+        painter.rect_filled(sel_rect, 0.0, fill);
     }
 }
