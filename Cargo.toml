@@ -78,16 +78,18 @@ self_update = { version = "0.42", features = [
        "archive-zip",
 ], default-features = false }
 
-tree-sitter = { version = "0.25.10", optional = true }
-tree-sitter-sequel = { version = "0.3.11", optional = true }
-tree-sitter-json = "0.24.8"
-tree-sitter-javascript = "0.25.0"
+tree-sitter = { version = "0.22", optional = true }
+tree-sitter-sequel = { version = "0.3", optional = true }
 # Tree-sitter highlighter engine for query-based syntax scopes
 anyhow = { version = "1", optional = true }
 once_cell = "1"
 thiserror = "1"
 async-trait = "0.1.89"
 cargo-deb = "3.6.2"
+
+# Lapce-core dependencies for advanced editor features
+lapce-xi-rope = "0.3.2"
+lapce-core = { git = "https://github.com/lapce/lapce" }
 
 [features]
 default = ["tree_sitter_sequel", "query_ast"]

@@ -182,16 +182,14 @@ mod ts {
     #[derive(Clone, Copy, Debug)]
     enum GrammarKind {
         Sql,
-        Json,
-        Javascript,
     }
 
     impl GrammarKind {
         fn for_language(language: LanguageKind) -> Option<Self> {
             match language {
                 LanguageKind::Sql => Some(GrammarKind::Sql),
-                LanguageKind::Redis => Some(GrammarKind::Json),
-                LanguageKind::Mongo => Some(GrammarKind::Javascript),
+                LanguageKind::Redis => None,
+                LanguageKind::Mongo => None,
                 LanguageKind::Plain => None,
             }
         }
@@ -212,18 +210,17 @@ mod ts {
             let grammar = GrammarKind::for_language(language)
                 .ok_or_else(|| anyhow!("language {:?} has no associated grammar", language))?;
             let mut parser = Parser::new();
+            
             let ts_language = match grammar {
                 GrammarKind::Sql => {
-                    let language = tree_sitter_sequel::LANGUAGE;
-                    language.into()
-                }
-                GrammarKind::Json => {
-                    let language = tree_sitter_json::LANGUAGE;
-                    language.into()
-                }
-                GrammarKind::Javascript => {
-                    let language = tree_sitter_javascript::LANGUAGE;
-                    language.into()
+                    // For tree-sitter-sequel with tree-sitter 0.22:
+                    // LANGUAGE is a LanguageFn (function pointer that returns *const TSLanguage)
+                    // Cast the function pointer to the right type and call it
+                    type LangFn = unsafe extern "C" fn() -> *const tree_sitter::ffi::TSLanguage;
+                    let lang_fn: LangFn = unsafe { std::mem::transmute(tree_sitter_sequel::LANGUAGE) };
+                    unsafe {
+                        tree_sitter::Language::from_raw(lang_fn())
+                    }
                 }
             };
             parser
@@ -365,8 +362,6 @@ mod ts {
     ) -> SemanticSnapshot {
         match grammar {
             GrammarKind::Sql => sql::build_snapshot(language, tree, text, hash),
-            GrammarKind::Json => json_lang::build_snapshot(language, tree, text, hash),
-            GrammarKind::Javascript => javascript::build_snapshot(language, tree, text, hash),
         }
     }
 

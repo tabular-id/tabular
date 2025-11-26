@@ -19,6 +19,7 @@ pub mod editor_autocomplete_new; // temporary clean implementation backing the s
 pub mod editor_buffer;
 pub mod editor_selection;
 pub mod editor_state_adapter;
+pub mod editor_widget;
 pub mod export;
 pub mod models;
 pub mod modules;

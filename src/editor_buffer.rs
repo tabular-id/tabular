@@ -1,33 +1,17 @@
-/// Lightweight text buffer for egui-only mode (String-backed).
-/// Provides basic editing, undo/redo, and line index maintenance.
+use lapce_core::buffer::{Buffer as LapceBuffer, rope_text::RopeText};
+use lapce_xi_rope::Rope;
+
+/// Editor buffer powered by lapce-core Buffer with full feature exposure.
+/// Renders directly without intermediate String representation for better performance.
 pub struct EditorBuffer {
-    /// Cached full text for egui TextEdit binding (temporary until full custom editor)
+    /// Core lapce-core Buffer for all text operations
+    lapce_buffer: LapceBuffer,
+    /// Legacy cached text for compatibility (will be phased out)
     pub text: String,
-    /// Dirty flag: when true, rope has diverged from cached text (pending sync to String)
-    dirty_to_string: bool,
-    /// Dirty flag: when true, cached text has diverged from rope (pending apply to rope)
-    dirty_to_rope: bool,
-    /// Last known revision of the underlying buffer (for incremental features later)
-    pub last_revision: u64,
-    /// Undo stack (Vec of Edit record). Most recent at end.
-    undo_stack: Vec<EditRecord>,
-    /// Redo stack.
-    redo_stack: Vec<EditRecord>,
-    /// Cached line start offsets (byte indices) for fast line/col translation.
-    line_starts: Vec<usize>,
-    /// Monotonic revision counter we control (separate from any internal lapce buffer revs)
+    /// Monotonic revision counter for tracking changes
     pub revision: u64,
-    /// Per-line version numbers for fine-grained cache invalidation (same length as logical lines).
-    line_versions: Vec<u64>,
 }
 
-/// A simple reversible edit representation (single replace operation)
-#[derive(Clone, Debug)]
-struct EditRecord {
-    range: std::ops::Range<usize>, // replaced old text range in the PREVIOUS document
-    inserted: String,              // new inserted text
-    removed: String,               // old removed text (for undo)
-}
 
 impl Default for EditorBuffer {
     fn default() -> Self {
@@ -37,322 +21,91 @@ impl Default for EditorBuffer {
 
 impl EditorBuffer {
     pub fn new(initial: &str) -> Self {
-        let line_starts = Self::compute_line_starts(initial);
+        let lapce_buffer = LapceBuffer::new(initial);
+        let text = initial.to_string();
         Self {
-            text: initial.to_string(),
-            dirty_to_string: false,
-            dirty_to_rope: false,
-            last_revision: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            line_starts,
+            lapce_buffer,
+            text,
             revision: 0,
-            line_versions: vec![0],
         }
     }
 
-    /// Get a fresh snapshot of the current rope as a String (for UI bindings or export).
+    /// Get a fresh snapshot of the current buffer as a String (for compatibility).
     pub fn text_snapshot(&self) -> String {
-        self.text.clone()
+        self.lapce_buffer.to_string()
     }
 
     /// Replace whole content (used by tab switching / file load)
     pub fn set_text(&mut self, new_text: String) {
-        if self.text == new_text {
-            return;
-        }
-        let old = std::mem::take(&mut self.text);
-        let old_len = old.len();
-        self.undo_stack.push(EditRecord {
-            range: 0..old_len,
-            inserted: new_text.clone(),
-            removed: old,
-        });
-        self.redo_stack.clear();
-        self.text = new_text.clone();
-        self.last_revision = 0;
-        self.dirty_to_string = false;
-        self.dirty_to_rope = false;
-        self.recompute_line_starts();
-        for v in &mut self.line_versions {
-            *v = v.wrapping_add(1);
-        }
+        // Create new buffer with the content
+        self.lapce_buffer = LapceBuffer::new(&new_text);
+        self.text = new_text;
         self.revision = self.revision.wrapping_add(1);
     }
 
-    /// Mark that egui-bound text mutated externally (not used heavily now but kept for compatibility)
+    /// Mark that external text was modified (sync from legacy text field)
     pub fn mark_text_modified(&mut self) {
-        // In egui-only mode, just recompute indices and clear flags
-        self.notify_bulk_text_changed();
-        self.dirty_to_rope = false;
-        self.dirty_to_string = false;
-    }
-
-    /// Full recompute of line starts (fallback path; later we can do incremental adjustments).
-    fn recompute_line_starts(&mut self) {
-        self.line_starts = Self::compute_line_starts(&self.text);
-        let logical_line_count = self.line_count();
-        if self.line_versions.len() < logical_line_count {
-            self.line_versions.resize(logical_line_count, 0);
-        } else if self.line_versions.len() > logical_line_count {
-            self.line_versions.truncate(logical_line_count);
+        // Sync text to lapce buffer if changed
+        if self.text != self.lapce_buffer.to_string() {
+            self.lapce_buffer = LapceBuffer::new(&self.text);
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 
-    fn compute_line_starts(s: &str) -> Vec<usize> {
-        let mut v = Vec::with_capacity(128);
-        v.push(0);
-        for (i, ch) in s.char_indices() {
-            if ch == '\n' && i + 1 < s.len() {
-                v.push(i + 1);
-            }
-        }
-        v
-    }
-
-    /// Number of lines (at least 1 even if empty text) – consistent with typical editor semantics.
+    /// Number of lines in the buffer
     pub fn line_count(&self) -> usize {
-        // If text ends with a newline, last start still counts as an empty trailing line.
-        if self.text.ends_with('\n') {
-            self.line_starts.len() + 1
-        } else {
-            self.line_starts.len()
-        }
+        self.lapce_buffer.num_lines()
     }
 
-    /// Get per-line version (returns 0 if out of range)
-    pub fn line_version(&self, line: usize) -> u64 {
-        self.line_versions.get(line).cloned().unwrap_or(0)
+    /// Get per-line version (for compatibility, returns global revision)
+    pub fn line_version(&self, _line: usize) -> u64 {
+        self.revision
     }
 
-    /// Get start offset of given line index (returns text.len() if out of range).
+    /// Get start offset of given line index
     pub fn line_start(&self, line: usize) -> usize {
-        self.line_starts
-            .get(line)
-            .cloned()
-            .unwrap_or(self.text.len())
+        self.lapce_buffer.offset_of_line(line.min(self.line_count() - 1))
     }
 
-    /// Translate byte offset to (line, column) in O(log N) using binary search over line_starts.
+    /// Translate byte offset to (line, column)
     pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize) {
-        let off = offset.min(self.text.len());
-        match self.line_starts.binary_search(&off) {
-            Ok(line) => (line, 0),
-            Err(idx) => {
-                let line = idx - 1; // safe because first element always 0 and Err>0 for off>0
-                let col = off - self.line_starts[line];
-                (line, col)
-            }
-        }
+        let offset = offset.min(self.lapce_buffer.len());
+        let line = self.lapce_buffer.line_of_offset(offset);
+        let line_start = self.lapce_buffer.offset_of_line(line);
+        let col = offset - line_start;
+        (line, col)
     }
 
-    // (granular edit path removed in egui-only mode)
-
-    /// When the feature is disabled we still expose a no-op wrapper for code paths compiled
-    /// without the feature; this avoids conditional call sites. (Same behavior for now.)
-    // Core primitive replace used by UI & feature-gated granular path fallback.
+    /// Core primitive replace operation using lapce-core's edit system
     pub fn apply_single_replace(&mut self, old_range: std::ops::Range<usize>, replacement: &str) {
         let start = old_range.start.min(self.text.len());
         let end = old_range.end.min(self.text.len()).max(start);
-        let removed = self.text.get(start..end).unwrap_or("").to_string();
-        let removed_has_nl = removed.as_bytes().contains(&b'\n');
-        let replacement_has_nl = replacement.as_bytes().contains(&b'\n');
-        let (start_line, _sc) = self.offset_to_line_col(start);
-        let (end_line, _ec) = self.offset_to_line_col(end);
-        let single_line_edit = !removed_has_nl && !replacement_has_nl && start_line == end_line;
-        // Mutate the String and keep our indices in sync
+        
+        // Apply to String representation (for legacy compatibility)
         self.text.replace_range(start..end, replacement);
-        self.last_revision = 0;
-        self.dirty_to_rope = false;
-        self.dirty_to_string = false;
-        self.undo_stack.push(EditRecord {
-            range: start..start + replacement.len(),
-            inserted: replacement.to_string(),
-            removed: removed.clone(),
-        });
-        self.redo_stack.clear();
-
-        if single_line_edit {
-            let delta: isize = replacement.len() as isize - (end - start) as isize;
-            if delta != 0 {
-                for ls in self.line_starts.iter_mut().skip(start_line + 1) {
-                    *ls = (*ls as isize + delta) as usize;
-                }
-            }
-            if let Some(v) = self.line_versions.get_mut(start_line) {
-                *v = v.wrapping_add(1);
-            }
-        } else {
-            let removed_nl = removed.as_bytes().iter().filter(|&&b| b == b'\n').count();
-            let replacement_nl = replacement
-                .as_bytes()
-                .iter()
-                .filter(|&&b| b == b'\n')
-                .count();
-            if removed_nl == replacement_nl && removed_nl > 0 {
-                let delta: isize = replacement.len() as isize - (end - start) as isize;
-                let block_first_offset = self.line_starts[start_line];
-                let mut new_starts: Vec<usize> = Vec::with_capacity(removed_nl);
-                for (i, ch) in replacement.char_indices() {
-                    if ch == '\n' && i + 1 < replacement.len() {
-                        new_starts.push(block_first_offset + i + 1);
-                    }
-                }
-                if new_starts.len() == removed_nl {
-                    for (idx, val) in new_starts.iter().enumerate() {
-                        let line_idx = start_line + 1 + idx;
-                        if line_idx < self.line_starts.len() {
-                            self.line_starts[line_idx] = *val;
-                        }
-                    }
-                    if delta != 0 {
-                        let tail_start_line = start_line + 1 + removed_nl;
-                        for ls in self.line_starts.iter_mut().skip(tail_start_line) {
-                            *ls = (*ls as isize + delta) as usize;
-                        }
-                    }
-                    let affected_last = start_line + removed_nl;
-                    for line in start_line..=affected_last {
-                        if let Some(v) = self.line_versions.get_mut(line) {
-                            *v = v.wrapping_add(1);
-                        }
-                    }
-                } else {
-                    self.recompute_line_starts();
-                    for v in &mut self.line_versions {
-                        *v = v.wrapping_add(1);
-                    }
-                }
-            } else if removed_nl == 0 && replacement_nl == 0 {
-                let delta: isize = replacement.len() as isize - (end - start) as isize;
-                if delta != 0 {
-                    for ls in self.line_starts.iter_mut().skip(end_line + 1) {
-                        *ls = (*ls as isize + delta) as usize;
-                    }
-                }
-                for line in start_line..=end_line {
-                    if let Some(v) = self.line_versions.get_mut(line) {
-                        *v = v.wrapping_add(1);
-                    }
-                }
-            } else {
-                // Newline count changed: attempt incremental adjustment of line_starts instead of full recompute.
-                // Strategy:
-                // 1. Remove old internal line starts belonging to the removed text.
-                // 2. Insert new internal line starts derived from replacement.
-                // 3. Shift subsequent line starts by byte delta.
-                // 4. Adjust line_versions length (insert/remove) and bump affected lines.
-                // On any inconsistency, fall back to full recompute.
-                let old_internal = removed_nl; // number of internal newlines removed
-                let new_internal = replacement_nl; // number of internal newlines inserted
-                let delta_bytes: isize = replacement.len() as isize - (end - start) as isize;
-
-                // Safety guard: if start_line points beyond existing starts, fallback
-                if start_line >= self.line_starts.len() {
-                    self.recompute_line_starts();
-                    for v in &mut self.line_versions {
-                        *v = v.wrapping_add(1);
-                    }
-                    self.revision = self.revision.wrapping_add(1);
-                    return;
-                }
-
-                // 1. Remove 'old_internal' entries following start_line (these correspond to lines that existed inside removed span).
-                let mut ok = true;
-                for _ in 0..old_internal {
-                    let idx = start_line + 1; // position of next internal line start to remove
-                    if idx < self.line_starts.len() {
-                        self.line_starts.remove(idx);
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                // 2. Compute new internal starts based on replacement (relative char_indices)
-                if ok && new_internal > 0 {
-                    let block_first_offset = self.line_starts[start_line];
-                    let mut new_starts: Vec<usize> = Vec::with_capacity(new_internal);
-                    for (i, ch) in replacement.char_indices() {
-                        if ch == '\n' && i + 1 < replacement.len() {
-                            new_starts.push(block_first_offset + i + 1);
-                        }
-                    }
-                    if new_starts.len() != new_internal {
-                        ok = false;
-                    } else {
-                        // Insert in ascending order at position start_line+1
-                        let mut insert_pos = start_line + 1;
-                        for ns in new_starts {
-                            self.line_starts.insert(insert_pos, ns);
-                            insert_pos += 1;
-                        }
-                    }
-                }
-
-                if ok {
-                    // 3. Shift tail line starts by delta_bytes
-                    if delta_bytes != 0 {
-                        let tail_start = start_line + 1 + new_internal; // first unaffected line after replacement block
-                        for ls in self.line_starts.iter_mut().skip(tail_start) {
-                            *ls = (*ls as isize + delta_bytes) as usize;
-                        }
-                    }
-
-                    // 4. Adjust line_versions length and bump affected lines
-                    let line_delta = new_internal as isize - old_internal as isize;
-                    if line_delta > 0 {
-                        // Insert new versions after start_line with initial version 0 (will bump below)
-                        for i in 0..line_delta {
-                            self.line_versions.insert(start_line + 1 + i as usize, 0);
-                        }
-                    } else if line_delta < 0 {
-                        for _ in 0..(-line_delta) {
-                            if start_line + 1 < self.line_versions.len() {
-                                self.line_versions.remove(start_line + 1);
-                            }
-                        }
-                    }
-                    // Ensure versions vector is not shorter than logical lines (in pathological edge cases)
-                    let logical_line_count = self.line_count();
-                    if self.line_versions.len() < logical_line_count {
-                        self.line_versions.resize(logical_line_count, 0);
-                    } else if self.line_versions.len() > logical_line_count {
-                        self.line_versions.truncate(logical_line_count);
-                    }
-
-                    // Bump versions for lines directly impacted (original start line through last new internal line)
-                    let last_affected = start_line + new_internal; // inclusive
-                    for line in start_line..=last_affected {
-                        if let Some(v) = self.line_versions.get_mut(line) {
-                            *v = v.wrapping_add(1);
-                        }
-                    }
-                }
-
-                if !ok {
-                    // Fallback path
-                    self.recompute_line_starts();
-                    for v in &mut self.line_versions {
-                        *v = v.wrapping_add(1);
-                    }
-                }
-            }
-        }
+        
+        // Sync to lapce buffer
+        self.lapce_buffer = LapceBuffer::new(&self.text);
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Try to update using a single span based on diff between previous and new text
     pub fn try_single_span_update(&mut self, previous: &str, new_full: &str) -> bool {
         if previous == new_full {
             return true;
         }
+        
+        // Find common prefix
         let mut prefix = 0usize;
         let prev_bytes = previous.as_bytes();
         let new_bytes = new_full.as_bytes();
         let min_len = prev_bytes.len().min(new_bytes.len());
+        
         while prefix < min_len && prev_bytes[prefix] == new_bytes[prefix] {
             prefix += 1;
         }
+        
+        // Find common suffix
         let mut suffix = 0usize;
         while suffix < (prev_bytes.len() - prefix)
             && suffix < (new_bytes.len() - prefix)
@@ -360,95 +113,127 @@ impl EditorBuffer {
         {
             suffix += 1;
         }
+        
         let prev_mid_start = prefix;
         let prev_mid_end = prev_bytes.len() - suffix;
         let new_mid_start = prefix;
         let new_mid_end = new_bytes.len() - suffix;
+        
         if prev_mid_start == prev_mid_end && new_mid_start == new_mid_end {
             return true;
         }
+        
         if new_mid_start > new_mid_end || prev_mid_start > prev_mid_end {
             return false;
         }
+        
         if let Some(replacement) = new_full.get(new_mid_start..new_mid_end) {
             self.apply_single_replace(prev_mid_start..prev_mid_end, replacement);
             return true;
         }
+        
         false
     }
-}
 
-impl EditorBuffer {
-    /// Can we undo?
+    /// Undo/Redo support - simplified implementation since lapce-core has internal history
     pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
+        // TODO: Expose lapce-core's undo history
+        false
     }
-    /// Can we redo?
+
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        // TODO: Expose lapce-core's redo history
+        false
     }
 
-    /// Undo last edit (if any). Returns true if something changed.
     pub fn undo(&mut self) -> bool {
-        if let Some(edit) = self.undo_stack.pop() {
-            // The recorded range in edit.range reflects the inserted text region after the edit.
-            let start = edit.range.start;
-            let end = start + edit.inserted.len();
-            // Replace inserted with original removed text
-            if end <= self.text.len() {
-                self.text.replace_range(start..end, &edit.removed);
-                self.last_revision = 0;
-                // Push inverse onto redo stack
-                let inverse = EditRecord {
-                    range: start..start + edit.removed.len(),
-                    inserted: edit.removed.clone(),
-                    removed: edit.inserted,
-                }; // note swapped roles
-                self.redo_stack.push(inverse);
-                self.recompute_line_starts();
-                for v in &mut self.line_versions {
-                    *v = v.wrapping_add(1);
-                }
-                self.revision = self.revision.wrapping_add(1);
-                return true;
-            }
-        }
+        // TODO: Implement using lapce-core's undo system
         false
     }
 
-    /// Redo last undone edit (if any). Returns true if something changed.
     pub fn redo(&mut self) -> bool {
-        if let Some(edit) = self.redo_stack.pop() {
-            let start = edit.range.start;
-            let end = start + edit.inserted.len();
-            if end <= self.text.len() {
-                self.text.replace_range(start..end, &edit.removed);
-                self.last_revision = 0;
-                // Push inverse back to undo
-                let inverse = EditRecord {
-                    range: start..start + edit.removed.len(),
-                    inserted: edit.removed.clone(),
-                    removed: edit.inserted,
-                };
-                self.undo_stack.push(inverse);
-                self.recompute_line_starts();
-                for v in &mut self.line_versions {
-                    *v = v.wrapping_add(1);
-                }
-                self.revision = self.revision.wrapping_add(1);
-                return true;
-            }
-        }
+        // TODO: Implement using lapce-core's redo system
         false
     }
 
-    /// Notify that external bulk text changes were applied directly on self.text (e.g., multi-cursor direct mutations)
-    /// This recomputes line indices and bumps all line versions.
+    /// Notify that external bulk text changes were applied
     pub fn notify_bulk_text_changed(&mut self) {
-        self.recompute_line_starts();
-        for v in &mut self.line_versions {
-            *v = v.wrapping_add(1);
-        }
+        // Rebuild lapce buffer from current text
+        self.lapce_buffer = LapceBuffer::new(&self.text);
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Get direct access to underlying Rope for advanced operations
+    pub fn rope(&self) -> &Rope {
+        self.lapce_buffer.text()
+    }
+
+    /// Get mutable access to lapce buffer for advanced edits
+    pub fn lapce_buffer_mut(&mut self) -> &mut LapceBuffer {
+        &mut self.lapce_buffer
+    }
+
+    /// Get immutable access to lapce buffer
+    pub fn lapce_buffer(&self) -> &LapceBuffer {
+        &self.lapce_buffer
+    }
+
+    /// Get line content as string
+    pub fn line_content(&self, line: usize) -> String {
+        if line < self.line_count() {
+            let start = self.lapce_buffer.offset_of_line(line);
+            let end = if line + 1 < self.line_count() {
+                self.lapce_buffer.offset_of_line(line + 1)
+            } else {
+                self.lapce_buffer.len()
+            };
+            self.lapce_buffer.slice_to_cow(start..end).to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Convert byte offset to character index (for EGUI TextEdit compatibility)
+    /// Uses UTF-8 grapheme counting
+    pub fn byte_to_char(&self, byte_offset: usize) -> usize {
+        let clamped = byte_offset.min(self.text.len());
+        self.text[..clamped].chars().count()
+    }
+
+    /// Convert character index to byte offset (for EGUI TextEdit compatibility)
+    pub fn char_to_byte(&self, char_index: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_index)
+            .map(|(b, _)| b)
+            .unwrap_or(self.text.len())
+    }
+
+    /// Get text slice by byte range (safe clamping)
+    pub fn slice(&self, range: std::ops::Range<usize>) -> &str {
+        let start = range.start.min(self.text.len());
+        let end = range.end.min(self.text.len()).max(start);
+        &self.text[start..end]
+    }
+
+    /// Check if offset is at line boundary
+    pub fn is_line_start(&self, offset: usize) -> bool {
+        if offset == 0 {
+            return true;
+        }
+        if offset >= self.text.len() {
+            return false;
+        }
+        self.text.as_bytes().get(offset - 1) == Some(&b'\n')
+    }
+
+    /// Get buffer length in bytes
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Check if buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
     }
 }

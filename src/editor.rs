@@ -7,8 +7,8 @@ use log::debug;
 use sqlformat::{QueryParams, format as sqlfmt};
 
 use crate::{
-    connection, data_table, directory, editor, editor_autocomplete, models, query_tools,
-    sidebar_history, sidebar_query, window_egui,
+    connection, data_table, directory, editor, editor_autocomplete, editor_widget, models,
+    query_tools, sidebar_history, sidebar_query, window_egui,
 };
 use std::borrow::Cow;
 use std::time::Instant;
@@ -697,6 +697,16 @@ fn slice_on_char_boundaries(
 }
 
 pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mut egui::Ui) {
+    // Log all input events at the start of editor rendering
+    ui.ctx().input(|i| {
+        if !i.events.is_empty() {
+            eprintln!("[EDITOR] render_advanced_editor: {} events at start", i.events.len());
+            for (idx, event) in i.events.iter().enumerate() {
+                eprintln!("[EDITOR]   Event[{}]: {:?}", idx, event);
+            }
+        }
+    });
+    
     // Shortcut: Format SQL (Cmd/Ctrl + Shift + F)
     let mut trigger_format_sql = false;
     ui.input(|i| {
@@ -710,7 +720,9 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
     });
     if trigger_format_sql {
         // Consume the key event so TextEdit doesn't see it
+        eprintln!("[EDITOR] FORMAT_SQL: Consuming Cmd+Shift+F event");
         ui.ctx().input_mut(|ri| {
+            let before = ri.events.len();
             ri.events.retain(|e| {
                 !matches!(
                     e,
@@ -721,6 +733,10 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
                     }
                 )
             });
+            let removed = before - ri.events.len();
+            if removed > 0 {
+                eprintln!("[EDITOR] FORMAT_SQL: Removed {} events", removed);
+            }
         });
         reformat_current_sql(tabular, ui);
         // Early repaint for snappy UX
@@ -2474,8 +2490,9 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         // Remove Tab/Enter pressed events so TextEdit tidak menyisipkan tab/newline
         ui.ctx().input_mut(|ri| {
             let before = ri.events.len();
+            eprintln!("[EDITOR] AUTOCOMPLETE: Before filtering, {} events", before);
             ri.events.retain(|e| {
-                !matches!(
+                let keep = !matches!(
                     e,
                     egui::Event::Key {
                         key: egui::Key::Tab,
@@ -2489,10 +2506,15 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
                         pressed: true,
                         ..
                     }
-                )
+                );
+                if !keep {
+                    eprintln!("[EDITOR] AUTOCOMPLETE: Removing event {:?}", e);
+                }
+                keep
             });
             let removed = before - ri.events.len();
             if removed > 0 {
+                eprintln!("[EDITOR] AUTOCOMPLETE: Removed {} events", removed);
                 log::debug!(
                     "Removed {} key event(s) (Tab/Enter) before autocomplete accept",
                     removed
@@ -2516,23 +2538,16 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         models::structs::EditorColorTheme::GithubDark | models::structs::EditorColorTheme::Gruvbox
     );
 
-    // Simple layouter with cached highlighting; honor Word Wrap by adjusting max_width
+    // Word wrap setting
     let word_wrap = tabular.advanced_editor.word_wrap;
-    // Capture a mutable handle to the highlight cache for this frame to avoid recomputing
-    let cache = &mut tabular.highlight_cache;
-    let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-        let mut job = crate::syntax_ts::highlight_text_cached(text.as_str(), lang, dark, cache);
-        job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
-        ui.fonts(|f| f.layout_job(job))
-    };
 
-    // Pre-compute line count (immutable borrow) before creating mutable reference for TextEdit
+    // Pre-compute line count (immutable borrow) before creating mutable reference for editor
     let pre_line_count = if tabular.advanced_editor.show_line_numbers {
         tabular.editor.text.lines().count().max(1)
     } else {
         0
     };
-    // Pre-calc total_lines (used later for dynamic height) before mutable borrow by TextEdit
+    // Pre-calc total_lines (used later for dynamic height)
     let total_lines_for_layout = tabular.editor.text.lines().count().max(1);
     // Snapshot pre-change text and caret/selection for debug diff
     let pre_text_for_diff = tabular.editor.text.clone();
@@ -2587,30 +2602,50 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         ui.data_mut(|d| d.insert_temp::<egui::Rect>(egui::Id::new("gutter_rect"), gutter_rect));
     }
 
-    // Build TextEdit widget directly and capture full output (galley, clip rect, etc.)
-    // NOTE: Removed .code_editor() as it may interfere with cursor rendering
-    let text_edit = egui::TextEdit::multiline(&mut tabular.editor.text)
-        .font(egui::TextStyle::Monospace)
-        .desired_rows(rows)
-        .desired_width(f32::INFINITY)
-        .cursor_at_end(false) // Allow cursor to be positioned anywhere
-        .id_source("sql_editor")
-        .layouter(&mut layouter);
-
-    let egui::InnerResponse {
-        inner: text_output, ..
-    } = ui.scope_builder(egui::UiBuilder::new().max_rect(editor_rect), |ui| {
-        text_edit.show(ui)
+    // ==========================================
+    // LAPCE-CORE EDITOR (Default)
+    // ==========================================
+    // Create layouter for syntax highlighting
+    let layouter_fn: editor_widget::LayouterFn = Box::new(move |ui: &egui::Ui, text: &str, wrap_width: f32| {
+        // Use direct highlighting without cache for lapce widget
+        let mut job = crate::syntax_ts::highlight_text(text, lang, dark);
+        job.wrap.max_width = if word_wrap { wrap_width } else { f32::INFINITY };
+        ui.fonts(|f| f.layout_job(job))
     });
-    let egui::text_edit::TextEditOutput {
-        response,
-        galley,
-        galley_pos,
-        text_clip_rect,
-        cursor_range,
-        ..
-    } = text_output;
-    let cursor_range_after = cursor_range;
+
+    let response = editor_widget::LapceEditorWidget::new(
+        &mut tabular.editor,
+        &mut tabular.cursor_position,
+        &mut tabular.selection_start,
+        &mut tabular.selection_end,
+    )
+    .id(egui::Id::new("sql_editor"))
+    .desired_rows(rows)
+    .line_numbers(tabular.advanced_editor.show_line_numbers, gutter_width)
+    .layouter(layouter_fn)
+    .show(ui);
+
+    // Sync text back
+    if response.changed() {
+        tabular.editor.text = tabular.editor.text_snapshot();
+        if let Some(tab) = tabular.query_tabs.get_mut(tabular.active_tab_index) {
+            tab.content = tabular.editor.text.clone();
+            tab.is_modified = true;
+        }
+    }
+
+    // Create dummy galley for compatibility with legacy multi-cursor code
+    // TODO: Port multi-cursor rendering to widget itself
+    let dummy_text = "";
+    let dummy_job = egui::text::LayoutJob::single_section(
+        dummy_text.to_string(),
+        egui::TextFormat::simple(egui::FontId::monospace(14.0), egui::Color32::WHITE),
+    );
+    let galley = ui.fonts(|f| f.layout_job(dummy_job));
+    let galley_pos = response.rect.min;
+    let text_clip_rect = response.rect;
+    let cursor_range_after: Option<CCursorRange> = None;
+    // ==========================================
 
     #[cfg(feature = "tree_sitter_sequel")]
     {
@@ -2622,9 +2657,16 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
     }
     let did_double_click = response.double_clicked();
 
-    // CRITICAL: Ensure focus and cursor visibility on interaction
+    // DISABLED: LapceWidget manages its own focus now
+    // if response.clicked() || response.gained_focus() {
+    //     response.request_focus();
+    //     tabular.editor_focus_boost_frames = 10;
+    //     ui.ctx().request_repaint();
+    // }
+    
+    // Let widget handle focus, but still boost frames for visibility
     if response.clicked() || response.gained_focus() {
-        response.request_focus();
+        eprintln!("[EDITOR] Response clicked/gained_focus, boosting frames (NOT requesting focus)");
         tabular.editor_focus_boost_frames = 10;
         ui.ctx().request_repaint();
     }
@@ -2633,41 +2675,18 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
     // We purposely do NOT collapse selection on double-click frame (handled via did_double_click checks above),
     // to avoid wiping the freshly formed selection.
 
-    // VSCode-like: subtle current line highlight
-    if response.has_focus() {
-        let cur = tabular.cursor_position.min(tabular.editor.text.len());
-        let bytes = tabular.editor.text.as_bytes();
-        let mut line_no = 0usize;
-        let mut i = 0usize;
-        while i < cur {
-            if bytes[i] == b'\n' {
-                line_no += 1;
-            }
-            i += 1;
-        }
-        let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-        // Align with TextEdit internal top padding (approx. 6px)
-        let y_top = response.rect.top() + 6.0 + (line_no as f32) * line_height;
-        let gutter_w = if tabular.advanced_editor.show_line_numbers {
-            gutter_width
-        } else {
-            0.0
-        };
-        let rect = egui::Rect::from_min_max(
-            egui::pos2(response.rect.left() + gutter_w, y_top),
-            egui::pos2(response.rect.right(), y_top + line_height),
-        );
-        let col = egui::Color32::from_rgba_unmultiplied(100, 100, 140, 30);
-        ui.painter().rect_filled(rect, 0.0, col);
-    }
+    // Note: Current line highlight is handled by LapceWidget itself (TODO)
     // Apply deferred autocomplete acceptance after TextEdit borrow is released
     if defer_accept_autocomplete {
+        eprintln!("[EDITOR] Accepting autocomplete suggestion");
         crate::editor_autocomplete::accept_current_suggestion(tabular);
         let clamped = tabular.cursor_position.min(tabular.editor.text.len());
         tabular.pending_cursor_set = Some(clamped);
-        // Keep focus on editor so Tab/Enter doesn't move focus
-        ui.memory_mut(|m| m.request_focus(response.id));
-        // Immediately sync caret to the new end position in this frame as well
+        
+        // DISABLED: LapceWidget manages its own focus
+        // ui.memory_mut(|m| m.request_focus(response.id));
+        
+        // Still sync TextEditState for compatibility (even though not used by Lapce widget)
         let id = response.id;
         let mut state = TextEditState::load(ui.ctx(), id).unwrap_or_default();
         let ci = to_char_index(&tabular.editor.text, clamped);
@@ -2784,38 +2803,7 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
 
     // Handle multi-cursor typing - apply changes to all cursors
     // Multi-selection typing compensations handled later in response.changed() branch now.
-    if tabular.advanced_editor.show_line_numbers
-        && let Some(gutter_rect) =
-            ui.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("gutter_rect")))
-    {
-        let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-        let total_lines = tabular.editor.text.lines().count().max(1);
-        let editor_height = response.rect.height();
-        let needed_height = line_height * total_lines as f32;
-        let final_rect = egui::Rect::from_min_size(
-            gutter_rect.min,
-            egui::vec2(gutter_rect.width(), editor_height.max(needed_height)),
-        );
-        let painter = ui.painter();
-        painter.rect_filled(final_rect, 0.0, ui.visuals().faint_bg_color);
-
-        // CRITICAL: Use SAME coordinate system as text editor (response.rect.top() + 6.0)
-        // NOT final_rect.top() + 4.0!
-        let mut y = response.rect.top() + 6.0;
-        for (i, _) in tabular.editor.text.lines().enumerate() {
-            painter.text(
-                egui::pos2(final_rect.right() - 6.0, y),
-                egui::Align2::RIGHT_TOP,
-                (i + 1).to_string(),
-                egui::TextStyle::Monospace.resolve(ui.style()),
-                ui.visuals().weak_text_color(),
-            );
-            y += line_height;
-            if y > final_rect.bottom() {
-                break;
-            }
-        }
-    }
+    // Note: Line numbers are rendered by LapceWidget itself
 
     // Paint extra cursors and selection highlights (after gutter so they appear above text)
     if !tabular.multi_selection.is_empty() {
@@ -2938,69 +2926,7 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         }
     }
 
-    // ALWAYS paint cursor when no multi-selection - fallback for egui's built-in cursor
-    if tabular.multi_selection.is_empty() {
-        let has_focus = response.has_focus() || ui.ctx().memory(|m| m.has_focus(response.id));
-
-        // Only paint when editor has focus or during focus boost window
-        if has_focus || tabular.editor_focus_boost_frames > 0 {
-            let caret_b = tabular.cursor_position.min(tabular.editor.text.len());
-            let caret_char_idx = {
-                let s = &tabular.editor.text;
-                let clamp = caret_b.min(s.len());
-                s[..clamp].chars().count()
-            };
-            let caret_cursor = CCursor::new(caret_char_idx);
-            let caret_layout = galley.layout_from_cursor(caret_cursor);
-
-            // Use simple fallback if galley layout fails - paint at top-left as last resort
-            if caret_layout.row < galley.rows.len() && !galley.rows.is_empty() {
-                let placed_row = &galley.rows[caret_layout.row];
-                let row = &placed_row.row;
-                let x_offset = row.x_offset(caret_layout.column);
-                let caret_x = galley_pos.x + placed_row.pos.x + x_offset;
-                let caret_top = galley_pos.y + placed_row.min_y();
-                let mut caret_bottom = galley_pos.y + placed_row.max_y();
-
-                // FIX: If galley gives zero height, use text style height as fallback
-                if (caret_bottom - caret_top).abs() < 1.0 {
-                    let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-                    caret_bottom = caret_top + line_height;
-                }
-
-                let caret_width = 2.0;
-                let caret_shape = egui::Rect::from_min_max(
-                    egui::pos2(caret_x, caret_top),
-                    egui::pos2(caret_x + caret_width, caret_bottom),
-                );
-
-                // Paint cursor regardless of height (we already fixed it above)
-                let painter = ui.painter();
-                let color = if ui.visuals().dark_mode {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::BLACK
-                };
-                painter.rect_filled(caret_shape, 0.0, color);
-            } else {
-                let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
-                let caret_rect = egui::Rect::from_min_max(
-                    egui::pos2(response.rect.left() + 6.0, response.rect.top() + 6.0),
-                    egui::pos2(
-                        response.rect.left() + 8.0,
-                        response.rect.top() + 6.0 + line_height,
-                    ),
-                );
-                let color = if ui.visuals().dark_mode {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::BLACK
-                };
-                ui.painter().rect_filled(caret_rect, 0.0, color);
-                log::debug!("✏️ Painted FALLBACK cursor at editor top");
-            }
-        }
-    }
+    // Fallback caret painting disabled: LapceEditorWidget paints its own caret.
 
     // After show(), apply any pending cursor via direct set_ccursor_range
     // IMPORTANT: Never collapse selection on the same frame as a double-click, to preserve word-select.
@@ -3139,33 +3065,9 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         }
     }
 
-    // Try to capture selected text from the response
-    // Note: This is a simplified approach. The actual implementation may vary depending on the CodeEditor version
-    // Recover cursor + selection from TextEditState (single range only for now)
-    // CRITICAL: Only update cursor/selection if NOT in a text-change frame, because
-    // response.changed() already set the correct cursor position from diff calculation.
-    // Reading egui state here would overwrite with stale values.
-    if !response.changed()
-        && let Some(rng) =
-            crate::editor_state_adapter::EditorStateAdapter::get_range(ui.ctx(), response.id)
-    {
-        // Convert char indices from egui to byte indices for our buffer
-        let primary_b = to_byte_index(&tabular.editor.text, rng.primary);
-        let start_b = to_byte_index(&tabular.editor.text, rng.start);
-        let end_b = to_byte_index(&tabular.editor.text, rng.end);
-        tabular.cursor_position = primary_b;
-        tabular.selection_start = start_b;
-        tabular.selection_end = end_b;
-        if start_b != end_b {
-            if let Some(selected) = tabular.editor.text.get(start_b..end_b) {
-                tabular.selected_text = selected.to_string();
-            } else {
-                tabular.selected_text.clear();
-            }
-        } else {
-            tabular.selected_text.clear();
-        }
-    }
+    // Skip syncing cursor/selection from egui TextEditState here.
+    // LapceEditorWidget is the source of truth; pulling stale egui state
+    // can override accurate positions (causing caret to jump).
 
     // Enforce selection collapse visually if requested by a previous destructive action
     if tabular.selection_force_clear {
@@ -3189,35 +3091,11 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
 
     // Reset table focus flag when editor is interacted with
     if response.clicked() || response.gained_focus() {
+        // Keep focus boost and repaint, but DO NOT override caret from egui state.
         ui.memory_mut(|m| m.request_focus(response.id));
         tabular.editor_focus_boost_frames = tabular.editor_focus_boost_frames.max(10);
-
-        // CRITICAL: Force read cursor position from egui state immediately on click
-        if let Some(rng) =
-            crate::editor_state_adapter::EditorStateAdapter::get_range(ui.ctx(), response.id)
-        {
-            let primary_b = to_byte_index(&tabular.editor.text, rng.primary);
-            tabular.cursor_position = primary_b;
-            tabular.selection_start = to_byte_index(&tabular.editor.text, rng.start);
-            tabular.selection_end = to_byte_index(&tabular.editor.text, rng.end);
-            log::debug!(
-                "🖱️ Click detected! Updated cursor_position to {} (char index {})",
-                primary_b,
-                rng.primary
-            );
-        }
-
-        // Request repaint to ensure caret appears immediately
         ui.ctx().request_repaint();
-
-        // IMPORTANT: Do not collapse selection on Shift+Click or when a non-collapsed selection exists.
-        // Previously, we always set a pending collapsed caret here, which overwrote egui's range
-        // selection on the final Shift+Click, making the block selection disappear.
-        let _shift_down = ui.input(|i| i.modifiers.shift);
-        let _has_range = tabular.selection_start != tabular.selection_end;
-        // DO NOT schedule pending collapsed caret on simple click; this caused next-frame overrides
-        // that move the caret back to old position (e.g., 0) right after typing the first character.
-        // Keep pending_cursor_set clear here. We'll only use it for explicit flows (e.g., autocomplete).
+        // LapceEditorWidget already set cursor/selection precisely on click.
         tabular.pending_cursor_set = None;
     }
     if response.clicked() || response.has_focus() {
