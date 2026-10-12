@@ -2,11 +2,80 @@
 
 # Tabular
 
-Your fast, native, cross‑platform SQL & NoSQL database client (Desktop, with early groundwork for iPadOS) — built in Rust.
+Your fast, native, cross‑platform SQL & NoSQL database client (Desktop, with early groundwork for iPadOS) — built in Rust, and built for the AI era: a safe door between your coding agents and your databases.
 
-![Main Window](screenshots/halaman-utama.jpg)
+![ER diagram with API endpoints generated from the Git repository, linked to the tables they touch](screenshots/api-diagram-links.jpg)
 
 </div>
+
+## Why Tabular in the AI era
+
+Coding agents already write a large share of your SQL. What they lack is a safe way to see the
+real database. Tabular is that door: Claude Code, Cursor, Codex and any other
+[MCP](https://modelcontextprotocol.io) client can inspect schemas and run queries through
+Tabular, while the passwords, the SSH tunnels and the final say on writes stay with you.
+
+```mermaid
+flowchart LR
+    subgraph Agents["Your AI agents"]
+        A1["Claude Code"]
+        A2["Cursor"]
+        A3["Codex / Gemini CLI"]
+        A4["Any MCP client"]
+    end
+
+    subgraph Tabular["Tabular  ·  tabular mcp"]
+        direction TB
+        T1["Schema and read-only queries: instant"]
+        T2["Writes wait for your approval"]
+        T3["Every call is logged"]
+        T4["Credentials never leave here"]
+    end
+
+    subgraph DBs["Your databases"]
+        D1[("PostgreSQL")]
+        D2[("MySQL / MariaDB")]
+        D3[("SQLite · SQL Server")]
+        D4[("MongoDB · Redis")]
+    end
+
+    Agents -- "MCP, no passwords" --> Tabular
+    Tabular -- "your credentials, SSH, mTLS" --> DBs
+```
+
+**What you get**
+
+- **You stay in control.** Every connection has an agent access level: `Read only` (the
+  default), `Ask`, `Edit` or `Agent`. Risky statements are queued and run only after you
+  approve them in the Tabular window.
+- **Agents get real context, not guesses.** 29 MCP tools cover live schema and DDL, sample
+  rows, `EXPLAIN` plans, running queries, ER diagrams, query history, notes and per-project
+  memory. No more pasting a stale schema dump into a chat.
+- **Your model, your machine.** The in-app assistant uses the provider you already pay for
+  (OpenAI, Anthropic, Gemini, xAI, Groq, OpenRouter) or a local model (Ollama, llama.cpp, MLX),
+  so nothing has to leave your laptop.
+
+**Compared with the usual ways of giving an agent database access**
+
+| When an agent needs your database… | Paste schema into chat | Raw DB connection for the agent | **Tabular MCP** |
+|---|---|---|---|
+| Agent sees the real, current schema | No, a stale copy | Yes | **Yes, plus diagrams and FKs** |
+| Password stays out of the agent | Yes | No, it sits in `.env` or the prompt | **Yes, OS keychain** |
+| Writes need a human | Partly, you copy-paste | No, runs blind | **Yes, approve in-app** |
+| Audit trail of agent queries | No | No | **Yes, every call** |
+| `EXPLAIN` and profiling for the agent | No | Partly, raw text | **Yes, plan plus bottlenecks** |
+| Works through SSH bastion / mTLS | Partly | No, the agent must tunnel | **Yes, handled per connection** |
+
+**Connect an agent in one line**
+
+```bash
+claude mcp add tabular -- /path/to/tabular mcp   # Claude Code
+tabular mcp --print-config                       # JSON snippet for Cursor, Windsurf, Codex
+```
+
+Full details, the tool list and the safety model are in [docs/MCP.md](docs/MCP.md).
+
+![AI Assistant explaining a query step by step next to the result grid](screenshots/ai-assistant.jpg)
 
 ## 1. About Tabular
 Tabular is a lightweight, native database client built with the `eframe`/`egui` stack. It focuses on instant startup, responsive UI, safe concurrency, and a distraction‑free workflow for developers, data engineers, and DBAs. Unlike web/electron apps, Tabular ships as a single native binary with a small memory footprint while still offering rich features like autocomplete, multiple drivers, query history, export tools, and self‑update.
@@ -30,7 +99,7 @@ Tabular is a lightweight, native database client built with the `eframe`/`egui` 
 - **End-to-End Encrypted Cloud Sync (Zero-Knowledge Vault)**: Argon2id KDF, AES-256-GCM encrypted connections and HTTP secrets synced securely across devices and teams
 - **Integrated HTTP Client**: REST API tester supporting JSON, form-data, custom auth, headers, and code export
 - **Smart Sidebar Tree Search**: Case-insensitive instant filtering across Connections, Queries, History, and HTTP Collections. When searching for a folder name, the folder and all of its contents (connections, queries, history entries, subfolders) remain fully displayed and automatically expanded.
-- **MCP Server for AI Agents (`tabular mcp`)**: Built-in Model Context Protocol server so Claude Code, Cursor, Codex and other agent harnesses can list connections, describe schemas (relevance-ranked), run read-only queries, get EXPLAIN plans and lint SQL. Credentials never leave Tabular, writes are refused, every agent query is audited in history. See [docs/MCP.md](docs/MCP.md).
+- **MCP Server for AI Agents (`tabular mcp`)**: Built-in Model Context Protocol server so Claude Code, Cursor, Codex and other agent harnesses can list connections, describe schemas (relevance-ranked), run read-only queries, get EXPLAIN plans and lint SQL. Credentials never leave Tabular, every connection is read-only for agents until you raise its access level, risky writes wait for your approval, and every agent call is audited. See [docs/MCP.md](docs/MCP.md).
 - **AI Assistant (`Cmd+Shift+A`)**: Schema-aware SQL completion with OpenAI, Anthropic Claude, Google Gemini, xAI, Groq, OpenRouter, GitHub Copilot, local models (Ollama, llama.cpp, MLX), or custom endpoints
 - **Editor Tab Drag & Drop Reordering & Pin Tab**: Group and reorder tabs via intuitive horizontal drag-and-drop, pin important queries/tables with 📌, prevent accidental closures, and manage tabs with full context menus
 - **Modern Developer SQL Editor**: Context-aware alias resolution (`u.`), Foreign Key auto-join completions, statement-level execution (`Ctrl+Enter`), quick query formatting (`Ctrl+Shift+F`), line comments (`Ctrl+/`), line duplication & moving (`Alt+Up/Down`), active line highlight, and multi-format result clipboard exports (Markdown, JSON, CSV, SQL INSERTs).
@@ -141,7 +210,7 @@ Context‑aware AI chat integrated directly into the query editor.
 - **Chat Target Picker**: When multiple agents or API are enabled, pick the active agent directly in the chat panel header. Chat history is preserved seamlessly when switching agents.
 - **Agent Attribution**: Responses in chat bubbles and Markdown exports are tagged with the answering agent label (e.g. `Assistant (agy · gemini-3.8-flash-low)`).
 - **Default Target**: Select which agent or API powers non-chat features like the inline `--AI` SQL block and HTTP Client AI generation.
-- **Database Access via MCP**: With CLI agents, inspect databases through Tabular's read‑only MCP server (`tabular mcp`): Claude Code receives it per request; `agy` and `gemini` register it via the Settings tab.
+- **Database Access via MCP**: With CLI agents, inspect databases through Tabular's MCP server (`tabular mcp`, read‑only by default): Claude Code receives it per request; `agy` and `gemini` register it via the Settings tab.
 - **Editor context**: the active tab (and its selection) is always sent; attach any other open SQL tabs with **+ Attach tab**.
 - **Live edit**: when the agent writes a query for a tab it lands in that tab while streaming; every edit has **Revert**, and live edit can be turned off in favour of an **Apply** button.
 - Automatically injects the relevant schema (tables + columns, vector‑ranked) as context.

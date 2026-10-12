@@ -264,7 +264,10 @@ pub fn folder_menu_items(ui: &mut egui::Ui, folder: &HttpFolder) {
                 "{} Linked Diagram Groups…",
                 i::ICON_SCHEMA.codepoint
             ))
-            .on_hover_text("Diagram groups that use the same git repository")
+            .on_hover_text(
+                "Open the diagram groups that use the same git repository and link these \
+                 endpoints to their tables",
+            )
             .clicked()
     {
         request(
@@ -591,21 +594,35 @@ fn link_folder(app: &mut Tabular, folder_id: &str) {
             .info("Set a git URL on this folder first so it can be matched to a diagram group");
         return;
     };
+    let summary = link_folder_endpoints(app, folder_id, &key);
+    if summary.is_empty() {
+        app.toasts.info(
+            "Nothing new to link. Endpoints link to diagrams whose groups use the same git URL.",
+        );
+    } else {
+        app.toasts.success(summary);
+    }
+}
+
+/// Tautkan request ber-tabel milik folder `folder_id` (repository `key`) ke
+/// diagram. Mengembalikan ringkasan hasil, atau string kosong bila tidak ada
+/// yang berubah.
+fn link_folder_endpoints(app: &mut Tabular, folder_id: &str, key: &str) -> String {
+    let Some((_, folder)) =
+        crate::http_collection::find_workspace_folder(&app.yaak_workspaces, folder_id)
+    else {
+        return String::new();
+    };
     let eps: Vec<EndpointTables> = folder
         .all_requests()
         .into_iter()
         .filter(|r| !r.tables.is_empty())
         .map(EndpointTables::from_request)
         .collect();
-    let report = link_to_diagrams(app, &key, &eps);
-    let summary = report.summary();
-    if summary.is_empty() {
-        app.toasts.info(
-            "Nothing new to link. Endpoints link to diagrams whose groups use the same git URL.",
-        );
-    } else {
-        app.toasts.success(summary.trim().to_string());
-    }
+    link_to_diagrams(app, key, &eps)
+        .summary()
+        .trim()
+        .to_string()
 }
 
 // ─── Loop utama ─────────────────────────────────────────────────────────────
@@ -716,6 +733,14 @@ impl HttpRepoUi {
         };
         let idx = build_index(app);
         let groups: Vec<GroupRef> = idx.groups_for(&key).cloned().collect();
+        // Group yang cocok sudah ada: endpoint folder ini langsung ditautkan
+        // ke tabelnya, supaya user tidak perlu memicu "Link Endpoints" terpisah.
+        if !groups.is_empty() {
+            let summary = link_folder_endpoints(app, folder_id, &key);
+            if !summary.is_empty() {
+                app.toasts.success(summary);
+            }
+        }
         match groups.len() {
             0 => app.toasts.info(format!(
                 "No diagram group uses {key}. Set the same git URL on a group with Set \
