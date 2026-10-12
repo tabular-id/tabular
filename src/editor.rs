@@ -3532,12 +3532,29 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
             // Only run if text is reasonably sized to avoid lags on huge files every frame
             // Rentang statement hanya berubah bila teks atau kursor berubah;
             // tanpa cache, pemindaian dari awal teks berjalan setiap frame.
+            //
+            // Catatan: `revision` baru di-bump di bawah (mark_text_modified) SETELAH
+            // blok ini, jadi pada frame saat egui sendiri mengubah teks (mis. Forward
+            // Delete) kunci (revision, cur) masih sama dengan frame sebelumnya padahal
+            // teks sudah lebih pendek. Rentang basi itu dulu dipakai untuk slicing dan
+            // membuat aplikasi panic. Karena itu: cache dilewati bila teks berubah
+            // pada frame ini, panjang teks ikut jadi kunci, dan rentang divalidasi
+            // terhadap batas char sebelum dipakai.
             let block_cache_id = egui::Id::new("stmt_block_range");
-            let block_cache_key = (tabular.editor.revision, cur);
-            let cached_range = ui
-                .data(|d| d.get_temp::<((u64, usize), (usize, usize))>(block_cache_id))
-                .filter(|(key, _)| *key == block_cache_key)
-                .map(|(_, range)| range);
+            let block_cache_key = (tabular.editor.revision, text_len, cur);
+            let cached_range = if response.changed() {
+                None
+            } else {
+                ui.data(|d| d.get_temp::<((u64, usize, usize), (usize, usize))>(block_cache_id))
+                    .filter(|(key, _)| *key == block_cache_key)
+                    .map(|(_, range)| range)
+                    .filter(|(s, e)| {
+                        s <= e
+                            && *e <= text_len
+                            && text.is_char_boundary(*s)
+                            && text.is_char_boundary(*e)
+                    })
+            };
             let (start_byte, end_byte) = if let Some(range) = cached_range {
                 range
             } else {
@@ -3857,9 +3874,13 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
         // Regex dan pencarian seluruh teks hanya diulang bila teks, pola,
         // atau opsinya berubah; sebelumnya berjalan setiap frame selama
         // panel find terbuka.
+        // `revision` belum di-bump pada frame saat egui mengubah teks (lihat catatan
+        // di cache rentang statement), jadi panjang teks ikut jadi kunci dan cache
+        // dilewati bila teks berubah pada frame ini.
         let find_cache_id = egui::Id::new("find_matches_cache");
         let find_key = (
             tabular.editor.revision,
+            tabular.editor.text.len(),
             tabular.advanced_editor.find_text.clone(),
             tabular.advanced_editor.case_sensitive,
             tabular.advanced_editor.whole_word,
@@ -3867,11 +3888,20 @@ pub(crate) fn render_advanced_editor(tabular: &mut window_egui::Tabular, ui: &mu
             tabular.advanced_editor.in_selection,
             tabular.advanced_editor.selection_range,
         );
-        type FindKey = (u64, String, bool, bool, bool, bool, Option<(usize, usize)>);
+        type FindKey = (
+            u64,
+            usize,
+            String,
+            bool,
+            bool,
+            bool,
+            bool,
+            Option<(usize, usize)>,
+        );
         type FindCache = (FindKey, Result<Vec<EditorSearchMatch>, String>);
         let matches_res = match ui
             .data(|d| d.get_temp::<FindCache>(find_cache_id))
-            .filter(|(key, _)| *key == find_key)
+            .filter(|(key, _)| !response.changed() && *key == find_key)
         {
             Some((_, cached)) => cached,
             None => {
