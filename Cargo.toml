@@ -1,6 +1,6 @@
 [package]
 name = "tabular"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 
 [lib]
@@ -239,23 +239,32 @@ objc2-ui-kit = { version = "0.2.2", features = [
        "UIAlertController",
        "objc2-uniform-type-identifiers",
 ] }
-objc2-uniform-type-identifiers = { version = "0.2.2", features = ["UTType", "UTCoreTypes"] }
+objc2-uniform-type-identifiers = { version = "0.2.2", features = [
+       "UTType",
+       "UTCoreTypes",
+] }
 
 # Android: eframe memakai winit backend NativeActivity (`android_main` di src/lib.rs),
 # log ke logcat lewat android_logger. Tidak ada `rfd`, `keyring`, `single_instance`
 # maupun CLI stdio di sini — lihat gate `not(any(ios, android))` di src/lib.rs.
 # Rahasia memakai fallback file terenkripsi (src/secrets.rs). Lihat android/README.md.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-eframe = { version = "0.36", default-features = false, features = ["accesskit"] }
+eframe = { version = "0.36", default-features = false, features = [
+       "accesskit",
+] }
 # Fitur default eframe juga menyalakan `winit/default` (rwh_06, x11, wayland,
 # wayland-dlopen, wayland-csd-adwaita); dinyatakan langsung agar desktop tidak berubah.
 winit = { version = "0.30", features = ["default"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-eframe = { version = "0.36", default-features = false, features = ["android-native-activity"] }
+eframe = { version = "0.36", default-features = false, features = [
+       "android-native-activity",
+] }
 # Dibutuhkan untuk tipe `AndroidApp` di tanda tangan `android_main`; eframe
 # tidak mengekspor ulang winit. Tanpa fitur default agar x11/wayland tidak ikut.
-winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+winit = { version = "0.30", default-features = false, features = [
+       "android-native-activity",
+] }
 android_logger = "0.15"
 
 [target.'cfg(target_os = "windows")'.dependencies]
