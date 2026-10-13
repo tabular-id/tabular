@@ -220,6 +220,17 @@ pub fn build_args(cfg: &CliAgentConfig, req: &AgentRequest) -> Vec<String> {
             args.push("stream-json".into());
             // Print mode tidak bisa menjawab prompt izin; MCP Tabular sendiri
             // sudah read-only, dan cwd adalah direktori kosong khusus.
+            //
+            // Jangan ganti dengan `--mode plan` (padanan agy untuk
+            // `--approval-mode plan` milik Gemini CLI; agy menolak
+            // `--approval-mode`). Diuji pada agy 1.3.3 (2026-10-13):
+            //  - `--mode plan` tanpa flag ini: tool MCP ditolak otomatis
+            //    ("permission check failed for mcp ... headless mode cannot
+            //    prompt"), jadi agent buta terhadap database.
+            //  - `--mode plan` + flag ini: tool MCP jalan, tetapi bahkan
+            //    pertanyaan data biasa dijawab dengan "implementation plan,
+            //    please review" alih-alih jawaban.
+            //  - `--sandbox` tidak mencegah tulis file di luar cwd.
             args.push("--dangerously-skip-permissions".into());
             if !model.is_empty() {
                 args.push("--model".into());
@@ -288,7 +299,9 @@ pub fn build_args(cfg: &CliAgentConfig, req: &AgentRequest) -> Vec<String> {
             args.push("--output-format".into());
             args.push("stream-json".into());
             // Mode read-only; user bisa menimpa lewat extra args (yargs memakai
-            // nilai terakhir).
+            // nilai terakhir). `--approval-mode` adalah flag Gemini CLI
+            // (`gemini` 0.54.x); agy (Antigravity) memakai `--mode` dan menolak
+            // flag ini, jadi jangan arahkan profil Gemini CLI ke binary agy.
             args.push("--approval-mode".into());
             args.push("plan".into());
             args.push("--allowed-mcp-server-names".into());
@@ -2034,6 +2047,28 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--conversation", "abc"]));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert_eq!(args.last().unwrap(), "--sandbox");
+    }
+
+    /// `--approval-mode` hanya dimengerti Gemini CLI; agy menolaknya
+    /// ("flags provided but not defined"). Pastikan tidak bocor antar profil.
+    #[test]
+    fn approval_mode_flag_only_for_gemini_cli() {
+        let agy = CliAgentConfig {
+            kind: CliAgentKind::Antigravity,
+            ..Default::default()
+        };
+        let args = build_args(&agy, &req());
+        assert!(!args.iter().any(|a| a.starts_with("--approval-mode")));
+        assert!(!args.iter().any(|a| a == "--mode"));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+
+        let gemini = CliAgentConfig {
+            kind: CliAgentKind::GeminiCli,
+            ..Default::default()
+        };
+        let args = build_args(&gemini, &req());
+        assert!(args.windows(2).any(|w| w == ["--approval-mode", "plan"]));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
