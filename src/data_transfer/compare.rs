@@ -142,7 +142,7 @@ fn looks_like_timestamp(v: &str) -> bool {
 
 /// Bentuk kanonik nilai untuk dibandingkan. `None` = SQL NULL, yang tidak
 /// pernah sama dengan teks apa pun (termasuk string `NULL`).
-fn normalize(value: Option<&str>, opts: &CompareOptions) -> Option<String> {
+pub(super) fn normalize(value: Option<&str>, opts: &CompareOptions) -> Option<String> {
     let value = value?;
     let mut v = if opts.trim_trailing_space {
         value.trim_end().to_string()

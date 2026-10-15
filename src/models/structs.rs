@@ -1952,6 +1952,8 @@ pub struct QueryTab {
     pub user_manager_state: Option<crate::user_manager::UserManagerState>,
     /// Tab Git (diff file, detail commit, merge request).
     pub git_state: Option<crate::window_egui::git_jobs::GitTabState>,
+    /// Tab Multi-source Comparison.
+    pub compare_state: Option<crate::window_egui::multi_compare_ui::MultiCompareTabState>,
 
     // Manual-commit (transaction) mode — see connection/session.rs
     pub tx_mode: bool,
@@ -3225,6 +3227,7 @@ mod tests {
             dba_monitor_state: None,
             user_manager_state: None,
             git_state: None,
+            compare_state: None,
             tx_mode: false,
             tx_active: false,
             session: None,

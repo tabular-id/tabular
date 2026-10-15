@@ -681,6 +681,7 @@ impl super::Tabular {
             background_tasks: Default::default(),
             git: crate::window_egui::git_jobs::GitUiState::new(),
             repo_setup: Default::default(),
+            multi_compare: Default::default(),
             visual_filter: crate::models::structs::VisualFilterState::default(),
             cell_inspector: crate::data_table::CellInspectorState::default(),
             grid_ext: crate::data_table::GridExtState::default(),

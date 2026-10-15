@@ -23,6 +23,7 @@ pub enum TaskOwner {
     HttpRepo,
     AiFix,
     RepoSetup,
+    Compare,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

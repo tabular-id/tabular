@@ -38,6 +38,7 @@ enforced on the whole tree; format only the files you touch.
 | Sync / collab | `src/sync/` | E2E encrypted vault; `collab` feature is optional |
 | Plugins | `src/plugin_runtime/` | Wasm plugins via `wasmi` |
 | Import / export / transfer | `src/data_transfer/` (headless), `src/window_egui/transfer_*.rs` (UI) | File formats, encrypted exports, Data Files workspace (SQLite, `data_files.sqlite`), table transfer, data compare; see `docs/DATA_TRANSFER.md` |
+| Multi-source comparison | `src/data_transfer/multi_compare*.rs`, `mongo_source.rs` (headless), `src/window_egui/multi_compare_{ui,jobs}.rs` | Sidebar DBs > Comp; N queries on different connections (incl. MongoDB JSON queries), `${var}` substitution, only differing keys shown; runs as a background job (`TaskOwner::Compare`); stored in `multi_compare_saved`; see `docs/DATA_TRANSFER.md`, ADR 0005 |
 | Repository setup | `src/repo_setup/` (headless discovery), `src/window_egui/repo_setup_jobs.rs` (apply + background watcher) | Git folder → project, connections from `.env`/compose/framework config, API folder per service, diagram group per service; personal store `repo_setups.json`; see `docs/REPO_SETUP.md`, ADR 0004 |
 | Git client | `src/git/` (headless), `src/window_egui/git_*.rs` (UI) | Runs the `git` CLI; Merge Review calls GitHub/GitLab REST; repo list merges diagram groups, HTTP API folders, projects and `git_repos.json` by normalized git URL. Sidebar state is per repository (`RepoUi`, keyed by repo key); Git Graph lane layout is pure in `git/graph.rs`, its tab data lives in `GitUiState::graphs` |
 

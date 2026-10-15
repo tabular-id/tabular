@@ -23,7 +23,7 @@ use crate::agent::harness::{ProgressStatus, ProgressStep};
 use crate::models::enums::DatabaseType;
 use crate::models::structs::DiagramState;
 use crate::project::{self, EnvVar, Project, ProjectEnv};
-use crate::repo_setup::diagram_groups::{self, ServiceTables};
+use crate::repo_setup::diagram_groups::{self, GroupPatch, ServiceTables};
 use crate::repo_setup::store::{
     RepoSetup, RepoSetupStore, TrackedConnection, TrackedDiagram, TrackedService,
 };
@@ -58,8 +58,25 @@ enum SetupEvent {
     },
     Tables {
         pending: u64,
-        services: Vec<ServiceTables>,
+        /// `None`: skema belum bisa dibaca, coba lagi nanti.
+        outcome: Option<Box<TablesOutcome>>,
     },
+}
+
+/// Hasil pembentukan group per service yang dihitung di thread latar.
+struct TablesOutcome {
+    sync: diagram_groups::GroupSync,
+    patch: GroupPatch,
+    /// Tag `service|tabel` yang baru ditempatkan.
+    newly_placed: Vec<String>,
+}
+
+/// Asal state diagram yang skemanya sudah tersedia.
+enum DiagramSource {
+    /// Salinan state tab diagram yang terbuka.
+    Tab(Box<DiagramState>),
+    /// File cache lokal; dibaca di thread karena bisa berukuran megabyte.
+    File(PathBuf),
 }
 
 /// Satu discovery yang berjalan (manual atau watcher).
@@ -157,6 +174,19 @@ impl RepoSetupState {
         self.jobs
             .iter()
             .any(|j| j.result.is_none() && j.key.as_deref() == Some(key))
+    }
+
+    /// Proses diagram per koneksi yang sedang berjalan, untuk indikator
+    /// di sidebar: `(id koneksi, keterangan)`.
+    pub fn diagram_activity(&self) -> impl Iterator<Item = (i64, String)> + '_ {
+        self.pending.iter().map(|p| {
+            let text = if p.scanning {
+                format!("Grouping tables of '{}' by service", p.db)
+            } else {
+                format!("Waiting for the schema of '{}'", p.db)
+            };
+            (p.conn_id, text)
+        })
     }
 
     fn save(&self) -> Option<String> {
@@ -560,7 +590,7 @@ fn poll(t: &mut Tabular) {
                     t.repo_setup.jobs.retain(|j| j.id != job);
                 }
             }
-            SetupEvent::Tables { pending, services } => apply_tables(t, pending, services),
+            SetupEvent::Tables { pending, outcome } => apply_tables(t, pending, outcome),
         }
     }
 }
@@ -1462,22 +1492,90 @@ fn diagram_services(plan: &SetupPlan, target: &PlannedConnection) -> Vec<(String
         .collect()
 }
 
-/// State diagram (conn, db) yang skemanya sudah tersedia: tab terbuka yang
-/// selesai sinkron, atau file cache lokal.
-fn source_state(t: &Tabular, conn_id: i64, db: &str) -> Option<DiagramState> {
+/// Diagram (conn, db) yang skemanya sudah tersedia: tab terbuka yang
+/// selesai sinkron, atau file cache lokal. Tidak mem-parse apa pun di sini:
+/// file diagram besar dibaca di thread latar.
+fn diagram_source(t: &Tabular, conn_id: i64, db: &str) -> Option<DiagramSource> {
     if let Some(tab) = t
         .query_tabs
         .iter()
         .find(|q| Tabular::is_diagram_host_tab(q, conn_id, db))
     {
         let s = tab.diagram_state.as_ref()?;
-        return (!s.schema_syncing && !s.nodes.is_empty()).then(|| s.clone());
+        return (!s.schema_syncing && !s.nodes.is_empty())
+            .then(|| DiagramSource::Tab(Box::new(s.clone())));
     }
     let path = t.get_diagram_path(conn_id, db)?;
+    path.exists().then_some(DiagramSource::File(path))
+}
+
+fn read_diagram(path: &Path) -> Option<DiagramState> {
     let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice::<DiagramState>(&bytes)
-        .ok()
-        .filter(|s| !s.nodes.is_empty())
+    serde_json::from_slice::<DiagramState>(&bytes).ok()
+}
+
+/// Tabel yang pernah ditempatkan di diagram (conn, db) repository `key`.
+fn placed_tables(t: &Tabular, key: &str, conn_id: i64, db: &str) -> Vec<String> {
+    t.repo_setup
+        .store
+        .get(key)
+        .and_then(|s| {
+            s.diagrams
+                .iter()
+                .find(|d| d.connection_id == conn_id && d.database == db)
+        })
+        .map(|d| d.placed.clone())
+        .unwrap_or_default()
+}
+
+/// Kerja berat pembentukan group per service (baca diagram, cari tabel di
+/// kode, susun ulang posisi); dijalankan di thread latar.
+fn build_groups(
+    source: DiagramSource,
+    services: Vec<(String, String)>,
+    repo_url: Option<String>,
+    placed: Vec<String>,
+) -> Option<TablesOutcome> {
+    let state = match source {
+        DiagramSource::Tab(s) => *s,
+        DiagramSource::File(path) => read_diagram(&path)?,
+    };
+    if state.nodes.is_empty() {
+        return None;
+    }
+    let candidates = diagram_groups::candidates(&state);
+    let cancel = AtomicBool::new(false);
+    let mut services: Vec<ServiceTables> = services
+        .into_iter()
+        .map(|(service, dir)| {
+            let report = crate::repo_scan::grep_tables(Path::new(&dir), &candidates, &cancel)
+                .unwrap_or_default();
+            ServiceTables {
+                service,
+                dir,
+                table_ids: diagram_groups::confident_ids(&report),
+            }
+        })
+        .collect();
+    // Tabel yang pernah ditempatkan tidak ditambahkan lagi: bila user
+    // mengeluarkannya dari group, keputusan itu bertahan.
+    let mut newly_placed: Vec<String> = Vec::new();
+    for s in &mut services {
+        s.table_ids.retain(|id| {
+            let tag = format!("{}|{id}", s.service);
+            let fresh = !placed.contains(&tag);
+            if fresh {
+                newly_placed.push(tag);
+            }
+            fresh
+        });
+    }
+    let (sync, patch) = GroupPatch::compute(state, repo_url.as_deref(), &services);
+    Some(TablesOutcome {
+        sync,
+        patch,
+        newly_placed,
+    })
 }
 
 fn process_pending(t: &mut Tabular) {
@@ -1490,7 +1588,7 @@ fn process_pending(t: &mut Tabular) {
     }
     t.repo_setup.last_pending_check = Some(Instant::now());
     let mut expired: Vec<u64> = Vec::new();
-    let mut ready: Vec<(u64, DiagramState)> = Vec::new();
+    let mut ready: Vec<(u64, DiagramSource)> = Vec::new();
     for p in t.repo_setup.pending.iter() {
         if p.scanning {
             // Thread pencarian yang tidak pernah melapor (panic) dilepas.
@@ -1499,8 +1597,8 @@ fn process_pending(t: &mut Tabular) {
             }
             continue;
         }
-        match source_state(t, p.conn_id, &p.db) {
-            Some(state) => ready.push((p.id, state)),
+        match diagram_source(t, p.conn_id, &p.db) {
+            Some(source) => ready.push((p.id, source)),
             None if p.since.elapsed() > DIAGRAM_WAIT => expired.push(p.id),
             None => {}
         }
@@ -1520,97 +1618,75 @@ fn process_pending(t: &mut Tabular) {
         }
         t.repo_setup.pending.retain(|p| p.id != id);
     }
-    for (id, state) in ready {
+    for (id, source) in ready {
+        let Some(p) = t.repo_setup.pending.iter().find(|p| p.id == id) else {
+            continue;
+        };
+        let placed = placed_tables(t, &p.key, p.conn_id, &p.db);
         let Some(p) = t.repo_setup.pending.iter_mut().find(|p| p.id == id) else {
             continue;
         };
         p.scanning = true;
         let services = p.services.clone();
+        let repo_url = p.repo_url.clone();
         let tx = t.repo_setup.tx.clone();
-        let candidates = diagram_groups::candidates(&state);
         std::thread::spawn(move || {
-            let cancel = AtomicBool::new(false);
-            let out = services
-                .into_iter()
-                .map(|(service, dir)| {
-                    let report =
-                        crate::repo_scan::grep_tables(Path::new(&dir), &candidates, &cancel)
-                            .unwrap_or_default();
-                    ServiceTables {
-                        service,
-                        dir,
-                        table_ids: diagram_groups::confident_ids(&report),
-                    }
-                })
-                .collect();
+            let outcome = build_groups(source, services, repo_url, placed).map(Box::new);
             let _ = tx.send(SetupEvent::Tables {
                 pending: id,
-                services: out,
+                outcome,
             });
         });
     }
 }
 
-fn apply_tables(t: &mut Tabular, pending: u64, services: Vec<ServiceTables>) {
+fn apply_tables(t: &mut Tabular, pending: u64, outcome: Option<Box<TablesOutcome>>) {
     let Some(idx) = t.repo_setup.pending.iter().position(|p| p.id == pending) else {
         return;
     };
+    let Some(outcome) = outcome else {
+        // Skema belum terbaca (file kosong/rusak): tunggu giliran berikutnya.
+        t.repo_setup.pending[idx].scanning = false;
+        return;
+    };
     let p = t.repo_setup.pending.remove(idx);
-    // Tabel yang pernah ditempatkan tidak ditambahkan lagi: bila user
-    // mengeluarkannya dari group, keputusan itu bertahan.
-    let placed: Vec<String> = t
-        .repo_setup
-        .store
-        .get(&p.key)
-        .and_then(|s| {
-            s.diagrams
-                .iter()
-                .find(|d| d.connection_id == p.conn_id && d.database == p.db)
-        })
-        .map(|d| d.placed.clone())
-        .unwrap_or_default();
-    let mut services = services;
-    let mut newly_placed: Vec<String> = Vec::new();
-    for s in &mut services {
-        s.table_ids.retain(|id| {
-            let tag = format!("{}|{id}", s.service);
-            let fresh = !placed.contains(&tag);
-            if fresh {
-                newly_placed.push(tag);
+    let TablesOutcome {
+        sync: result,
+        patch,
+        newly_placed,
+    } = *outcome;
+    if !patch.is_empty() {
+        let host = t
+            .query_tabs
+            .iter()
+            .position(|q| Tabular::is_diagram_host_tab(q, p.conn_id, &p.db));
+        if let Some(i) = host {
+            let snapshot = t.query_tabs[i].diagram_state.as_mut().map(|state| {
+                patch.apply(state);
+                state.clone()
+            });
+            if let Some(state) = snapshot {
+                t.save_diagram(p.conn_id, &p.db, &state);
             }
-            fresh
-        });
-    }
-    let mut result = diagram_groups::GroupSync::default();
-    let host = t
-        .query_tabs
-        .iter()
-        .position(|q| Tabular::is_diagram_host_tab(q, p.conn_id, &p.db));
-    if let Some(i) = host {
-        let snapshot = t.query_tabs[i].diagram_state.as_mut().map(|state| {
-            result = diagram_groups::sync_groups(state, p.repo_url.as_deref(), &services);
-            state.clone()
-        });
-        if result.changed()
-            && let Some(state) = snapshot
-        {
-            t.save_diagram(p.conn_id, &p.db, &state);
-        }
-    } else if let Some(path) = t.get_diagram_path(p.conn_id, &p.db)
-        && let Ok(bytes) = std::fs::read(&path)
-        && let Ok(mut state) = serde_json::from_slice::<DiagramState>(&bytes)
-    {
-        result = diagram_groups::sync_groups(&mut state, p.repo_url.as_deref(), &services);
-        if result.changed() {
-            let state = crate::diagram_links::persistable(&state);
-            let written = serde_json::to_vec_pretty(&state)
-                .map_err(|e| e.to_string())
-                .and_then(|b| {
-                    crate::diagram_view::write_atomic(&path, &b).map_err(|e| e.to_string())
-                });
-            if let Err(e) = written {
-                log::warn!("[REPO_SETUP] cannot update diagram {}: {e}", path.display());
-            }
+        } else if let Some(path) = t.get_diagram_path(p.conn_id, &p.db) {
+            // Tab tidak terbuka: baca ulang file terbaru, tempel patch, dan
+            // tulis di thread supaya UI tidak tersendat.
+            std::thread::spawn(move || {
+                let Some(mut state) = read_diagram(&path) else {
+                    log::warn!("[REPO_SETUP] cannot read diagram {}", path.display());
+                    return;
+                };
+                patch.apply(&mut state);
+                let state = crate::diagram_links::persistable(&state);
+                let written = serde_json::to_vec_pretty(&state)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| {
+                        crate::diagram_view::write_atomic(&path, &b).map_err(|e| e.to_string())
+                    });
+                if let Err(e) = written {
+                    log::warn!("[REPO_SETUP] cannot update diagram {}: {e}", path.display());
+                }
+            });
         }
     }
     for (gid, dir) in &result.groups {

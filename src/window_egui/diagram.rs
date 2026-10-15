@@ -652,6 +652,38 @@ impl super::Tabular {
         Some(state)
     }
 
+    /// Pengambilan skema diagram yang sedang berjalan: `(id koneksi, database)`.
+    pub(crate) fn diagram_schema_activity(&self) -> impl Iterator<Item = (i64, &str)> + '_ {
+        self.diagram_schema_jobs
+            .iter()
+            .map(|j| (j.conn_id, j.db_name.as_str()))
+    }
+
+    /// `Some(prevent_overlap)` bila diagram (conn, db) belum punya layout:
+    /// tab host-nya masih kosong, atau tanpa tab dan tanpa cache lokal.
+    fn diagram_needs_layout(&self, conn_id: i64, db_name: &str) -> Option<bool> {
+        let mut hosts = self
+            .query_tabs
+            .iter()
+            .filter(|q| Self::is_diagram_host_tab(q, conn_id, db_name))
+            .filter_map(|q| q.diagram_state.as_ref())
+            .peekable();
+        if hosts.peek().is_none() {
+            let cached = self
+                .get_diagram_path(conn_id, db_name)
+                .is_some_and(|p| p.exists());
+            return (!cached).then(|| models::structs::DiagramState::default().prevent_overlap);
+        }
+        let mut empty = None;
+        for s in hosts {
+            if !s.nodes.is_empty() {
+                return None;
+            }
+            empty = Some(s.prevent_overlap);
+        }
+        empty
+    }
+
     /// Mulai ambil skema live (conn, db) di background. Job untuk database
     /// yang sama tidak diduplikasi; hasilnya diproses di
     /// [`Self::poll_diagram_schema_jobs`].
@@ -698,6 +730,7 @@ impl super::Tabular {
             pool,
             shared_pools: self.shared_connection_pools.clone(),
             cache_pool: self.db_pool.clone(),
+            precompute_layout: self.diagram_needs_layout(conn_id, db_name),
         };
         rt.spawn(async move {
             let _ = tx.send(crate::diagram_schema::fetch_schema_snapshot(req).await);

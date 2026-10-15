@@ -32,6 +32,10 @@ pub struct SchemaSnapshot {
     /// Diagram di tabel `diagram_by_tabular`: `Some(Ok(None))` = belum ada,
     /// `Some(Err)` = gagal dibaca, `None` = tidak diperiksa.
     pub shared: Option<Result<Option<crate::diagram_storage::DiagramRecord>, String>>,
+    /// Posisi tabel hasil auto-layout yang dihitung di background untuk
+    /// diagram yang belum punya layout. Auto-layout diagram besar (ratusan
+    /// tabel) bisa makan puluhan detik dan tidak boleh jalan di UI thread.
+    pub initial_layout: Option<HashMap<String, eframe::egui::Pos2>>,
 }
 
 /// Semua yang dibutuhkan task background; tidak meminjam `Tabular`.
@@ -44,6 +48,9 @@ pub struct SchemaFetchRequest {
     pub shared_pools: Arc<Mutex<HashMap<i64, DatabasePool>>>,
     /// Cache SQLite lokal untuk write-through foreign key.
     pub cache_pool: Option<Arc<sqlx::SqlitePool>>,
+    /// `Some(prevent_overlap)`: diagram tujuan belum punya layout, hitung
+    /// auto-layout di background ([`SchemaSnapshot::initial_layout`]).
+    pub precompute_layout: Option<bool>,
 }
 
 pub(crate) async fn wait_for_pool(
@@ -194,14 +201,58 @@ pub async fn fetch_schema_snapshot(req: SchemaFetchRequest) -> Result<SchemaSnap
         started.elapsed()
     );
 
-    Ok(SchemaSnapshot {
+    let mut snapshot = SchemaSnapshot {
         foreign_keys,
         columns,
         tables,
         table_comments,
         group_config,
         shared: Some(shared),
-    })
+        initial_layout: None,
+    };
+    // Layout dari `diagram_by_tabular` menggantikan state lokal, jadi
+    // auto-layout hanya perlu bila database belum menyimpan diagram.
+    let has_shared = matches!(snapshot.shared, Some(Ok(Some(_))));
+    if let Some(prevent_overlap) = req.precompute_layout
+        && !has_shared
+    {
+        let layout_started = Instant::now();
+        let conn_name = req.conn.name.clone();
+        let db_name = req.db_name.clone();
+        let (back, layout) = tokio::task::spawn_blocking(move || {
+            let layout = initial_layout(&snapshot, conn_id, &db_name, &conn_name, prevent_overlap);
+            (snapshot, layout)
+        })
+        .await
+        .map_err(|e| format!("Diagram layout failed: {e}"))?;
+        snapshot = back;
+        log::info!(
+            "[DIAGRAM_PERF] initial layout {}/{}: {} tables ({:?})",
+            req.conn.name,
+            db,
+            layout.len(),
+            layout_started.elapsed()
+        );
+        snapshot.initial_layout = Some(layout);
+    }
+    Ok(snapshot)
+}
+
+/// Auto-layout diagram kosong yang diisi `snapshot`; dipanggil di thread
+/// latar. Hasilnya dipakai [`merge_schema`] saat state tujuan masih kosong.
+fn initial_layout(
+    snapshot: &SchemaSnapshot,
+    conn_id: i64,
+    db_name: &str,
+    conn_name: &str,
+    prevent_overlap: bool,
+) -> HashMap<String, eframe::egui::Pos2> {
+    let mut state = DiagramState {
+        prevent_overlap,
+        ..Default::default()
+    };
+    merge_schema(&mut state, snapshot, conn_id, db_name, Some(conn_name));
+    state.nodes.into_iter().map(|n| (n.id, n.pos)).collect()
 }
 
 /// Rapikan state yang baru dimuat dari penyimpanan: buang isi link lama dan
@@ -488,7 +539,18 @@ pub fn merge_schema(
     crate::diagram_flow::prune_flow_cards(state);
 
     if is_init && !state.nodes.is_empty() {
-        crate::diagram_view::perform_auto_layout(state);
+        match snapshot
+            .initial_layout
+            .as_ref()
+            .filter(|l| state.nodes.iter().all(|n| l.contains_key(&n.id)))
+        {
+            Some(layout) => {
+                for node in &mut state.nodes {
+                    node.pos = layout[&node.id];
+                }
+            }
+            None => crate::diagram_view::perform_auto_layout(state),
+        }
     }
 }
 
@@ -560,6 +622,7 @@ mod tests {
             table_comments: None,
             group_config: None,
             shared: None,
+            ..Default::default()
         }
     }
 
@@ -592,6 +655,7 @@ mod tests {
                 enabled: true,
             }),
             shared: None,
+            ..Default::default()
         };
 
         merge_schema(&mut state, &snap, 1, "shop", Some("local"));
@@ -632,6 +696,7 @@ mod tests {
                 enabled: true,
             }),
             shared: None,
+            ..Default::default()
         };
 
         let mut state = DiagramState::default();
@@ -706,6 +771,28 @@ mod tests {
         assert_eq!(state.nodes.len(), 2);
         // FK gagal diambil: edge cache dipertahankan.
         assert_eq!(state.edges.len(), 1);
+    }
+
+    #[test]
+    fn merge_on_empty_state_uses_background_layout() {
+        let mut snap = snapshot(&["users", "orders"], vec![]);
+        let layout = initial_layout(&snap, 1, "app", "conn", true);
+        assert_eq!(layout.len(), 2);
+        snap.initial_layout = Some(
+            layout
+                .keys()
+                .map(|k| (k.clone(), eframe::egui::pos2(7.0, 9.0)))
+                .collect(),
+        );
+        let mut state = DiagramState::default();
+        merge_schema(&mut state, &snap, 1, "app", Some("conn"));
+        assert_eq!(state.nodes.len(), 2);
+        assert!(
+            state
+                .nodes
+                .iter()
+                .all(|n| n.pos == eframe::egui::pos2(7.0, 9.0))
+        );
     }
 
     #[test]

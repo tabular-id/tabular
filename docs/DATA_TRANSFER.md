@@ -12,6 +12,7 @@ and the extra backup engines.
 | Transfer tables | Table or database context menu > **Transfer To...**, or **Data: Transfer Tables** |
 | Export objects as SQL | Table or database context menu > **Export as SQL...** / **Export Objects as SQL...** |
 | Compare data | Table or database context menu > **Compare Data...**, or **Data: Compare Data** |
+| Compare query results across connections | Sidebar **DBs** > **Comp** > **+** |
 | Decrypt an exported file | Settings menu > **Decrypt Exported File...** |
 | MongoDB / SQL Server backup | Database context menu > **Backup Database...** / **Restore Database...** |
 
@@ -230,6 +231,75 @@ instead of table data:
 6. Engine-specific limitations (such as SQLite lacking support for altering column types) are emitted
    as `-- manual:` comment hints and skipped during execution.
 
+## Multi-source Comparison
+
+Compares the results of two or more queries that run on different connections, for example an
+order in MySQL that needs a `JOIN`, the same order in SQL Server spread over other tables, and a
+single MongoDB collection. Only rows that differ are listed.
+
+Open it from the sidebar: **DBs** > **Comp** > **+**. A comparison has:
+
+- **Name**: shown in the sidebar and in the tab title.
+- **Variables**: name and value pairs. Write `${name}` in any query and the value is inserted
+  before the query runs, as plain text. Add quotes yourself in SQL, for example
+  `WHERE created_at >= '${from}'`. **Insert variable** above each query puts the placeholder at
+  the cursor. An unknown `${name}` stops the run with an error.
+- **Queries**: one per source. Pick a connection (MySQL, PostgreSQL, SQLite, SQL Server or
+  MongoDB) and a database. Picking a table or collection fills in `SELECT * FROM <table>` with the
+  quoting of that engine, or the MongoDB query below, and the key from the primary key. Edit the
+  query freely afterwards; joins, filters and aliases are fine.
+- **Options**: a row limit per query (100,000 by default; empty means no limit), columns to
+  ignore, tolerant value formats, trailing spaces and letter case.
+
+**Save** stores the comparison in the local `connections.db`. The **Comp** sidebar lists every
+saved comparison with its number of queries, connections and variables, and the statistics of
+the last run: rows read, keys compared and keys that differ. Click one to open it in a tab;
+right-click to run it in the background, duplicate it or delete it.
+
+### Matching rows and columns
+
+- **Key columns** identify a row. They are matched by position across queries, so `id` in one
+  query can pair with `order_no` in another. Every query needs the same number of keys. Without
+  key columns the key is `_id`, then `id`, then the first column.
+- **Value columns** are matched by name, ignoring case. When names differ, add an alias per query
+  as `source=common`, for example `amount=total` or `customerId=customer_id`. Columns that are not
+  present in every query are listed as *not compared*.
+- With tolerant values on, `1.0` equals `1`, `true` equals `1`, and MongoDB dates equal SQL
+  timestamps. NULL never equals a value.
+
+### MongoDB queries
+
+A MongoDB query is JSON with a `collection` and either a `find` part or a pipeline:
+
+```json
+{"collection": "orders", "filter": {"status": "${status}"}, "projection": {"items": 0}, "sort": {"_id": 1}, "limit": 1000}
+{"collection": "orders", "pipeline": [{"$match": {"shop": 7}}, {"$unwind": "$items"}]}
+```
+
+Extended JSON works in filters, for example `{"_id": {"$oid": "..."}}` or
+`{"$date": "2026-01-01T00:00:00Z"}`. Nested fields become columns named with dots, such as
+`customer.name`. Arrays and other values are shown as JSON; an `ObjectId` is shown as its hex
+string.
+
+### Running and results
+
+**PROCESS** runs every query one after another in the background. The tab shows the progress,
+and the job also appears in **Background Processes** at the bottom of the sidebar, where it can be
+cancelled. You can switch tabs, run other queries or close the comparison tab while it runs; a
+notification reports the result, and reopening the comparison shows it. A saved comparison is
+saved again before it runs, so the sidebar statistics always match its definition.
+
+The result shows the number of keys compared, identical, missing somewhere and with differing
+values, then rows read, missing keys and duplicate keys per query. The table lists one row per
+differing key: the key, a status such as `Missing in: MSSQL; Changed: total`, and each compared
+column once per query (`total @ MySQL`, `total @ MSSQL`, ...). Differing values are highlighted
+and absent rows show *missing*. Filter by missing or changed rows, or by text. The tab draws the
+first 500 rows; **Export** writes all of them as CSV, JSON, Excel, Parquet, SQL and the other
+export formats.
+
+Rows past the row limit are not read, so they can show up as missing; the result warns when a
+limit was reached. Each query is held in memory while comparing.
+
 ## MongoDB and SQL Server backup
 
 The backup and restore dialogs also drive the vendor tools:
@@ -279,8 +349,9 @@ plugin runs; the result or the error appears when it finishes.
 ## For contributors
 
 Everything headless lives in `src/data_transfer/` and takes plain data (`ConnectionConfig`,
-pools, `TableData`); the GUI is `src/window_egui/transfer_ui.rs`, `transfer_dialogs.rs` and
-`transfer_compare_ui.rs`.
+pools, `TableData`); the GUI is `src/window_egui/transfer_ui.rs`, `transfer_dialogs.rs`,
+`transfer_compare_ui.rs`, and for Multi-source Comparison `multi_compare_ui.rs` (tab and
+sidebar) with `multi_compare_jobs.rs` (background jobs).
 
 | Module | Purpose |
 |---|---|
@@ -290,6 +361,7 @@ pools, `TableData`); the GUI is `src/window_egui/transfer_ui.rs`, `transfer_dial
 | `catalog.rs` | `Endpoint` (connection + database), catalog queries, `TablePager` (keyset / `OFFSET` paging), `execute_atomic` |
 | `transfer.rs`, `object_export.rs` | Table transfer and SQL object export |
 | `compare.rs`, `saved.rs` | Data compare, sync script, saved comparisons |
+| `multi_compare.rs`, `mongo_source.rs`, `multi_compare_saved.rs` | Multi-source Comparison: variables, N-way diff, MongoDB queries, saved definitions and run statistics |
 | `data_files.rs` | The Data Files workspace |
 
 Nullness: file readers and `TablePager` produce cells as `Option<String>`

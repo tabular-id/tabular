@@ -1152,9 +1152,10 @@ impl Tabular {
                                     // under "Database" (like VS Code's view-container
                                     // sub-views) so each gets full space + a contextual "+".
                                     let segments = [
-                                        style::NavSegment { key: "Connections", icon: egui_icons::icons::ICON_CABLE.codepoint, label: crate::i18n::tr("Connections") },
-                                        style::NavSegment { key: "Queries", icon: egui_icons::icons::ICON_CODE.codepoint, label: crate::i18n::tr("Queries") },
-                                        style::NavSegment { key: "History", icon: egui_icons::icons::ICON_HISTORY.codepoint, label: crate::i18n::tr("History") },
+                                        style::NavSegment { key: "Connections", icon: egui_icons::icons::ICON_CABLE.codepoint, label: crate::i18n::tr("Cons") },
+                                        style::NavSegment { key: "Queries", icon: egui_icons::icons::ICON_CODE.codepoint, label: crate::i18n::tr("Sqls") },
+                                        style::NavSegment { key: "History", icon: egui_icons::icons::ICON_HISTORY.codepoint, label: crate::i18n::tr("Hist") },
+                                        style::NavSegment { key: "Comparisons", icon: egui_icons::icons::ICON_DIFFERENCE.codepoint, label: crate::i18n::tr("Comp") },
                                     ];
                                     let seg_height = if metrics.is_touch { 40.0 } else { 32.0 };
                                     if let Some(key) = style::render_segmented_nav(
@@ -1396,6 +1397,12 @@ impl Tabular {
                                         ui.label("Executed queries will show up here");
                                     }
                                 }
+                                "Comparisons" => {
+                                    self.render_sidebar_search_box(ui, "Search comparisons…");
+                                    ui.add_space(4.0);
+                                    let filter = self.database_search_text.clone();
+                                    crate::window_egui::multi_compare_ui::render_sidebar(self, ui, &filter);
+                                }
                                 _ => {}
                                     }
                                 }
@@ -1516,6 +1523,16 @@ impl Tabular {
 
                                                 if plus_btn.clicked() {
                                                     editor::create_new_tab(self, "Untitled Query".to_string(), String::new());
+                                                }
+                                            }
+                                            "Comparisons" => {
+                                                let plus_btn = ui.add_sized(
+                                                    [24.0, 24.0],
+                                                    egui::Button::new(egui::RichText::new(egui_icons::icons::ICON_ADD.codepoint).color(egui::Color32::WHITE))
+                                                        .fill(style::theme_accent(ctx)),
+                                                ).on_hover_text("New comparison across connections");
+                                                if plus_btn.clicked() {
+                                                    crate::window_egui::multi_compare_ui::open_new(self);
                                                 }
                                             }
                                             "History" if !self.history_tree.is_empty() => {
@@ -3086,6 +3103,7 @@ impl Tabular {
                         let mut rendered_dba_monitor = false;
                         let mut rendered_user_manager = false;
                         let mut rendered_git = false;
+                        let mut rendered_compare = false;
                         let mut diagram_to_save = None;
                         let mut diagram_action = None;
                         let mut redis_action = None;
@@ -3781,7 +3799,17 @@ impl Tabular {
                             rendered_git = true;
                         }
 
-                        if !rendered_diagram && !rendered_http && !rendered_redis_browser && !rendered_dba_monitor && !rendered_user_manager && !rendered_git {
+                        // Tab Multi-source Comparison.
+                        if self
+                            .query_tabs
+                            .get(self.active_tab_index)
+                            .is_some_and(|t| t.compare_state.is_some())
+                        {
+                            crate::window_egui::multi_compare_ui::render_active_tab(self, ui);
+                            rendered_compare = true;
+                        }
+
+                        if !rendered_diagram && !rendered_http && !rendered_redis_browser && !rendered_dba_monitor && !rendered_user_manager && !rendered_git && !rendered_compare {
                             self.render_query_editor_with_split(ui, "regular_query");
                         }
                     
@@ -5740,6 +5768,7 @@ impl App for Tabular {
         crate::session_restore::tick(self, ctx);
         crate::window_egui::git_jobs::poll(self, ctx);
         crate::window_egui::repo_setup_jobs::tick(self, ctx);
+        crate::window_egui::multi_compare_jobs::tick(self, ctx);
 
         self.render_query_insights(ctx);
         #[cfg(not(any(target_os = "ios", target_os = "android")))]

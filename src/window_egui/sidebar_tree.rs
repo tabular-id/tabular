@@ -26,9 +26,31 @@ pub(crate) struct RenderTreeNodeParams<'a> {
     prefetch_progress: &'a HashMap<i64, (usize, usize)>,
     // Pre-loaded PNG textures for DB type icons (key = DatabaseType::icon_key())
     db_icon_textures: &'a HashMap<String, egui::TextureHandle>,
+    /// Proses latar per koneksi (skema diagram, group per service) untuk
+    /// spinner di baris koneksi; nilainya teks tooltip.
+    connection_activity: &'a HashMap<i64, String>,
 }
 
 impl super::Tabular {
+    /// Proses latar yang sedang berjalan per koneksi, digabung per baris.
+    fn connection_activity(&self) -> HashMap<i64, String> {
+        let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+        for (conn_id, db) in self.diagram_schema_activity() {
+            out.entry(conn_id)
+                .or_default()
+                .push(format!("Loading diagram schema of '{db}'"));
+        }
+        for (conn_id, text) in self.repo_setup.diagram_activity() {
+            let lines = out.entry(conn_id).or_default();
+            if !lines.contains(&text) {
+                lines.push(text);
+            }
+        }
+        out.into_iter()
+            .map(|(id, lines)| (id, format!("{}…", lines.join("…\n"))))
+            .collect()
+    }
+
     pub fn get_connection_name(&self, connection_id: i64) -> Option<String> {
         self.connections
             .iter()
@@ -81,6 +103,12 @@ impl super::Tabular {
                         .insert(id, c.connection_type.clone());
                 }
             }
+        }
+        let connection_activity = self.connection_activity();
+        if !connection_activity.is_empty() {
+            // Spinner perlu digambar ulang walau user diam.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
         let connection_types = &self.cached_connection_types;
         let mut expansion_requests = Vec::new();
@@ -160,6 +188,7 @@ impl super::Tabular {
                     connection_types,
                     prefetch_progress: &self.prefetch_progress,
                     db_icon_textures: &self.db_icon_textures,
+                    connection_activity: &connection_activity,
                 },
             );
             if let Some(expansion_req) = expansion_request {
@@ -2420,6 +2449,15 @@ impl super::Tabular {
                             name_text.push_str(&format!(" 📦 {}/{}", completed, total));
                         }
                     }
+                    // Proses latar (skema diagram, group per service): spinner
+                    // kecil sebelum nama, keterangannya di tooltip.
+                    if let Some(activity) = node
+                        .connection_id
+                        .and_then(|id| params.connection_activity.get(&id))
+                    {
+                        ui.add(egui::Spinner::new().size(12.0))
+                            .on_hover_text(activity);
+                    }
                     // Color the connection name: green = connected, red = disconnected/connecting
                     let name_response = ui.add(
                         egui::Label::new(egui::RichText::new(name_text).color(status_color))
@@ -3600,6 +3638,7 @@ impl super::Tabular {
                                 connection_types: params.connection_types,
                                 prefetch_progress: params.prefetch_progress,
                                 db_icon_textures: params.db_icon_textures,
+                                connection_activity: params.connection_activity,
                             },
                         );
                         if let Some(child_expansion) = child_expansion_request {
@@ -3740,6 +3779,7 @@ impl super::Tabular {
                                     connection_types: params.connection_types,
                                     prefetch_progress: params.prefetch_progress,
                                     db_icon_textures: params.db_icon_textures,
+                                    connection_activity: params.connection_activity,
                                 },
                             );
 

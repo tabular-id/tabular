@@ -804,17 +804,30 @@ impl Tabular {
             .current_connection_id
             .and_then(|id| self.connections.iter().find(|c| c.id == Some(id)))
             .map(|c| c.connection_type.clone());
+        let data = TableData::new(
+            self.current_table_headers.clone(),
+            self.all_table_data.clone(),
+        );
+        let caption = export_caption(
+            self.query_tabs
+                .get(self.active_tab_index)
+                .map(|tab| tab.title.as_str())
+                .unwrap_or(""),
+        );
+        self.open_export_dialog_for(data, caption, db_type);
+    }
+
+    /// Buka dialog Export Result untuk tabel apa pun (mis. hasil Comparison).
+    /// `caption` menjadi nama dasar file dan tabel.
+    pub(super) fn open_export_dialog_for(
+        &mut self,
+        data: TableData,
+        caption: String,
+        db_type: Option<DatabaseType>,
+    ) {
         self.transfer_ui.export = Some(ExportDialog {
-            data: TableData::new(
-                self.current_table_headers.clone(),
-                self.all_table_data.clone(),
-            ),
-            caption: export_caption(
-                self.query_tabs
-                    .get(self.active_tab_index)
-                    .map(|tab| tab.title.as_str())
-                    .unwrap_or(""),
-            ),
+            data,
+            caption,
             db_type,
             format: ExportFormat::Csv,
             encoding: TextEncoding::Utf8,
