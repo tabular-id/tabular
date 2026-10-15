@@ -215,13 +215,45 @@ pub struct HttpTestSuite {
     /// Kriteria lulus (exit criteria) dalam persen; `None` = 100%.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_pass_rate: Option<f64>,
+    /// Hasil validasi terakhir (run nyata + perbaikan AI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<SuiteValidation>,
     /// Urutan group (mis. Purchasing → Plant → Sales). Group yang dipakai
     /// langkah tetapi belum terdaftar ditambahkan di belakang.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
 }
 
+/// Bukti bahwa suite pernah dijalankan dan lolos terhadap server sungguhan.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SuiteValidation {
+    /// RFC 3339.
+    pub at: String,
+    #[serde(default)]
+    pub environment: Option<String>,
+    pub rounds: usize,
+    pub passed: usize,
+    pub total: usize,
+    /// Langkah yang diperbaiki AI selama validasi.
+    pub fixed: usize,
+    /// [`suite_fingerprint`] saat validasi; beda = suite sudah diubah sesudahnya.
+    pub fingerprint: String,
+}
+
+impl SuiteValidation {
+    pub fn all_passed(&self) -> bool {
+        self.total > 0 && self.passed == self.total
+    }
+}
+
 impl HttpTestSuite {
+    /// Validasi masih berlaku untuk definisi suite saat ini.
+    pub fn validation_current(&self) -> Option<&SuiteValidation> {
+        self.validation
+            .as_ref()
+            .filter(|v| v.fingerprint == suite_fingerprint(self))
+    }
+
     /// Suite kosong baru untuk project `project_id`.
     pub fn new(name: &str, project_id: Option<String>) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
@@ -649,6 +681,9 @@ pub fn read_target(resp: &HttpClientResponse, target: &str) -> Option<String> {
     if lower == "body" {
         return Some(resp.body.clone());
     }
+    if let Some(name) = t.strip_prefix("cookie:") {
+        return cookie_value(&resp.headers, name.trim());
+    }
     if let Some(name) = t
         .strip_prefix("header:")
         .or_else(|| t.strip_prefix("headers."))
@@ -669,6 +704,49 @@ pub fn read_target(resp: &HttpClientResponse, target: &str) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         other => Some(other.to_string()),
     }
+}
+
+/// Nilai cookie `name` dari header `Set-Cookie` response.
+pub fn cookie_value(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .flat_map(|(_, v)| v.split('\n'))
+        .filter_map(|line| line.split(';').next())
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| k.trim() == name)
+        .map(|(_, v)| v.trim().trim_matches('"').to_string())
+}
+
+/// Header response untuk ditampilkan: nilai rahasia disamarkan, nama cookie
+/// dan atributnya tetap terlihat.
+pub fn redact_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(k, v)| {
+            let value = if k.eq_ignore_ascii_case("set-cookie") {
+                v.split('\n')
+                    .map(|line| {
+                        let mut parts = line.splitn(2, ';');
+                        let first = parts.next().unwrap_or("");
+                        let rest = parts.next().map(|r| format!(";{r}")).unwrap_or_default();
+                        match first.split_once('=') {
+                            Some((n, _)) => {
+                                format!("{}={}{rest}", n.trim(), crate::http_ai::REDACTED)
+                            }
+                            None => line.to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if sensitive_var(k) {
+                crate::http_ai::REDACTED.to_string()
+            } else {
+                v.clone()
+            };
+            (k.clone(), value)
+        })
+        .collect()
 }
 
 /// Hasil satu assertion.
@@ -969,6 +1047,23 @@ pub fn lint(
                 message,
             });
         }
+        for v in &d.uses {
+            let empty_suite_var = suite
+                .variables
+                .iter()
+                .any(|(k, val)| k.trim() == v && val.is_empty());
+            let provided = known_vars.contains(v)
+                || d.depends_on.iter().any(|&p| deps[p].provides.contains(v));
+            if empty_suite_var && !provided {
+                out.push(LintIssue {
+                    level: LintLevel::Warning,
+                    step: Some(i),
+                    message: format!(
+                        "Variable {{{{{v}}}}} is empty; set it in Variables or the project environment"
+                    ),
+                });
+            }
+        }
         if step.assertions.is_empty() {
             out.push(LintIssue {
                 level: LintLevel::Warning,
@@ -1119,6 +1214,9 @@ pub struct StepResult {
     pub extracted: Vec<(String, String)>,
     /// Variabel yang masih `{{…}}` saat request akan dikirim.
     pub unresolved: Vec<String>,
+    /// Header response (nilai rahasia disamarkan).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_headers: Vec<(String, String)>,
     /// Potongan awal body respons (nilai rahasia disamarkan).
     pub body_preview: String,
     pub skipped: bool,
@@ -1154,6 +1252,12 @@ impl StepResult {
     /// Request benar-benar terkirim dan mendapat response.
     pub fn executed(&self) -> bool {
         !self.skipped && !self.blocked && self.error.is_none()
+    }
+
+    /// Server menerima request (2xx), jadi data yang dibuat kemungkinan ada.
+    /// Request yang ditolak (4xx/5xx) tidak perlu dibersihkan.
+    pub fn created(&self) -> bool {
+        self.executed() && (200..300).contains(&self.status)
     }
 
     fn not_run(index: usize, step: &HttpTestStep, blocked: bool, note: String) -> Self {
@@ -1193,6 +1297,8 @@ pub struct RunSummary {
     pub aborted: bool,
     pub results: Vec<StepResult>,
     pub residue: Vec<Residue>,
+    /// Server tidak terjangkau sebelum langkah pertama; tidak ada yang dikirim.
+    pub preflight_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1302,17 +1408,23 @@ pub fn run_step(
         error: resp.error.clone(),
         unresolved,
         body_preview: crate::repo_scan::truncate_chars(&redact_body(&resp.body), 2_000),
+        response_headers: redact_headers(&resp.headers),
         ..Default::default()
     };
     if resp.error.is_some() {
         return result;
     }
+    let mut missing_extracts = Vec::new();
     for ex in &step.extract {
-        if let Some(v) = read_target(&resp, &ex.from) {
-            vars.insert(ex.var.clone(), v.clone());
-            result
-                .extracted
-                .push((ex.var.clone(), display_var_value(&ex.var, &v)));
+        match read_target(&resp, &ex.from) {
+            Some(v) => {
+                vars.insert(ex.var.clone(), v.clone());
+                result
+                    .extracted
+                    .push((ex.var.clone(), display_var_value(&ex.var, &v)));
+            }
+            None if !ex.var.trim().is_empty() => missing_extracts.push(ex),
+            None => {}
         }
     }
     result.assertions = step
@@ -1320,6 +1432,19 @@ pub fn run_step(
         .iter()
         .map(|a| evaluate(&resp, a, vars))
         .collect();
+    // Extract yang tidak menemukan nilai membuat langkah gagal: langkah
+    // berikutnya butuh nilainya, dan penyebabnya ada di langkah ini.
+    for ex in missing_extracts {
+        result.assertions.push(AssertResult {
+            assertion: Assertion {
+                target: ex.from.clone(),
+                op: AssertOp::Exists,
+                value: format!("(extract {{{{{}}}}})", ex.var),
+            },
+            passed: false,
+            actual: None,
+        });
+    }
     result
 }
 
@@ -1357,6 +1482,59 @@ fn missing_vars(step: &HttpTestStep, vars: &HashMap<String, String>) -> Vec<Stri
         .into_iter()
         .filter(|v| !vars.contains_key(v))
         .collect()
+}
+
+/// Variabel yang diambil dari cookie: nama variabel → nama cookie.
+pub fn cookie_vars(suite: &HttpTestSuite) -> HashMap<String, String> {
+    suite
+        .steps
+        .iter()
+        .flat_map(|s| s.extract.iter())
+        .filter_map(|e| {
+            let name = e.from.trim().strip_prefix("cookie:")?.trim();
+            (!name.is_empty() && !e.var.trim().is_empty())
+                .then(|| (e.var.trim().to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// API yang membaca token dari cookie: langkah dengan auth Bearer `{{v}}`,
+/// di mana `v` diambil dari `cookie:<nama>`, juga mengirim header
+/// `Cookie: <nama>={{v}}`. Langkah tanpa auth (uji negatif) tidak disentuh.
+pub fn with_cookie_auth<'a>(
+    step: &'a HttpTestStep,
+    cookies: &HashMap<String, String>,
+) -> std::borrow::Cow<'a, HttpTestStep> {
+    use std::borrow::Cow;
+    let r = &step.request;
+    if !matches!(
+        r.auth_type,
+        HttpAuthType::BearerToken | HttpAuthType::JwtBearer
+    ) {
+        return Cow::Borrowed(step);
+    }
+    let token = r.bearer_token.trim();
+    let Some(var) = token
+        .strip_prefix("{{")
+        .and_then(|t| t.strip_suffix("}}"))
+        .map(str::trim)
+    else {
+        return Cow::Borrowed(step);
+    };
+    let Some(cookie) = cookies.get(var) else {
+        return Cow::Borrowed(step);
+    };
+    if r.headers
+        .iter()
+        .any(|(k, _, on)| *on && k.eq_ignore_ascii_case("cookie"))
+    {
+        return Cow::Borrowed(step);
+    }
+    let mut s = step.clone();
+    s.request
+        .headers
+        .push(("Cookie".into(), format!("{cookie}={{{{{var}}}}}"), true));
+    Cow::Owned(s)
 }
 
 /// Pilihan run: `include` = langkah yang ikut (lihat [`select_for_groups`]),
@@ -1405,6 +1583,7 @@ pub fn run_suite(
     emit: &mut dyn FnMut(TestEvent),
 ) -> RunSummary {
     let deps = dependencies(suite);
+    let cookies = cookie_vars(suite);
     let order: Vec<usize> = suite
         .execution_order()
         .into_iter()
@@ -1448,7 +1627,7 @@ pub fn run_suite(
                 r
             } else {
                 emit(TestEvent::StepStarted(i));
-                run_step(i, step, &mut vars, send)
+                run_step(i, &with_cookie_auth(step, &cookies), &mut vars, send)
             }
         };
         if !r.skipped && !r.passed() && halt.is_none() {
@@ -1471,7 +1650,7 @@ pub fn run_suite(
     // Fase cleanup: selalu dijalankan kecuali abort.
     emit(TestEvent::CleanupStarted);
     let any_mutation_ran = results.iter().flatten().any(|r| {
-        r.executed()
+        r.created()
             && suite
                 .steps
                 .get(r.index)
@@ -1496,7 +1675,7 @@ pub fn run_suite(
         let step = &suite.steps[i];
         let target = cleanup_target(suite, &deps, i);
         let needed = match target {
-            Some(t) => results[t].as_ref().is_some_and(|r| r.executed()),
+            Some(t) => results[t].as_ref().is_some_and(StepResult::created),
             None => any_mutation_ran,
         };
         let r = if abort.load(Ordering::SeqCst) {
@@ -1548,11 +1727,12 @@ pub fn run_suite(
                 r
             } else {
                 emit(TestEvent::StepStarted(i));
-                let mut r = run_step(i, step, &mut vars, send);
+                let sent = with_cookie_auth(step, &cookies);
+                let mut r = run_step(i, &sent, &mut vars, send);
                 // Satu kali coba ulang untuk gangguan jaringan sesaat.
                 if r.error.is_some() && !abort.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(300));
-                    r = run_step(i, step, &mut vars, send);
+                    r = run_step(i, &sent, &mut vars, send);
                     r.retries = 1;
                 }
                 if !r.passed()
@@ -1580,7 +1760,7 @@ pub fn run_suite(
     for (t, step) in suite.steps.iter().enumerate() {
         if creates_data(step)
             && !covered.contains(&t)
-            && results[t].as_ref().is_some_and(|r| r.executed())
+            && results[t].as_ref().is_some_and(StepResult::created)
         {
             residue.push(residue_for(
                 t,
@@ -1597,6 +1777,7 @@ pub fn run_suite(
         aborted: abort.load(Ordering::SeqCst),
         results: order.iter().filter_map(|&i| results[i].clone()).collect(),
         residue,
+        preflight_error: None,
     }
 }
 
@@ -1616,10 +1797,130 @@ pub fn spawn_run(
         let mut emit = |e: TestEvent| {
             let _ = tx.send(e);
         };
-        let summary = run_suite(&suite, &scope, vars, &send, &c, &a, &mut emit);
+        let summary = match preflight(&suite, &scope, &vars) {
+            Ok(()) => run_suite(&suite, &scope, vars, &send, &c, &a, &mut emit),
+            Err(e) => preflight_failed(&suite, &scope, e),
+        };
         let _ = tx.send(TestEvent::Finished(Box::new(summary)));
     });
     TestRunHandle { rx, cancel, abort }
+}
+
+// ─── Pre-flight ─────────────────────────────────────────────────────────────
+
+/// Origin `(scheme, host, port)` unik dari URL langkah yang ikut run, setelah
+/// variabel diganti. URL yang masih berisi `{{…}}` dilewati.
+pub fn run_origins(
+    suite: &HttpTestSuite,
+    scope: &RunScope,
+    vars: &HashMap<String, String>,
+) -> Vec<(String, String, u16)> {
+    let mut out: Vec<(String, String, u16)> = Vec::new();
+    for (i, step) in suite.steps.iter().enumerate() {
+        if !step.enabled || !scope.includes(i) {
+            continue;
+        }
+        let url = substitute(&step.request.url, vars);
+        let Ok(parsed) = reqwest::Url::parse(url.trim()) else {
+            continue;
+        };
+        let Some(host) = parsed.host_str() else {
+            continue;
+        };
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        let origin = (parsed.scheme().to_string(), host.to_string(), port);
+        if !out.contains(&origin) {
+            out.push(origin);
+        }
+    }
+    out
+}
+
+/// Pastikan semua server tujuan bisa dihubungi (koneksi TCP, 3 detik).
+pub fn preflight(
+    suite: &HttpTestSuite,
+    scope: &RunScope,
+    vars: &HashMap<String, String>,
+) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    let mut down = Vec::new();
+    for (scheme, host, port) in run_origins(suite, scope, vars) {
+        let label = format!("{scheme}://{host}:{port}");
+        let addrs: Vec<std::net::SocketAddr> = match (host.as_str(), port).to_socket_addrs() {
+            Ok(a) => a.collect(),
+            Err(e) => {
+                down.push(format!("{label} (cannot resolve host: {e})"));
+                continue;
+            }
+        };
+        let ok = addrs.iter().any(|a| {
+            std::net::TcpStream::connect_timeout(a, std::time::Duration::from_secs(3)).is_ok()
+        });
+        if !ok {
+            down.push(format!("{label} (connection refused or timed out)"));
+        }
+    }
+    if down.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "API server not reachable: {}. Start the API, or check the base URL variables and the project environment.",
+            down.join(", ")
+        ))
+    }
+}
+
+/// Ringkasan run yang tidak dijalankan karena pre-flight gagal.
+pub fn preflight_failed(suite: &HttpTestSuite, scope: &RunScope, error: String) -> RunSummary {
+    let results = suite
+        .execution_order()
+        .into_iter()
+        .filter(|&i| scope.includes(i))
+        .map(|i| StepResult::not_run(i, &suite.steps[i], true, error.clone()))
+        .collect();
+    log::warn!("[HTTP_TESTS] {}: {error}", suite.name);
+    RunSummary {
+        results,
+        preflight_error: Some(error),
+        ..Default::default()
+    }
+}
+
+// ─── Kredensial akun uji ────────────────────────────────────────────────────
+
+/// Variabel kredensial untuk akun yang dibuat suite sendiri (bukan rahasia
+/// nyata), mis. `test_password`.
+pub fn is_test_credential(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("password")
+        && ["test", "new", "dummy", "temp", "sample", "qa"]
+            .iter()
+            .any(|p| n.contains(p))
+}
+
+/// Nilai kuat acak untuk kredensial akun uji.
+pub fn generate_test_password() -> String {
+    use rand::RngExt;
+    const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut bytes = [0u8; 10];
+    rand::rng().fill(&mut bytes);
+    let tail: String = bytes
+        .iter()
+        .map(|b| CHARS[*b as usize % CHARS.len()] as char)
+        .collect();
+    format!("Tst!{tail}9a")
+}
+
+/// Isi variabel kredensial akun uji yang masih kosong. Mengembalikan namanya.
+pub fn fill_test_credentials(vars: &mut [(String, String)]) -> Vec<String> {
+    let mut filled = Vec::new();
+    for (k, v) in vars.iter_mut() {
+        if v.is_empty() && is_test_credential(k) {
+            *v = generate_test_password();
+            filled.push(k.clone());
+        }
+    }
+    filled
 }
 
 // ─── Riwayat run ────────────────────────────────────────────────────────────
@@ -1680,6 +1981,9 @@ pub struct TestRun {
     pub db_checks: Vec<DbResidueCheck>,
     #[serde(default)]
     pub pass_threshold: f64,
+    /// Server tidak terjangkau; run dibatalkan sebelum langkah pertama.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_error: Option<String>,
 }
 
 /// Batas jumlah run tersimpan per suite.
@@ -1773,6 +2077,7 @@ impl TestRun {
             aborted: summary.aborted,
             results: summary.results,
             residue: summary.residue,
+            preflight_error: summary.preflight_error,
             pass_threshold: suite.pass_threshold(),
             ..Default::default()
         }
@@ -2158,8 +2463,10 @@ const TEST_RULES: &str = "Rules:\n\
 - Use `{{base_url_…}}` variables from the catalog for every URL; never hardcode hosts.\n\
 - Auth tokens are variables such as `{{token}}`; add them to `variables` with an empty value \
   unless a login step extracts them.\n\
-- Assertion `target` is `status`, `time_ms`, `body`, `header:<Name>` or \
-  `json:$.path.to[0].field`. `op` is equals, not_equals, contains, not_contains, exists, \
+- Some APIs return the auth token in a cookie (`Set-Cookie`). Extract it with \
+  `cookie:<name>`; steps with auth `bearer` and `{{token}}` then also send it as a cookie.\n\
+- Assertion and extract `target` is `status`, `time_ms`, `body`, `header:<Name>`, \
+  `cookie:<name>` or `json:$.path.to[0].field`. `op` is equals, not_equals, contains, not_contains, exists, \
   not_exists, less_than, greater_than or matches (regex). Every step needs at least one \
   assertion.\n\
 - `request_id` refers to the catalog id the step is based on, when there is one.\n\
@@ -2320,6 +2627,11 @@ fn parse_method(s: &str) -> HttpMethod {
         "OPTIONS" => HttpMethod::OPTIONS,
         _ => HttpMethod::GET,
     }
+}
+
+/// Urai satu objek langkah JSON (format jawaban AI).
+pub fn parse_step_value(v: &Value, catalogs: &[FolderCatalog]) -> Option<HttpTestStep> {
+    parse_step(v, catalogs)
 }
 
 fn parse_step(v: &Value, catalogs: &[FolderCatalog]) -> Option<HttpTestStep> {
@@ -2498,6 +2810,7 @@ pub fn parse_tests_reply(
             }
         }
         variables.retain(|(k, _)| k != "run_id");
+        fill_test_credentials(&mut variables);
         let mut suite = HttpTestSuite {
             id: crate::http_collection::unique_id("suite"),
             name: sv
@@ -2565,6 +2878,7 @@ pub fn parse_steps_reply(
         }
     }
     vars.retain(|(k, _)| k != "run_id");
+    fill_test_credentials(&mut vars);
     Ok((steps, vars))
 }
 
@@ -3185,11 +3499,10 @@ mod tests {
         assert_eq!(by("po").outcome(), StepOutcome::Failed);
         assert_eq!(by("receipt").outcome(), StepOutcome::Blocked);
         assert_eq!(by("del_receipt").outcome(), StepOutcome::Skipped);
-        // PO terkirim (dapat response) → tetap dicoba dibersihkan; po_id tidak ada → residue.
-        assert_eq!(by("del_po").outcome(), StepOutcome::Blocked);
+        // PO ditolak server (500) → tidak ada data yang perlu dibersihkan.
+        assert_eq!(by("del_po").outcome(), StepOutcome::Skipped);
         assert_eq!(by("del_vendor").outcome(), StepOutcome::Passed);
-        assert_eq!(summary.residue.len(), 1);
-        assert_eq!(summary.residue[0].step_name, "po");
+        assert!(summary.residue.is_empty(), "{:?}", summary.residue);
     }
 
     #[test]
@@ -3478,5 +3791,147 @@ mod tests {
         assert_eq!(runs.len(), MAX_RUNS_PER_SUITE);
         assert_eq!(runs[0].run_id, format!("{:05}", MAX_RUNS_PER_SUITE + 2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_reports_unreachable_server_without_sending() {
+        // Port yang baru dilepas hampir pasti tidak didengar.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("port");
+        let mut suite = erp_suite();
+        suite.variables = vec![("base".into(), format!("http://127.0.0.1:{port}"))];
+        let vars = initial_vars(&suite);
+        let err = preflight(&suite, &RunScope::default(), &vars).expect_err("down");
+        assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
+        let summary = preflight_failed(&suite, &RunScope::default(), err.clone());
+        assert_eq!(summary.preflight_error.as_deref(), Some(err.as_str()));
+        assert!(
+            summary
+                .results
+                .iter()
+                .all(|r| r.outcome() == StepOutcome::Blocked)
+        );
+        // Server yang hidup lolos.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let live = listener.local_addr().expect("addr").port();
+        suite.variables = vec![("base".into(), format!("http://127.0.0.1:{live}"))];
+        assert!(preflight(&suite, &RunScope::default(), &initial_vars(&suite)).is_ok());
+    }
+
+    #[test]
+    fn fills_only_test_account_credentials() {
+        let mut vars = vec![
+            ("test_password".to_string(), String::new()),
+            ("password".to_string(), String::new()),
+            ("token".to_string(), String::new()),
+            ("new_user_password".to_string(), "keep".to_string()),
+        ];
+        let filled = fill_test_credentials(&mut vars);
+        assert_eq!(filled, vec!["test_password"]);
+        assert!(vars[0].1.len() >= 12);
+        assert!(vars[1].1.is_empty() && vars[2].1.is_empty());
+        assert_eq!(vars[3].1, "keep");
+    }
+
+    #[test]
+    fn lint_warns_about_empty_variables() {
+        let mut suite = erp_suite();
+        suite.variables.push(("api_secret".into(), String::new()));
+        suite.steps[1].request.url.push_str("&k={{api_secret}}");
+        let issues = lint(&suite, &std::collections::HashSet::new());
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("{{api_secret}} is empty"))
+        );
+        let known: std::collections::HashSet<String> = ["api_secret".to_string()].into();
+        assert!(
+            !lint(&suite, &known)
+                .iter()
+                .any(|i| i.message.contains("is empty"))
+        );
+    }
+
+    #[test]
+    fn extracts_cookies_and_redacts_them_in_headers() {
+        let mut r = resp(200, r#"{"id":"u1"}"#);
+        r.headers.push((
+            "set-cookie".into(),
+            "dp-token=abc.def; HttpOnly; Path=/; Max-Age=60".into(),
+        ));
+        r.headers
+            .push(("set-cookie".into(), "other=1; Path=/".into()));
+        assert_eq!(
+            read_target(&r, "cookie:dp-token").as_deref(),
+            Some("abc.def")
+        );
+        assert_eq!(read_target(&r, "cookie:other").as_deref(), Some("1"));
+        assert_eq!(read_target(&r, "cookie:none"), None);
+        let h = redact_headers(&r.headers);
+        let cookie = &h.iter().find(|(k, _)| k == "set-cookie").expect("cookie").1;
+        assert!(cookie.starts_with("dp-token="));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(!cookie.contains("abc.def"));
+    }
+
+    #[test]
+    fn missing_extract_fails_the_step_so_ai_sees_the_body() {
+        let step = HttpTestStep {
+            id: "s1".into(),
+            name: "register".into(),
+            request: SavedRequest {
+                method: HttpMethod::POST,
+                url: "http://h/register".into(),
+                ..Default::default()
+            },
+            extract: vec![Extract {
+                var: "user_id".into(),
+                from: "json:$.user.id".into(),
+            }],
+            assertions: vec![Assertion {
+                target: "status".into(),
+                op: AssertOp::Equals,
+                value: "200".into(),
+            }],
+            enabled: true,
+            ..Default::default()
+        };
+        let mut v = HashMap::new();
+        let send = |_spec: RequestSpec| resp(200, r#"{"id":"u1"}"#);
+        let r = run_step(0, &step, &mut v, &send);
+        assert_eq!(r.outcome(), StepOutcome::Failed);
+        let failed = r.assertions.iter().find(|a| !a.passed).expect("failed");
+        assert_eq!(failed.assertion.target, "json:$.user.id");
+        assert!(failed.assertion.value.contains("user_id"));
+        assert!(!v.contains_key("user_id"));
+    }
+
+    #[test]
+    fn bearer_token_from_cookie_is_also_sent_as_cookie() {
+        let mut suite = erp_suite();
+        suite.steps[0].extract = vec![Extract {
+            var: "token".into(),
+            from: "cookie:dp-token".into(),
+        }];
+        let mut me = step("me", "", StepPhase::Test, HttpMethod::GET, "{{base}}/me");
+        me.request.auth_type = HttpAuthType::BearerToken;
+        me.request.bearer_token = "{{token}}".into();
+        let negative = step("anon", "", StepPhase::Test, HttpMethod::GET, "{{base}}/me");
+        suite.steps.push(me.clone());
+        suite.steps.push(negative.clone());
+        let cookies = cookie_vars(&suite);
+        assert_eq!(cookies.get("token").map(String::as_str), Some("dp-token"));
+        let sent = with_cookie_auth(&me, &cookies);
+        assert!(
+            sent.request
+                .headers
+                .iter()
+                .any(|(k, v, on)| *on && k == "Cookie" && v == "dp-token={{token}}")
+        );
+        // Langkah tanpa auth (uji negatif) tidak mendapat cookie.
+        let anon = with_cookie_auth(&negative, &cookies);
+        assert!(anon.request.headers.is_empty());
     }
 }

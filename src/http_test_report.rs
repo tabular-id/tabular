@@ -303,7 +303,7 @@ pub fn compute(run: &TestRun) -> RunStats {
     s.db_checks_failed = run.db_checks.iter().filter(|c| c.error.is_some()).count();
 
     let attempted = s.tests.executed + s.tests.error;
-    let verdict = if run.cancelled || run.aborted {
+    let verdict = if run.cancelled || run.aborted || run.preflight_error.is_some() {
         Verdict::Incomplete
     } else if setup_failed || attempted == 0 || s.tests.pass_rate() + 1e-9 < s.threshold {
         Verdict::Fail
@@ -509,6 +509,9 @@ pub fn to_markdown(input: &ReportInput) -> String {
             )
         }
     );
+    if let Some(e) = &run.preflight_error {
+        let _ = writeln!(o, "- Not executed: {}", esc_md(e));
+    }
     if run.cancelled || run.aborted {
         let _ = writeln!(
             o,

@@ -139,8 +139,10 @@ pub struct SetupSettings {
     /// Tampilkan ringkasan dulu sebelum perubahan diterapkan.
     #[serde(default)]
     pub review_before_apply: bool,
-    /// Dokumentasikan endpoint baru dengan AI (memakai backend AI aktif).
-    #[serde(default)]
+    /// Dokumentasikan endpoint dengan AI (memakai backend AI aktif) lalu
+    /// tautkan ke tabel diagram. Disimpan dengan kunci baru supaya nilai
+    /// `false` bawaan versi lama tidak mematikan fitur ini.
+    #[serde(rename = "ai_document_endpoints", default = "yes")]
     pub ai_enrich: bool,
     /// Buka tab diagram database saat setup pertama.
     #[serde(default = "yes")]
@@ -152,7 +154,7 @@ impl Default for SetupSettings {
         Self {
             interval_min: default_interval(),
             review_before_apply: false,
-            ai_enrich: false,
+            ai_enrich: true,
             open_diagrams: true,
         }
     }
@@ -259,11 +261,15 @@ mod tests {
         s.entry("github.com/o/a", "/tmp/a2", "a");
         assert_eq!(s.setups.len(), 1);
         assert_eq!(s.setups[0].path, "/tmp/a2");
-        s.settings.ai_enrich = true;
+        assert!(s.settings.ai_enrich);
+        s.settings.ai_enrich = false;
         s.save().expect("save");
         let s2 = RepoSetupStore::load(file.clone());
         assert_eq!(s2.setups, s.setups);
-        assert!(s2.settings.ai_enrich);
+        assert!(!s2.settings.ai_enrich);
+        // Kunci lama `ai_enrich: false` (bawaan versi lama) diabaikan.
+        std::fs::write(&file, r#"{"settings":{"ai_enrich":false}}"#).expect("write");
+        assert!(RepoSetupStore::load(file.clone()).settings.ai_enrich);
         assert!(s2.get("github.com/o/a").is_some_and(|x| x.auto_sync));
         std::fs::write(&file, "{oops").expect("write");
         assert!(RepoSetupStore::load(file.clone()).setups.is_empty());

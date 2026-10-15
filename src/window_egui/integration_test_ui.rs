@@ -68,6 +68,10 @@ pub struct IntegrationTestTabState {
     allow_production: bool,
     confirm_delete_suite: bool,
     picker: Option<String>,
+    /// Hasil validasi terakhir yang masih perlu perhatian (langkah gagal).
+    validation_note: Option<Vec<String>>,
+    /// Dialog "Fix API code with AI": langkah terpilih + catatan.
+    codefix_dialog: Option<(Vec<String>, String)>,
 }
 
 impl IntegrationTestTabState {
@@ -96,6 +100,40 @@ impl IntegrationTestTabState {
         self.selected
             .as_deref()
             .and_then(|id| self.suite.step_index(id))
+    }
+}
+
+// ─── Sidebar ────────────────────────────────────────────────────────────────
+
+/// Sembunyikan sidebar saat tab Integration Testing menjadi aktif, supaya
+/// tabel langkah mendapat ruang penuh. User tetap bisa memunculkannya lagi
+/// lewat tombol sidebar; pilihan itu dihormati selama tab yang sama aktif.
+/// Saat pindah ke tab lain, visibilitas sebelumnya dikembalikan (kecuali user
+/// sudah memunculkan sidebar sendiri). Dipanggil setiap frame sebelum sidebar
+/// dirender.
+pub fn sync_sidebar(t: &mut Tabular) {
+    let active = t
+        .query_tabs
+        .get(t.active_tab_index)
+        .filter(|tab| tab.integration_test_state.is_some())
+        .map(|tab| tab.id);
+    match (active, t.integration_tests.sidebar_auto) {
+        // Masih tab yang sama: jangan ganggu toggle user.
+        (Some(id), Some((auto_id, _))) if id == auto_id => {}
+        // Masuk ke tab Integration Testing (dari tab lain atau tab IT lain).
+        (Some(id), prev) => {
+            let restore = prev.map(|(_, r)| r).unwrap_or(t.sidebar_visible);
+            t.sidebar_visible = false;
+            t.integration_tests.sidebar_auto = Some((id, restore));
+        }
+        // Keluar dari tab Integration Testing.
+        (None, Some((_, restore))) => {
+            if !t.sidebar_visible {
+                t.sidebar_visible = restore;
+            }
+            t.integration_tests.sidebar_auto = None;
+        }
+        (None, None) => {}
     }
 }
 
@@ -178,6 +216,13 @@ struct Live {
     known_vars: std::collections::HashSet<String>,
     suites: Vec<(String, String)>,
     catalogs: Vec<http_tests::FolderCatalog>,
+    /// Status validasi yang sedang berjalan.
+    validating: Option<String>,
+    auto_validate: bool,
+    codefix_status: Option<String>,
+    proposal: Option<crate::http_test_codefix::CodeFixProposal>,
+    /// Cek build: (masih berjalan, hasil).
+    check: Option<(bool, Option<Result<String, String>>)>,
 }
 
 impl Default for Live {
@@ -198,6 +243,11 @@ impl Default for Live {
             known_vars: Default::default(),
             suites: Vec::new(),
             catalogs: Vec::new(),
+            validating: None,
+            auto_validate: true,
+            codefix_status: None,
+            proposal: None,
+            check: None,
         }
     }
 }
@@ -242,6 +292,25 @@ fn snapshot(t: &mut Tabular, st: &IntegrationTestTabState, need_catalog: bool) -
         }
     }
     live.known_vars = jobs::project_var_names(t, &st.suite);
+    live.validating = t
+        .integration_tests
+        .validations
+        .get(&st.suite.id)
+        .filter(|j| j.is_running())
+        .map(|j| format!("{} ({}s)", j.status, j.started.elapsed().as_secs()));
+    live.auto_validate = !t.integration_tests.skip_auto_validate;
+    live.codefix_status = t
+        .integration_tests
+        .codefixes
+        .get(&st.suite.id)
+        .filter(|j| j.is_running())
+        .map(|j| format!("{} ({}s)", j.status, j.started.elapsed().as_secs()));
+    live.proposal = t.integration_tests.proposals.get(&st.suite.id).cloned();
+    live.check = t
+        .integration_tests
+        .checks
+        .get(&st.suite.id)
+        .map(|c| (c.result.is_none(), c.result.clone()));
     let mut suites: Vec<HttpTestSuite> = match &st.suite.project_id {
         Some(id) => http_tests::load_project_suites(id),
         None => http_tests::load_suites()
@@ -273,6 +342,12 @@ enum Act {
     OpenHtmlReport,
     Export(ReportFormat),
     CopyMarkdown,
+    Validate,
+    CancelValidate,
+    SetAutoValidate(bool),
+    CodeFix(Vec<String>, String),
+    CancelCodeFix,
+    Proposal(jobs::ProposalAction),
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────
@@ -305,6 +380,7 @@ pub fn render_active_tab(t: &mut Tabular, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ai_bar(ui, &mut st, &live, &mut acts);
             }
+            status_banners(ui, &mut st, &live, &mut acts);
         });
     let y = ui.cursor().top();
     ui.painter().hline(
@@ -315,7 +391,12 @@ pub fn render_active_tab(t: &mut Tabular, ui: &mut egui::Ui) {
     ui.add_space(4.0);
 
     match st.view {
-        View::Steps => body(ui, &mut st, &live, &mut acts),
+        // Suite dikunci selama validasi: hasilnya akan menggantikan isi suite.
+        View::Steps => {
+            ui.add_enabled_ui(live.validating.is_none(), |ui| {
+                body(ui, &mut st, &live, &mut acts)
+            });
+        }
         View::Report => report_view(ui, &mut st, &live, &mut acts),
         View::History => history_view(ui, &mut st),
     }
@@ -323,6 +404,8 @@ pub fn render_active_tab(t: &mut Tabular, ui: &mut egui::Ui) {
     confirm_run_modal(ui.ctx(), &mut st, &live, &mut acts);
     confirm_delete_modal(ui.ctx(), &mut st, &mut acts);
     picker_window(ui.ctx(), &mut st, &live);
+    codefix_dialog(ui.ctx(), &mut st, &mut acts);
+    proposal_window(ui.ctx(), &live, &mut acts);
 
     // Simpan otomatis saat user tidak sedang mengetik.
     if st.dirty && !ui.ctx().egui_wants_keyboard_input() {
@@ -357,8 +440,22 @@ fn sync_from_app(t: &mut Tabular, st: &mut IntegrationTestTabState) {
                 let n = http_tests::merge_generated_steps(&mut st.suite, steps, vars);
                 st.dirty = true;
                 t.toasts.success(format!("Added {n} step(s) from AI"));
+                // Pastikan langkah baru benar-benar jalan di server.
+                st.suite.ensure_ids();
+                st.suite.normalize_order();
+                jobs::auto_validate(t, &st.suite);
             }
             Err(e) => t.toasts.error(format!("AI step generation failed: {e}")),
+        }
+    }
+    if let Some(result) = t.integration_tests.validate_results.remove(&st.suite.id) {
+        match result {
+            Ok(o) => {
+                st.suite = o.suite;
+                st.dirty = true;
+                st.validation_note = (!o.remaining.is_empty()).then_some(o.remaining);
+            }
+            Err(e) => st.validation_note = Some(vec![e]),
         }
     }
     if st.runs_rev != Some(t.integration_tests.runs_rev) {
@@ -511,8 +608,192 @@ fn toolbar(ui: &mut egui::Ui, st: &mut IntegrationTestTabState, live: &Live, act
             }
             ui.separator();
             run_buttons(ui, st, live, acts);
+            validation_badge(ui, st, live, acts);
         });
     });
+}
+
+/// Penanda validasi + tombol "Validate & fix".
+fn validation_badge(
+    ui: &mut egui::Ui,
+    st: &IntegrationTestTabState,
+    live: &Live,
+    acts: &mut Vec<Act>,
+) {
+    if live.validating.is_some() || live.running {
+        return;
+    }
+    let ready = live.ai_ready.is_ok() && st.suite.steps.iter().any(|s| s.enabled);
+    if ui
+        .add_enabled(
+            ready,
+            egui::Button::new(format!("{} Validate & fix", ic::ICON_AUTO_AWESOME.codepoint)),
+        )
+        .on_hover_text(
+            "Run the suite against the server, then let AI fix the steps that fail and run again (up to 3 rounds). Test data is cleaned up.",
+        )
+        .on_disabled_hover_text("Needs an AI backend and at least one enabled step")
+        .clicked()
+    {
+        acts.push(Act::Validate);
+    }
+    let (text, color, tip) = match (st.suite.validation_current(), &st.suite.validation) {
+        (Some(v), _) if v.all_passed() => (
+            format!("{} Validated", ic::ICON_CHECK_CIRCLE.codepoint),
+            style::theme_success(ui.ctx()),
+            format!(
+                "{}/{} steps passed on {} ({})",
+                v.passed,
+                v.total,
+                v.environment.clone().unwrap_or_default(),
+                v.at
+            ),
+        ),
+        (Some(v), _) => (
+            format!(
+                "{} {}/{} pass",
+                ic::ICON_WARNING.codepoint,
+                v.passed,
+                v.total
+            ),
+            style::theme_warning(ui.ctx()),
+            format!(
+                "Validated {} on {}",
+                v.at,
+                v.environment.clone().unwrap_or_default()
+            ),
+        ),
+        (None, Some(_)) => (
+            format!("{} Changed since validation", ic::ICON_INFO.codepoint),
+            style::theme_muted_text(ui.ctx()),
+            "Edit made after the last validation; validate again to be sure it runs".to_string(),
+        ),
+        (None, None) => (
+            "Not validated".to_string(),
+            style::theme_muted_text(ui.ctx()),
+            "This suite has not been run against the server yet".to_string(),
+        ),
+    };
+    ui.label(egui::RichText::new(text).small().color(color))
+        .on_hover_text(tip);
+}
+
+/// Banner: validasi berjalan, hasil validasi yang perlu perhatian, server mati.
+fn status_banners(
+    ui: &mut egui::Ui,
+    st: &mut IntegrationTestTabState,
+    live: &Live,
+    acts: &mut Vec<Act>,
+) {
+    if let Some(status) = &live.validating {
+        ui.add_space(6.0);
+        style::theme_alert_frame(ui.ctx(), false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(egui::RichText::new("Validating with AI").strong());
+                ui.label(egui::RichText::new(status).small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Cancel").clicked() {
+                        acts.push(Act::CancelValidate);
+                    }
+                });
+            });
+            weak(
+                ui,
+                "Steps are sent to the server, failing steps are fixed from the server's response and the handler code, then run again. The suite is locked until it finishes.",
+            );
+        });
+    }
+    if let Some(status) = &live.codefix_status {
+        ui.add_space(6.0);
+        style::theme_alert_frame(ui.ctx(), false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(egui::RichText::new("AI is preparing a code fix").strong());
+                ui.label(egui::RichText::new(status).small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Cancel").clicked() {
+                        acts.push(Act::CancelCodeFix);
+                    }
+                });
+            });
+            weak(
+                ui,
+                "The change is made in a separate git branch. Your files are not touched until you apply it.",
+            );
+        });
+    }
+    if let Some(e) = st
+        .last_run
+        .as_ref()
+        .and_then(|r| r.preflight_error.clone())
+        .filter(|_| live.validating.is_none() && !live.running)
+    {
+        ui.add_space(6.0);
+        style::theme_alert_frame(ui.ctx(), true).show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} Last run did not start",
+                    ic::ICON_ERROR.codepoint
+                ))
+                .strong()
+                .color(style::theme_danger(ui.ctx())),
+            );
+            ui.label(egui::RichText::new(e).small());
+        });
+    }
+    let mut dismiss = false;
+    let mut open_fix: Option<Vec<String>> = None;
+    if let Some(lines) = &st.validation_note
+        && live.validating.is_none()
+    {
+        ui.add_space(6.0);
+        style::theme_alert_frame(ui.ctx(), true).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Validation: {} item(s) still need attention",
+                        ic::ICON_WARNING.codepoint,
+                        lines.len()
+                    ))
+                    .strong()
+                    .color(style::theme_warning(ui.ctx())),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Dismiss").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+            for l in lines.iter().take(8) {
+                weak(ui, crate::repo_scan::truncate_chars(l, 220));
+            }
+            weak(
+                ui,
+                "These may be real API bugs, or need data or variables the AI could not create. Open the step to check it, then Validate & fix again.",
+            );
+            let ids = failed_step_ids(st);
+            if !ids.is_empty()
+                && live.codefix_status.is_none()
+                && live.proposal.is_none()
+                && ui
+                    .button(format!(
+                        "{} Fix API code for {} failed step(s)…",
+                        ic::ICON_AUTO_AWESOME.codepoint,
+                        ids.len()
+                    ))
+                    .clicked()
+            {
+                open_fix = Some(ids);
+            }
+        });
+    }
+    if dismiss {
+        st.validation_note = None;
+    }
+    if let Some(ids) = open_fix {
+        st.codefix_dialog = Some((ids, String::new()));
+    }
 }
 
 fn run_buttons(
@@ -521,6 +802,9 @@ fn run_buttons(
     live: &Live,
     acts: &mut Vec<Act>,
 ) {
+    if live.validating.is_some() {
+        return;
+    }
     if live.running {
         if ui
             .button(format!("{} Abort", ic::ICON_CLOSE.codepoint))
@@ -695,6 +979,19 @@ fn ai_bar(ui: &mut egui::Ui, st: &mut IntegrationTestTabState, live: &Live, acts
                 acts.push(Act::GenSuite);
             }
         });
+        let mut auto = live.auto_validate;
+        let env = live.env_name.clone().unwrap_or_else(|| "the active environment".into());
+        if ui
+            .checkbox(
+                &mut auto,
+                format!(
+                    "After generating, run the steps against {env} and let AI fix what fails (test data is cleaned up)"
+                ),
+            )
+            .changed()
+        {
+            acts.push(Act::SetAutoValidate(auto));
+        }
     });
 }
 
@@ -1274,9 +1571,11 @@ fn step_row(
                 .small()
                 .color(outcome_color(ui.ctx(), o)),
         );
-        if let Some(n) = &r.note {
-            label.on_hover_text(n);
-        }
+        let tip = match &r.note {
+            Some(n) => format!("{}\n{n}", outcome_help(o)),
+            None => outcome_help(o).to_string(),
+        };
+        label.on_hover_text(tip);
     } else if live.running
         && live
             .run_scope
@@ -1555,8 +1854,10 @@ fn right_panel(
     data_flow_section(ui, st, live, &deps, &pos, i);
     changed |= extract_section(ui, &mut st.suite.steps[i]);
     changed |= assertions_section(ui, &mut st.suite.steps[i], result.as_ref());
-    if let Some(r) = &result {
-        last_result_section(ui, r);
+    if let Some(r) = &result
+        && last_result_section(ui, r, live)
+    {
+        st.codefix_dialog = Some((vec![r.step_id.clone()], String::new()));
     }
 
     if changed {
@@ -1763,10 +2064,12 @@ fn assertions_section(
     changed
 }
 
-fn last_result_section(ui: &mut egui::Ui, r: &StepResult) {
+/// `true` = user meminta perbaikan kode untuk langkah ini.
+fn last_result_section(ui: &mut egui::Ui, r: &StepResult, live: &Live) -> bool {
     ui.add_space(8.0);
     ui.separator();
     let o = r.outcome();
+    let mut fix = false;
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("{} {}", outcome_glyph(o), o.label()))
@@ -1780,8 +2083,24 @@ fn last_result_section(ui: &mut egui::Ui, r: &StepResult) {
             );
         }
     });
+    weak(ui, outcome_help(o));
     if let Some(n) = &r.note {
         weak(ui, n.clone());
+    }
+    if matches!(o, StepOutcome::Failed | StepOutcome::Error)
+        && live.codefix_status.is_none()
+        && live.proposal.is_none()
+        && ui
+            .button(format!(
+                "{} Fix API code with AI…",
+                ic::ICON_AUTO_AWESOME.codepoint
+            ))
+            .on_hover_text(
+                "When the test is right and the API is wrong: AI changes the API code in a separate git branch for you to review",
+            )
+            .clicked()
+    {
+        fix = true;
     }
     if let Some(e) = &r.error {
         ui.colored_label(style::theme_danger(ui.ctx()), e);
@@ -1816,6 +2135,217 @@ fn last_result_section(ui: &mut egui::Ui, r: &StepResult) {
                 );
             });
     }
+    fix
+}
+
+/// Arti setiap status, untuk tooltip dan detail langkah.
+fn outcome_help(o: StepOutcome) -> &'static str {
+    match o {
+        StepOutcome::Passed => "Passed: the request was sent and every assertion held.",
+        StepOutcome::Failed => {
+            "Failed: the request was sent and the server answered, but the answer was not what the step expects (status, body or a value to extract)."
+        }
+        StepOutcome::Error => {
+            "Error: the request was sent but no answer came back (connection or timeout)."
+        }
+        StepOutcome::Blocked => {
+            "Blocked: not sent, because something it needs is missing, usually a value an earlier step should have extracted. Fix the earlier failed step and this one runs."
+        }
+        StepOutcome::Skipped => "Skipped: disabled, or not needed in this run.",
+    }
+}
+
+/// Langkah yang Failed/Error di run terakhir.
+fn failed_step_ids(st: &IntegrationTestTabState) -> Vec<String> {
+    st.last_run
+        .as_ref()
+        .map(|r| {
+            r.results
+                .iter()
+                .filter(|x| matches!(x.outcome(), StepOutcome::Failed | StepOutcome::Error))
+                .map(|x| x.step_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Dialog sebelum meminta AI memperbaiki kode API.
+fn codefix_dialog(ctx: &egui::Context, st: &mut IntegrationTestTabState, acts: &mut Vec<Act>) {
+    let Some((ids, mut note)) = st.codefix_dialog.take() else {
+        return;
+    };
+    let names: Vec<String> = ids
+        .iter()
+        .filter_map(|id| st.suite.steps.iter().find(|s| &s.id == id))
+        .map(|s| s.name.clone())
+        .collect();
+    let mut decided: Option<bool> = None;
+    style::render_modal_backdrop(ctx, "it_codefix_dialog", true);
+    egui::Window::new("Fix API code with AI")
+        .id(egui::Id::new("it_codefix_dialog_window"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(480.0);
+            ui.label(format!(
+                "The AI reads the failing request{}, the server's answer and the handler code, then changes the API code so the step works.",
+                if names.len() == 1 { "" } else { "s" }
+            ));
+            for n in names.iter().take(8) {
+                weak(ui, format!("• {n}"));
+            }
+            if names.len() > 8 {
+                weak(ui, format!("and {} more", names.len() - 8));
+            }
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Your branch and files are not touched: the change is prepared in a separate git branch (tabular/fix-…) with your uncommitted changes, and you review the diff before applying it.",
+                )
+                .small(),
+            );
+            ui.add_space(4.0);
+            ui.add(
+                egui::TextEdit::multiline(&mut note)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Optional note for the AI, e.g. \"slug must be unique per commodity\""),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    decided = Some(false);
+                }
+                if ui
+                    .add(crate::diagram_repo::accent_button(ui, "Propose fix"))
+                    .clicked()
+                {
+                    decided = Some(true);
+                }
+            });
+        });
+    match decided {
+        Some(true) => acts.push(Act::CodeFix(ids, note)),
+        Some(false) => {}
+        None => st.codefix_dialog = Some((ids, note)),
+    }
+}
+
+/// Jendela tinjau usulan perbaikan kode: ringkasan, diff, cek build, keputusan.
+fn proposal_window(ctx: &egui::Context, live: &Live, acts: &mut Vec<Act>) {
+    let Some(p) = &live.proposal else {
+        return;
+    };
+    // Tanpa tombol tutup: usulan hanya selesai lewat Apply, Keep, atau Discard.
+    egui::Window::new("Review code fix")
+        .id(egui::Id::new(("it_proposal", p.branch.as_str())))
+        .collapsible(true)
+        .resizable(true)
+        .default_size(egui::vec2(860.0, 620.0))
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new(p.summary.trim()).strong());
+            weak(
+                ui,
+                format!(
+                    "{} · branch {} · {} file(s): {}",
+                    p.repo.display(),
+                    p.branch,
+                    p.files.len(),
+                    p.files.join(", ")
+                ),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(crate::diagram_repo::accent_button(ui, "Apply to working copy"))
+                    .on_hover_text("Write the change into your repository without committing. Restart the API server afterwards.")
+                    .clicked()
+                {
+                    acts.push(Act::Proposal(jobs::ProposalAction::Apply));
+                }
+                if ui
+                    .button("Keep as branch")
+                    .on_hover_text("Commit the change on the tabular/fix-… branch only, to review or merge later")
+                    .clicked()
+                {
+                    acts.push(Act::Proposal(jobs::ProposalAction::KeepBranch));
+                }
+                if let Some(cmd) = &p.check_command {
+                    let running = live.check.as_ref().is_some_and(|(r, _)| *r);
+                    if ui
+                        .add_enabled(!running, egui::Button::new(format!("Run {}", cmd.join(" "))))
+                        .on_hover_text("Build-check the change in the separate branch")
+                        .clicked()
+                    {
+                        acts.push(Act::Proposal(jobs::ProposalAction::Check));
+                    }
+                }
+                if ui.add(style::btn_danger_ctx(ui.ctx(), "Discard")).clicked() {
+                    acts.push(Act::Proposal(jobs::ProposalAction::Discard));
+                }
+            });
+            if let Some((running, result)) = &live.check {
+                ui.add_space(4.0);
+                if *running {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        weak(ui, "Checking the build…");
+                    });
+                } else if let Some(r) = result {
+                    let (ok, text) = match r {
+                        Ok(t) => (true, t),
+                        Err(t) => (false, t),
+                    };
+                    ui.label(
+                        egui::RichText::new(if ok { "Build check passed" } else { "Build check failed" })
+                            .strong()
+                            .color(if ok {
+                                style::theme_success(ui.ctx())
+                            } else {
+                                style::theme_danger(ui.ctx())
+                            }),
+                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt("it_check_out")
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(crate::repo_scan::truncate_chars(text, 4000))
+                                    .family(egui::FontFamily::Monospace)
+                                    .size(11.0),
+                            );
+                        });
+                }
+            }
+            ui.separator();
+            egui::ScrollArea::both()
+                .id_salt("it_diff")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let add = style::theme_success(ui.ctx());
+                    let del = style::theme_danger(ui.ctx());
+                    let meta = style::theme_info(ui.ctx());
+                    for line in p.diff.lines().take(4000) {
+                        let color = if line.starts_with("+++") || line.starts_with("---") {
+                            meta
+                        } else if line.starts_with('+') {
+                            add
+                        } else if line.starts_with('-') {
+                            del
+                        } else if line.starts_with("@@") || line.starts_with("diff ") {
+                            meta
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(
+                            egui::RichText::new(line)
+                                .family(egui::FontFamily::Monospace)
+                                .size(11.5)
+                                .color(color),
+                        );
+                    }
+                });
+        });
 }
 
 /// Assertion dari response terakhir: status + field JSON tingkat atas.
@@ -2130,7 +2660,26 @@ fn report_view(
                 .collect();
             if !failures.is_empty() {
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("What did not pass").strong());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("What did not pass").strong());
+                    let ids = failed_step_ids(st);
+                    if !ids.is_empty()
+                        && live.codefix_status.is_none()
+                        && live.proposal.is_none()
+                        && ui
+                            .small_button(format!(
+                                "{} Fix API code with AI…",
+                                ic::ICON_AUTO_AWESOME.codepoint
+                            ))
+                            .clicked()
+                    {
+                        st.codefix_dialog = Some((ids, String::new()));
+                    }
+                });
+                weak(
+                    ui,
+                    "Blocked steps were not sent because an earlier step failed to provide a value; fixing the failed steps unblocks them.",
+                );
                 for r in failures {
                     let o = r.outcome();
                     ui.horizontal_wrapped(|ui| {
@@ -2633,6 +3182,32 @@ fn apply(
             let text = render_report(t, suite, run, format);
             export_file(t, run, format, text);
         }
+        Act::Validate => {
+            // Simpan dulu agar validasi memakai definisi terbaru.
+            if let Err(e) = http_tests::save_suite(suite) {
+                t.toasts.error(e);
+            }
+            match jobs::start_validation(t, suite) {
+                Ok(()) => {
+                    with_tab_state(t, idx, |st| st.validation_note = None);
+                }
+                Err(e) => t.toasts.error(e),
+            }
+        }
+        Act::CancelValidate => jobs::cancel_validation(t, &suite.id),
+        Act::SetAutoValidate(on) => t.integration_tests.skip_auto_validate = !on,
+        Act::CodeFix(ids, note) => {
+            let Some(run) = last_run else {
+                t.toasts
+                    .info("Run the suite first so the AI can see what fails");
+                return;
+            };
+            if let Err(e) = jobs::start_code_fix(t, suite, run, &ids, note) {
+                t.toasts.error(e);
+            }
+        }
+        Act::CancelCodeFix => jobs::cancel_code_fix(t, &suite.id),
+        Act::Proposal(action) => jobs::resolve_proposal(t, &suite.id, action),
         Act::CopyMarkdown => {
             let Some(run) = last_run else {
                 t.toasts.info("Run the suite first");

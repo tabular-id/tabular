@@ -37,6 +37,11 @@ pub enum RepoAction {
     GenerateEndpoints {
         folder_id: String,
     },
+    /// Generate endpoint di background lalu langsung terapkan, tautkan ke
+    /// tabel diagram, dan buat alur bisnis, tanpa jendela review (setup repo).
+    AutoDocumentEndpoints {
+        folder_id: String,
+    },
     LinkEndpoints {
         folder_id: String,
     },
@@ -142,6 +147,11 @@ struct EndpointWindow {
     linked_groups: usize,
     /// Kunci endpoint yang sudah ada di folder saat generate dimulai.
     existing: HashSet<String>,
+    /// Bagian dari `existing` yang belum punya daftar tabel (mis. hasil
+    /// discovery setup repo); mode otomatis boleh melengkapinya.
+    undocumented: HashSet<String>,
+    /// Mode otomatis: hasil langsung diterapkan tanpa review.
+    auto: bool,
     handle: Option<EndpointScanHandle>,
     progress: JobProgress,
     note: Option<String>,
@@ -585,6 +595,18 @@ fn link_folder(app: &mut Tabular, folder_id: &str) {
     }
 }
 
+/// Tautkan ulang request ber-tabel folder `folder_id` ke diagram yang group-nya
+/// memakai repository folder itu (tanpa AI). Mengembalikan ringkasan, atau
+/// string kosong bila tidak ada yang berubah.
+pub fn relink_folder(app: &mut Tabular, folder_id: &str) -> String {
+    let key = crate::http_collection::find_workspace_folder(&app.yaak_workspaces, folder_id)
+        .and_then(|(_, f)| f.repo_key());
+    match key {
+        Some(key) => link_folder_endpoints(app, folder_id, &key),
+        None => String::new(),
+    }
+}
+
 /// Tautkan request ber-tabel milik folder `folder_id` (repository `key`) ke
 /// diagram. Mengembalikan ringkasan hasil, atau string kosong bila tidak ada
 /// yang berubah.
@@ -640,7 +662,10 @@ impl HttpRepoUi {
         match action {
             RepoAction::EditRepository { folder_id } => self.open_editor(app, &folder_id),
             RepoAction::GenerateEndpoints { folder_id } => {
-                self.start_endpoints(app, &folder_id, false)
+                self.start_endpoints(app, &folder_id, false, false)
+            }
+            RepoAction::AutoDocumentEndpoints { folder_id } => {
+                self.start_endpoints(app, &folder_id, false, true)
             }
             RepoAction::LinkEndpoints { folder_id } => link_folder(app, &folder_id),
             RepoAction::ShowLinkedGroups { folder_id } => self.show_linked_groups(app, &folder_id),
@@ -709,6 +734,9 @@ impl HttpRepoUi {
             return;
         };
         let name = folder.name.clone();
+        let requests = folder.all_requests();
+        let total = requests.len();
+        let with_tables = requests.iter().filter(|r| !r.tables.is_empty()).count();
         let Some(key) = folder.repo_key() else {
             app.toasts.info("Set a git URL on this folder first");
             return;
@@ -717,10 +745,31 @@ impl HttpRepoUi {
         let groups: Vec<GroupRef> = idx.groups_for(&key).cloned().collect();
         // Group yang cocok sudah ada: endpoint folder ini langsung ditautkan
         // ke tabelnya, supaya user tidak perlu memicu "Link Endpoints" terpisah.
+        // Hasilnya selalu dilaporkan; tanpa toast, membuka diagram yang sudah
+        // aktif terlihat seperti tidak terjadi apa-apa.
         if !groups.is_empty() {
             let summary = link_folder_endpoints(app, folder_id, &key);
+            log::info!(
+                "[HTTP_REPO] linked groups for '{name}': {} group(s), {with_tables}/{total} endpoint(s) with tables",
+                groups.len()
+            );
             if !summary.is_empty() {
                 app.toasts.success(summary);
+            } else if total == 0 {
+                app.toasts.info(format!(
+                    "{name} has no endpoints yet. Use Generate Endpoints from Repo (AI) to add them."
+                ));
+            } else if with_tables == 0 {
+                app.toasts.warning(format!(
+                    "None of the {total} endpoint(s) in {name} list the tables they use, so \
+                     nothing was linked to the diagram. Use Generate Endpoints from Repo (AI) \
+                     on this folder to detect their tables."
+                ));
+            } else {
+                app.toasts.info(format!(
+                    "No new endpoint-table links for {name}: they are already linked, or their \
+                     tables are not in the linked diagrams."
+                ));
             }
         }
         match groups.len() {
@@ -769,15 +818,17 @@ impl HttpRepoUi {
 
     /// Mulai generate endpoint untuk folder. Job folder lain tidak diganggu.
     /// Bila job folder ini masih berjalan dan `restart` false, jendelanya
-    /// hanya ditampilkan lagi.
-    fn start_endpoints(&mut self, app: &mut Tabular, folder_id: &str, restart: bool) {
+    /// hanya ditampilkan lagi (mode `auto`: job yang berjalan dibiarkan).
+    fn start_endpoints(&mut self, app: &mut Tabular, folder_id: &str, restart: bool, auto: bool) {
         if !restart
             && let Some(win) = self
                 .endpoints
                 .iter_mut()
                 .find(|w| w.folder_id == folder_id && w.handle.is_some())
         {
-            win.visible = true;
+            if !auto {
+                win.visible = true;
+            }
             return;
         }
         let Some((_, folder)) =
@@ -805,6 +856,12 @@ impl HttpRepoUi {
         let repo_url = folder.repo_url.clone();
         let folder_name = folder.name.clone();
         let existing = crate::repo_endpoints::folder_request_keys(folder);
+        let undocumented: HashSet<String> = folder
+            .all_requests()
+            .into_iter()
+            .filter(|r| r.tables.is_empty())
+            .map(crate::repo_endpoints::saved_request_key)
+            .collect();
         let idx = build_index(app);
         let (tables, linked_groups) = key
             .as_deref()
@@ -837,6 +894,8 @@ impl HttpRepoUi {
             key,
             linked_groups,
             existing,
+            undocumented,
+            auto,
             handle: Some(handle),
             progress: JobProgress::start(),
             note: backend_note,
@@ -844,11 +903,13 @@ impl HttpRepoUi {
             rows: Vec::new(),
             filter: String::new(),
             subfolders: true,
-            link_diagrams: linked_groups > 0,
-            also_flows: false,
+            // Mode otomatis selalu menautkan: group diagram setup repo bisa
+            // baru terbentuk saat generate masih berjalan.
+            link_diagrams: auto || linked_groups > 0,
+            also_flows: auto,
             selected: None,
             files_scanned: 0,
-            visible: true,
+            visible: !auto,
             parallel,
             task_id: None,
         });
@@ -937,9 +998,20 @@ impl HttpRepoUi {
 
     fn poll(&mut self, app: &mut Tabular, ctx: &egui::Context) {
         let mut busy = false;
+        let mut applied: Vec<String> = Vec::new();
         for win in self.endpoints.iter_mut() {
             let was_running = win.handle.is_some();
             busy |= poll_endpoints(win);
+            if was_running && win.handle.is_none() && win.auto && win.progress.error.is_none() {
+                // Endpoint baru ditambahkan; yang sudah ada hanya dilengkapi
+                // bila belum punya tabel, supaya hasil edit user tidak tertimpa.
+                for row in win.rows.iter_mut() {
+                    row.checked = !row.exists || win.undocumented.contains(&row.endpoint.key());
+                }
+                add_endpoints(app, win);
+                applied.push(win.folder_id.clone());
+                continue;
+            }
             if was_running && win.handle.is_none() && !win.visible {
                 // Job di background selesai: tampilkan hasilnya.
                 win.visible = true;
@@ -955,6 +1027,10 @@ impl HttpRepoUi {
                     )),
                 }
             }
+        }
+        if !applied.is_empty() {
+            self.endpoints
+                .retain(|w| !(w.auto && w.handle.is_none() && applied.contains(&w.folder_id)));
         }
 
         let mut generated: Option<Vec<HttpTestSuite>> = None;
@@ -1015,6 +1091,10 @@ impl HttpRepoUi {
             self.test_gen = None;
             if let Some(first) = suites.first() {
                 crate::window_egui::integration_test_ui::open_suite(app, &first.id);
+            }
+            // Jalankan suite baru terhadap server dan biarkan AI memperbaikinya.
+            for s in &suites {
+                crate::window_egui::integration_test_jobs::auto_validate(app, s);
             }
         }
 
@@ -1307,7 +1387,7 @@ impl HttpRepoUi {
                     }
                 }
             } else if generate_after {
-                self.start_endpoints(app, &ed.folder_id, true);
+                self.start_endpoints(app, &ed.folder_id, true, false);
             } else {
                 app.toasts.success(if remove {
                     "Repository unlinked from the folder"
@@ -1447,7 +1527,7 @@ impl HttpRepoUi {
         }
         if rescan {
             let folder_id = win.folder_id.clone();
-            self.start_endpoints(app, &folder_id, true);
+            self.start_endpoints(app, &folder_id, true, false);
             return None;
         }
         if add {
@@ -1947,7 +2027,10 @@ fn add_endpoints(app: &mut Tabular, win: &EndpointWindow) {
             generate_flows_in_open_diagrams(app, key);
         }
     }
-    reveal_folder(app, &win.folder_id);
+    // Mode otomatis berjalan di belakang setup repo: sidebar tidak dipindah.
+    if !win.auto {
+        reveal_folder(app, &win.folder_id);
+    }
     log::info!("[HTTP_REPO] {msg}");
     app.toasts.success(msg);
 }
@@ -2025,33 +2108,4 @@ fn endpoint_details(ui: &mut egui::Ui, ep: &GeneratedEndpoint) {
     param_lines(ui, "Form fields", &ep.form_fields);
     code_block(ui, "Body example", &ep.body_example);
     code_block(ui, "Response example", &ep.response_example);
-}
-
-#[cfg(test)]
-mod tmp_probe_linked_groups {
-    #[test]
-    #[ignore]
-    fn probe() {
-        for fid in ["fld_1792034115297_4", "fld_1791991342113_3", "fl_B9nZsmiWdX"] {
-            let mut app = crate::window_egui::Tabular::default();
-            app.data_directory = "/private/tmp/claude-503/-Users-jayuda-Documents-PROJECT-TABULAR-tabular-client/227b34ba-d6c3-4a21-893a-8889a5a3397b/scratchpad/data".to_string();
-            app.yaak_workspaces = crate::http_collection::load_workspaces();
-            app.selected_menu = "APIs".to_string();
-            let tabs_before = app.query_tabs.len();
-            let ctx = eframe::egui::Context::default();
-            for frame in 0..3 {
-                let mut out = ctx.run_ui(Default::default(), |ui| {
-                    let ctx = ui.ctx().clone();
-                    if frame == 0 {
-                        super::request(&ctx, super::RepoAction::ShowLinkedGroups { folder_id: fid.to_string() });
-                    }
-                    super::render(&mut app, &ctx);
-                });
-                out.textures_delta.clear();
-            }
-            let active = app.query_tabs.get(app.active_tab_index).map(|t| (t.title.clone(), t.diagram_state.is_some()));
-            eprintln!("== {fid}: tabs {tabs_before}->{} active={:?} popup={:?}", app.query_tabs.len(), active,
-                app.http_repo.links.as_ref().map(|l| (l.title.clone(), l.groups.len())));
-        }
-    }
 }

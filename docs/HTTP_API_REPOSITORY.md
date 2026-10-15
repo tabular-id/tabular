@@ -312,12 +312,94 @@ use `{{run_id}}` in created names and codes, and to add a cleanup step for
 every step that creates data. You can also start from a folder: right-click it
 and choose **Generate Integration Tests (AI)…**.
 
+### Validating generated steps
+
+An endpoint catalog can be wrong about field names. For example, a scan may
+guess `name` where the API expects `nama`. Generated steps are therefore
+checked against the real server before you use them:
+
+1. The suite runs against the project's active environment. Cleanup runs as
+   usual, so test data is removed.
+2. For each failing step, the AI receives the request, the server's status,
+   response headers and body, and the source code of the route. The source code
+   is the route line, the handler function and the request body type from the
+   repository linked to the API folder. Steps that provide the failing step's
+   variables are included too, for example the login step that sets a token
+   cookie.
+3. The AI fixes the steps and the suite runs again, up to 3 rounds.
+
+This happens automatically after **Add steps**, **Add missing cleanup**,
+**Design new suites** and **Generate Integration Tests (AI)…**. You can turn it
+off with the checkbox in the AI bar, or run it any time with **Validate & fix**
+in the toolbar. The suite is locked while it runs. Validation is refused when
+the active environment is Production.
+
+The toolbar shows the result: **Validated**, the number of steps that pass, or
+**Changed since validation** after you edit the suite. Steps that still fail
+are listed with their reason. They can be real API bugs, or need data or
+variables the AI could not create. The AI is told never to weaken an assertion
+that reveals a real bug.
+
+Variables for accounts the suite creates itself, such as `test_password`, get a
+generated value. Real secrets such as `token` or `api_key` are never filled in
+by the AI. A step whose `extract` finds no value fails, because later steps
+need that value.
+
+### Step results
+
+| Result | Meaning | What to do |
+|---|---|---|
+| Passed | The request was sent and every assertion held. | Nothing. |
+| Failed | The server answered, but not as the step expects: status, body, or a value to extract. | Fix the step (Validate & fix), or fix the API code when the test is right. |
+| Error | The request got no answer: connection refused or timeout. | Start the server or check the URL. |
+| Blocked | Not sent, because a value it needs is missing. Usually an earlier step failed and did not extract an id or slug. | Fix the earlier failed step; the blocked steps then run. |
+| Skipped | Disabled, or nothing to clean because the data was never created. | Nothing. |
+
+A step can also fail because of an earlier failure. For example, a list that
+should contain the created record fails when the create step failed.
+
+When a step uses `Bearer {{token}}` and `token` is extracted from
+`cookie:<name>`, Tabular also sends the token as that cookie. APIs that read the
+session from a cookie then work without changing every step.
+
+### Fixing the API code with AI
+
+Sometimes the test is right and the API is wrong. Examples are a handler that
+returns 500, a missing validation, or a wrong status code. Select a failed step
+and click **Fix API code with AI…**. You can also use the button next to
+**What did not pass** in the report, or the validation banner, to include every
+failed step.
+
+1. Tabular creates a separate git worktree on a new branch
+   `tabular/fix-<suite>-<time>`. It contains your current working copy,
+   including uncommitted changes, because that is what your server runs. Your
+   own branch and files are not touched.
+2. The AI receives the failing requests, the server's answers, the route,
+   handler and request type code, and the full source of those files. Claude
+   Code and Gemini CLI may also read the rest of the repository, read-only.
+3. The AI answers with exact search-and-replace edits. Each edit must match
+   exactly one place, or the AI is asked once more with the current file
+   content.
+4. **Review code fix** shows the summary and the diff. Choose:
+   - **Apply to working copy** writes the change into your repository
+     without committing. Restart the API server and run the suite again.
+   - **Keep as branch** commits the change on the `tabular/fix-…` branch
+     only, to review or merge later in the Git client.
+   - **Run cargo check** (or `go build`, `tsc`, `mvn compile`) builds the
+     change in the separate branch first.
+   - **Discard** removes the worktree and the branch.
+
+The local repository comes from the API folder's **Folder Repository…**
+setting. Tabular never commits to your branch and never pushes.
+
 ### Running and cleaning up
 
 **Run all** or **Run <group>** shows the number of steps, the steps that change
 data, the cleanup steps, the environment and the target servers before
 anything is sent. Running against an environment marked Production needs an
-extra confirmation.
+extra confirmation. Tabular first checks that every target server accepts
+connections. When one does not, nothing is sent and the run reports which
+server to start.
 
 - Steps run strictly in order. A step whose variables are missing, because
   the step that provides them failed, is **Blocked** and not sent.
@@ -385,7 +467,9 @@ Production environment unless you pass `--allow-production`. The exit code is
 | Suites | `{app data}/http_tests/<suite id>.json` |
 | Run history (last 50 per suite) | `{app data}/http_tests/runs/<suite id>/<run id>.json` |
 
-Assertions use `status`, `time_ms`, `body`, `header:<Name>` or
-`json:$.path.to[0].field` with `equals`, `not_equals`, `contains`,
+Assertions and extracts use `status`, `time_ms`, `body`, `header:<Name>`,
+`cookie:<name>` (a value from `Set-Cookie`) or `json:$.path.to[0].field`. For an
+API that returns its token in a cookie, extract it with `cookie:<name>` and send
+it with a `Cookie: <name>={{token}}` header. Assertions use `equals`, `not_equals`, `contains`,
 `not_contains`, `exists`, `not_exists`, `less_than`, `greater_than` or `matches`
 (regular expression).

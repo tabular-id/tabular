@@ -53,6 +53,32 @@ dijamin, dan tidak punya laporan.
 9. **Rahasia disamarkan di sumbernya.** Runner menyamarkan nilai variabel dan
    field JSON yang sensitif sebelum masuk hasil, riwayat, dan laporan.
 
+10. **Langkah hasil AI divalidasi terhadap server.** Katalog endpoint bisa salah
+    menebak nama field (`name` vs `nama`). Setelah generate, suite dijalankan
+    terhadap environment aktif. Langkah yang gagal dikirim ke AI beserta
+    response server, header, dan potongan kode route, handler, serta tipe body
+    dari repo. AI memperbaikinya, lalu suite dijalankan ulang, maksimal 3
+    putaran (`http_test_validate`). Hasilnya dicatat di `SuiteValidation`
+    dengan sidik jari, sehingga perubahan sesudahnya terlihat. Validasi ditolak
+    di Production. Sebelum setiap run, koneksi TCP ke server tujuan dicek agar
+    server mati tidak muncul sebagai rentetan langkah Blocked. Extract yang tidak
+    menemukan nilai dihitung gagal, karena penyebab langkah berikutnya Blocked
+    ada di sana.
+
+11. **Perbaikan kode API dengan AI di worktree terpisah.** Bila tes benar dan
+    API yang salah, AI mengusulkan perubahan kode (`http_test_codefix`). Usulan
+    dibuat di `git worktree` pada branch `tabular/fix-…` yang berisi working copy
+    user, termasuk perubahan yang belum di-commit, dicatat sebagai commit dasar.
+    Dengan begitu diff hanya berisi perubahan AI. AI menjawab pasangan
+    cari-ganti yang harus cocok tepat satu kali, dan path di luar repo serta
+    `.git` ditolak. User meninjau diff, lalu memilih terapkan ke working copy
+    (`git apply`, tanpa commit), simpan sebagai branch, cek build, atau buang.
+    Tabular tidak pernah commit ke branch user dan tidak pernah push.
+12. **Token dari cookie ikut dikirim sebagai cookie.** Langkah dengan Bearer
+    `{{v}}`, di mana `v` diambil dari `cookie:<nama>`, juga mengirim header
+    `Cookie`. Langkah tanpa auth (uji negatif) tidak disentuh. Data dianggap
+    dibuat, dan perlu dibersihkan, hanya bila response-nya 2xx.
+
 ## Konsekuensi
 
 - Klaim standar terbatas pada *mengikuti struktur dan istilah*. Tabular tidak
@@ -64,3 +90,7 @@ dijamin, dan tidak punya laporan.
   meminta `{{run_id}}` di nama dan kode, tetapi langkah manual bisa saja tidak
   memakainya.
 - Riwayat dibatasi 50 run per suite agar folder data tidak membengkak.
+- Validasi otomatis mengirim request sungguhan ke environment non-Production.
+  User bisa mematikannya di bar AI.
+- Usulan perbaikan kode yang belum diputuskan meninggalkan worktree di
+  `<data dir>/codefix/` sampai di-apply, disimpan, atau dibuang.

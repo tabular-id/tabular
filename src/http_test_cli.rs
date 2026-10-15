@@ -272,7 +272,10 @@ fn run_suite(rest: &[String]) -> Result<(), String> {
         ));
     }
     let scope = RunScope::groups(&suite, opts.groups.clone());
+    let mut suite = suite;
+    http_tests::fill_test_credentials(&mut suite.variables);
     let vars = http_tests::initial_vars_with(&suite, &env_vars);
+    http_tests::preflight(&suite, &scope, &vars)?;
     let run_id = vars.get("run_id").cloned().unwrap_or_default();
     println!(
         "Running '{}'{} (run {run_id}){}",

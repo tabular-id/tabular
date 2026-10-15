@@ -143,7 +143,11 @@ impl RepoIndex {
 
 /// `(conn_id, nama aman database)` dari nama file cache diagram
 /// `conn_{id}_{db}.json` (lihat `diagram_storage::local_diagram_file_name`).
+/// File base sinkronisasi `conn_{id}_{db}.base.json` bukan diagram cache.
 pub fn parse_diagram_file_name(name: &str) -> Option<(i64, String)> {
+    if name.ends_with(".base.json") {
+        return None;
+    }
     let rest = name.strip_prefix("conn_")?.strip_suffix(".json")?;
     let (id, db) = rest.split_once('_')?;
     Some((id.parse().ok()?, db.to_string()))
@@ -439,6 +443,7 @@ mod tests {
         );
         assert_eq!(parse_diagram_file_name("conn_x_db.json"), None);
         assert_eq!(parse_diagram_file_name("other.json"), None);
+        assert_eq!(parse_diagram_file_name("conn_12_shop_db.base.json"), None);
     }
 
     #[test]

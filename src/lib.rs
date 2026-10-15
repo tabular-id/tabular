@@ -87,7 +87,9 @@ pub mod http_repo;
 pub mod http_send;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod http_test_cli;
+pub mod http_test_codefix;
 pub mod http_test_report;
+pub mod http_test_validate;
 pub mod http_tests;
 pub mod i18n;
 pub mod index_check;

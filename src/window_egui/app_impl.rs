@@ -1065,6 +1065,8 @@ impl Tabular {
 
     fn render_left_sidebar(&mut self, root_ui: &mut egui::Ui) {
         let ctx = &root_ui.ctx().clone();
+        // Tab Integration Testing menyembunyikan sidebar (user tetap bisa membukanya).
+        crate::window_egui::integration_test_ui::sync_sidebar(self);
         if self.sidebar_visible {
             // Batas mengikuti lebar jendela supaya panel tengah tidak terjepit
             // di iPad Split View / Slide Over (M11).

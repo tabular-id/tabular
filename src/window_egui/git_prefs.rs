@@ -278,9 +278,9 @@ pub fn render(t: &mut Tabular, ui: &mut egui::Ui) {
         setup_changed |= toggle_row(
             ui,
             &mut settings.ai_enrich,
-            "Document new endpoints with AI",
+            "Document endpoints with AI",
             Some(
-                "After a setup, run Generate Endpoints with the AI backend for folders that got new endpoints",
+                "After a setup, run Generate Endpoints with the AI backend for folders with undocumented endpoints, then link them to diagram tables and generate business processes",
             ),
         );
     });

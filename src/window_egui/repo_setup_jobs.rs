@@ -1339,14 +1339,20 @@ fn apply_services(
                 &s.base_url,
                 true,
             ) {
-                Ok(added) => {
-                    stats.endpoints_new += added.added;
-                    if manual {
-                        fresh_folders.push(folder_id.clone());
-                    }
-                }
+                Ok(added) => stats.endpoints_new += added.added,
                 Err(e) => log::warn!("[REPO_SETUP] {e}"),
             }
+        }
+        // Folder yang masih punya endpoint tanpa daftar tabel (baru ditemukan,
+        // atau setup sebelumnya tanpa AI) didokumentasikan pada setup manual.
+        let undocumented = t
+            .yaak_workspaces
+            .iter()
+            .find(|w| w.id == ws_id)
+            .and_then(|w| find_folder(&w.folders, &folder_id))
+            .is_some_and(|f| f.all_requests().iter().any(|r| r.tables.is_empty()));
+        if manual && undocumented {
+            fresh_folders.push(folder_id.clone());
         }
         let total = t
             .yaak_workspaces
@@ -1377,8 +1383,9 @@ fn apply_services(
     if let Err(e) = crate::http_collection::save_workspaces(&t.yaak_workspaces) {
         t.toasts.error(e);
     }
-    // Dokumentasi AI (parameter, body, tabel) memakai alur Generate
-    // Endpoints yang sudah ada, dengan jendela review-nya.
+    // Dokumentasi AI (parameter, body, tabel) berjalan di background lalu
+    // langsung diterapkan, ditautkan ke tabel diagram, dan alur bisnisnya
+    // dibuat, supaya hasil setup langsung bisa dipakai.
     if t.repo_setup.store.settings.ai_enrich && !fresh_folders.is_empty() {
         let target = t.effective_chat_target();
         match crate::ai_assistant::backend_ready_for(t, target) {
@@ -1386,7 +1393,7 @@ fn apply_services(
                 for folder_id in fresh_folders {
                     crate::http_repo::perform(
                         t,
-                        crate::http_repo::RepoAction::GenerateEndpoints { folder_id },
+                        crate::http_repo::RepoAction::AutoDocumentEndpoints { folder_id },
                     );
                 }
             }
@@ -1655,12 +1662,14 @@ fn apply_tables(t: &mut Tabular, pending: u64, outcome: Option<Box<TablesOutcome
         patch,
         newly_placed,
     } = *outcome;
+    let mut patched_in_tab = false;
     if !patch.is_empty() {
         let host = t
             .query_tabs
             .iter()
             .position(|q| Tabular::is_diagram_host_tab(q, p.conn_id, &p.db));
         if let Some(i) = host {
+            patched_in_tab = true;
             let snapshot = t.query_tabs[i].diagram_state.as_mut().map(|state| {
                 patch.apply(state);
                 state.clone()
@@ -1716,6 +1725,28 @@ fn apply_tables(t: &mut Tabular, pending: u64, outcome: Option<Box<TablesOutcome
             result.groups.len(),
             result.tables_added
         ));
+    }
+    // Group baru: endpoint yang sudah punya tabel langsung ditautkan. Hanya
+    // bila patch masuk ke tab terbuka; patch file di thread bisa balapan
+    // dengan tulisan tautan, dan dokumentasi AI menautkan lagi saat selesai.
+    if patched_in_tab {
+        let folders: Vec<String> = t
+            .repo_setup
+            .store
+            .get(&p.key)
+            .map(|s| {
+                s.services
+                    .iter()
+                    .filter_map(|x| x.folder_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for folder_id in folders {
+            let summary = crate::http_repo::relink_folder(t, &folder_id);
+            if !summary.is_empty() {
+                t.toasts.success(summary);
+            }
+        }
     }
 }
 
