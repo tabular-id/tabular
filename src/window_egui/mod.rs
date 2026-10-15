@@ -49,6 +49,7 @@ pub mod query_insight;
 pub mod query_jobs;
 pub mod query_stats_ui;
 pub mod render_dialogs;
+pub mod repo_setup_jobs;
 pub mod schema_actions;
 pub mod schema_menus;
 pub mod search;
@@ -806,6 +807,9 @@ pub struct Tabular {
     pub background_tasks: background_tasks::BackgroundTasks,
     /// State tab Git (repository, status, job latar, Merge Review).
     pub git: git_jobs::GitUiState,
+    /// Repository setup otomatis (koneksi, API, diagram dari folder git) dan
+    /// watcher perubahannya.
+    pub repo_setup: repo_setup_jobs::RepoSetupState,
     /// State integrasi platform: deep link, Handoff, environment koneksi, Touch ID.
     pub platform_ui: platform_ui::PlatformUiState,
     // Visual data filter state for table browsing

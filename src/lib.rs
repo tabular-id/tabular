@@ -115,6 +115,7 @@ pub mod redis_browser;
 pub mod repo_endpoints;
 pub mod repo_links;
 pub mod repo_scan;
+pub mod repo_setup;
 pub mod result_chart;
 pub mod safety_guard;
 pub mod sample_data;

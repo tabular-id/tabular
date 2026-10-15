@@ -17,6 +17,10 @@ The repository list is shared with the rest of Tabular. A repository shows up wh
 - you add it in the Git tab with **+ > Add local folder…**, **Clone repository…** or
   **Init repository…**.
 
+**+ > Add folder & set up everything…** also creates the repository's project, database
+connections, API folders and diagram, and keeps them in sync with git. See
+[REPO_SETUP.md](REPO_SETUP.md).
+
 Entries that point to the same repository are merged by their git URL, so
 `git@github.com:org/app.git` and `https://github.com/org/app` are one repository. The
 line under a repository tells you which diagram groups, API folders and projects use it.

@@ -1521,8 +1521,10 @@ impl super::Tabular {
                                     // running the query as soon as the pool becomes available.
                                     let pool_ready =
                                         self.connection_pools.contains_key(&connection_id)
-                                            || crate::connection::pool::lock_or_recover(&self.shared_connection_pools)
-                                                .contains_key(&connection_id);
+                                            || crate::connection::pool::lock_or_recover(
+                                                &self.shared_connection_pools,
+                                            )
+                                            .contains_key(&connection_id);
 
                                     if !pool_ready {
                                         crate::connection::ensure_background_pool_creation(
@@ -1583,8 +1585,10 @@ impl super::Tabular {
                                     // running the query as soon as the pool becomes available.
                                     let pool_ready =
                                         self.connection_pools.contains_key(&connection_id)
-                                            || crate::connection::pool::lock_or_recover(&self.shared_connection_pools)
-                                                .contains_key(&connection_id);
+                                            || crate::connection::pool::lock_or_recover(
+                                                &self.shared_connection_pools,
+                                            )
+                                            .contains_key(&connection_id);
 
                                     if !pool_ready {
                                         crate::connection::ensure_background_pool_creation(
@@ -2000,8 +2004,9 @@ impl super::Tabular {
             .data_mut(|d| d.insert_temp(egui::Id::new(ENV_SNAPSHOT_ID), env_snapshot));
 
         // Tangani permintaan buka Table Group dialog dari menu konteks
-        let table_group_req: Option<(i64, String)> =
-            ui.ctx().data(|d| d.get_temp(egui::Id::new("open_table_group_dialog")));
+        let table_group_req: Option<(i64, String)> = ui
+            .ctx()
+            .data(|d| d.get_temp(egui::Id::new("open_table_group_dialog")));
         if let Some((conn_id, db_name)) = table_group_req {
             ui.ctx().data_mut(|d| {
                 d.remove_temp::<(i64, String)>(egui::Id::new("open_table_group_dialog"));

@@ -18,6 +18,9 @@ Folders that already exist with that name are reused. To turn an existing folder
 a project, right-click a top-level connection folder, a top-level query folder or an
 HTTP collection and choose **Convert to Project…**.
 
+To build a project straight from a git repository, with its connections, API folders
+and diagram, see [REPO_SETUP.md](REPO_SETUP.md).
+
 The project owns everything inside its folders, including subfolders. Moving a
 connection into the project folder adds it to the project.
 

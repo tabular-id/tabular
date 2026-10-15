@@ -1326,7 +1326,7 @@ impl GeneratedEndpoint {
         route_key(&self.method, &self.path)
     }
 
-    fn from_hit(hit: &RouteHit) -> Self {
+    pub(crate) fn from_hit(hit: &RouteHit) -> Self {
         Self {
             method: hit.method.clone(),
             path: hit.path.clone(),

@@ -7,7 +7,9 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tabular::driver_api::wasm_host::WasmDriver;
-use tabular::driver_api::{ConnectParams, EngineDescriptor, EngineDriver, ExecuteRequest, TableKind};
+use tabular::driver_api::{
+    ConnectParams, EngineDescriptor, EngineDriver, ExecuteRequest, TableKind,
+};
 
 const WASM: &str = "plugins/examples/clickhouse/dist/driver.wasm";
 const MANIFEST: &str = "plugins/examples/clickhouse/manifest.json";
@@ -43,7 +45,9 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
 }
 
 fn big_json() -> String {
-    let mut s = String::from(r#"{"meta":[{"name":"id","type":"UInt64"},{"name":"label","type":"Nullable(String)"}],"data":["#);
+    let mut s = String::from(
+        r#"{"meta":[{"name":"id","type":"UInt64"},{"name":"label","type":"Nullable(String)"}],"data":["#,
+    );
     for i in 0..BIG_ROWS {
         if i > 0 {
             s.push(',');
@@ -71,7 +75,9 @@ fn fake_clickhouse() -> (u16, Arc<Mutex<Vec<String>>>) {
             let log = log.clone();
             let big = big.clone();
             std::thread::spawn(move || {
-                let Some(req) = read_request(&mut stream) else { return };
+                let Some(req) = read_request(&mut stream) else {
+                    return;
+                };
                 log.lock().unwrap().push(req.body.clone());
                 let (status, body) = if req.body.starts_with("SELECT 1") {
                     (200, "1\n".to_string())
@@ -80,7 +86,10 @@ fn fake_clickhouse() -> (u16, Arc<Mutex<Vec<String>>>) {
                 } else if req.body.contains("system.tables") {
                     (200, "events\tMergeTree\nv_daily\tView\n".to_string())
                 } else if req.body.contains("system.columns") {
-                    (200, "id\tUInt64\t1\nlabel\tNullable(String)\t0\n".to_string())
+                    (
+                        200,
+                        "id\tUInt64\t1\nlabel\tNullable(String)\t0\n".to_string(),
+                    )
                 } else if req.body.starts_with("KILL QUERY") {
                     (200, String::new())
                 } else if req.body.contains("big_table") {
@@ -89,7 +98,11 @@ fn fake_clickhouse() -> (u16, Arc<Mutex<Vec<String>>>) {
                     (400, "Code: 62. DB::Exception: Syntax error".to_string())
                 } else {
                     assert!(req.target.contains("default_format=JSONCompact"));
-                    (200, r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1]],"rows":1}"#.to_string())
+                    (
+                        200,
+                        r#"{"meta":[{"name":"x","type":"UInt8"}],"data":[[1]],"rows":1}"#
+                            .to_string(),
+                    )
                 };
                 let _ = write!(
                     stream,
@@ -137,15 +150,22 @@ fn clickhouse_plugin_end_to_end() {
         })
         .expect("connect");
 
-    assert_eq!(session.list_databases().unwrap(), vec!["default", "analytics"]);
+    assert_eq!(
+        session.list_databases().unwrap(),
+        vec!["default", "analytics"]
+    );
     let tables = session.list_tables(Some("analytics"), None).unwrap();
     assert_eq!(tables.len(), 2);
     assert_eq!(tables[1].kind, TableKind::View);
-    let cols = session.list_columns(Some("analytics"), None, "events").unwrap();
+    let cols = session
+        .list_columns(Some("analytics"), None, "events")
+        .unwrap();
     assert!(cols[0].primary_key);
     assert!(cols[1].nullable);
 
-    let out = session.execute(&request("SELECT x FROM events", 100)).unwrap();
+    let out = session
+        .execute(&request("SELECT x FROM events", 100))
+        .unwrap();
     assert_eq!(out.headers, vec!["x"]);
     assert_eq!(out.rows, vec![vec![Some("1".into())]]);
 
@@ -153,11 +173,12 @@ fn clickhouse_plugin_end_to_end() {
     assert!(err.to_string().contains("Syntax error"), "{err}");
 
     session.cancel(42).unwrap();
-    assert!(seen
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|b| b.contains("KILL QUERY WHERE query_id = 'tabular-42'")));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|b| b.contains("KILL QUERY WHERE query_id = 'tabular-42'"))
+    );
 }
 
 #[test]
@@ -194,7 +215,9 @@ fn clickhouse_plugin_large_result_uses_host_parsing() {
         })
         .unwrap();
     let started = Instant::now();
-    let out = session.execute(&request("SELECT * FROM big_table", BIG_ROWS)).unwrap();
+    let out = session
+        .execute(&request("SELECT * FROM big_table", BIG_ROWS))
+        .unwrap();
     let elapsed = started.elapsed();
     assert_eq!(out.rows.len(), BIG_ROWS);
     assert_eq!(out.rows[10][1], None);
@@ -202,7 +225,9 @@ fn clickhouse_plugin_large_result_uses_host_parsing() {
     eprintln!("[bench] {BIG_ROWS} rows via Wasm plugin + host parsing: {elapsed:?}");
 
     let started = Instant::now();
-    let capped = session.execute(&request("SELECT * FROM big_table", 1_000)).unwrap();
+    let capped = session
+        .execute(&request("SELECT * FROM big_table", 1_000))
+        .unwrap();
     assert_eq!(capped.rows.len(), 1_000);
     assert!(capped.truncated);
     eprintln!("[bench] capped at 1000 rows: {:?}", started.elapsed());

@@ -192,6 +192,8 @@ pub(crate) fn render_connection_dialog(
     }
 
     let mut open = true;
+    // Mode "Git Folder": setup otomatis dimulai dan dialog ditutup.
+    let mut git_setup_started = false;
     let title = if is_edit_mode {
         "Edit Connection"
     } else {
@@ -235,6 +237,35 @@ pub(crate) fn render_connection_dialog(
             crate::window_egui::style::render_modal_header(ui, title, &mut close_dialog);
             if close_dialog {
                 open = false;
+            }
+
+            if !is_edit_mode {
+                // Pilihan sumber: isi koneksi manual, atau bentuk semuanya
+                // dari folder git (koneksi, API, diagram) di sebuah project.
+                ui.horizontal(|ui| {
+                    let git = &mut tabular.repo_setup.git_form.active;
+                    if ui.selectable_label(!*git, "Database").clicked() {
+                        *git = false;
+                    }
+                    if ui
+                        .selectable_label(
+                            *git,
+                            format!("{} Git Folder", egui_icons::icons::ICON_FOLDER_OPEN.codepoint),
+                        )
+                        .on_hover_text(
+                            "Create the connections, API folders and diagram of a repository from its .env, docker-compose and config files",
+                        )
+                        .clicked()
+                    {
+                        *git = true;
+                    }
+                });
+                ui.add_space(4.0);
+                if tabular.repo_setup.git_form.active {
+                    git_setup_started =
+                        crate::window_egui::repo_setup_jobs::render_git_folder_form(tabular, ui);
+                    return;
+                }
             }
 
             ui.vertical(|ui| {
@@ -812,6 +843,13 @@ pub(crate) fn render_connection_dialog(
         tabular.edit_connection = connection_data;
     } else {
         tabular.new_connection = connection_data;
+    }
+
+    if git_setup_started {
+        tabular.new_connection = models::structs::ConnectionConfig::default();
+        tabular.test_connection_status = None;
+        tabular.test_connection_in_progress = false;
+        tabular.show_add_connection = false;
     }
 
     // Handle window close via X button
@@ -1988,9 +2026,7 @@ pub(crate) fn initialize_database_background() -> Option<DatabaseInitResult> {
 
 /// Mengembalikan `None` bila pool berhasil dibuka, atau jenis kegagalan
 /// terakhir supaya pemanggil bisa memutuskan tindakan pemulihan.
-pub(crate) fn initialize_database(
-    tabular: &mut window_egui::Tabular,
-) -> Option<SqliteFailureKind> {
+pub(crate) fn initialize_database(tabular: &mut window_egui::Tabular) -> Option<SqliteFailureKind> {
     initialize_database_impl(tabular, true)
 }
 
@@ -3650,10 +3686,18 @@ pub fn get_table_group_config_sync(
 ) -> Option<crate::table_group::TableGroupConfig> {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| {
-            handle.block_on(get_table_group_config_async(pool, connection_id, database_name))
+            handle.block_on(get_table_group_config_async(
+                pool,
+                connection_id,
+                database_name,
+            ))
         })
     } else if let Ok(rt) = tokio::runtime::Runtime::new() {
-        rt.block_on(get_table_group_config_async(pool, connection_id, database_name))
+        rt.block_on(get_table_group_config_async(
+            pool,
+            connection_id,
+            database_name,
+        ))
     } else {
         None
     }
@@ -3684,7 +3728,6 @@ pub async fn save_table_group_config(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod table_group_tests {
@@ -3721,7 +3764,10 @@ mod table_group_tests {
         save_table_group_config(&pool, 1, "db", &cfg)
             .await
             .expect("save config");
-        assert_eq!(get_table_group_config_async(&pool, 1, "db").await, Some(cfg));
+        assert_eq!(
+            get_table_group_config_async(&pool, 1, "db").await,
+            Some(cfg)
+        );
     }
 }
 

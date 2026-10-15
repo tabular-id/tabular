@@ -5,6 +5,9 @@ Tabular then reads that code to create every endpoint as a saved request,
 links each endpoint to the database tables it uses in the diagram, and designs
 integration tests that can span several APIs.
 
+To create the folders, their repository links and endpoints for a whole repository
+(one folder per microservice) in one step, see [REPO_SETUP.md](REPO_SETUP.md).
+
 ## Linking a repository
 
 Right-click a folder and choose **Set Repository…** (or **Edit Repository…**).

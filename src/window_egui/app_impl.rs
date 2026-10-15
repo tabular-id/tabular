@@ -1189,6 +1189,17 @@ impl Tabular {
                                             self.show_add_connection = true;
                                             ui.close();
                                         }
+                                        if ui
+                                            .button(format!(
+                                                "{} Add from Git Folder…",
+                                                egui_icons::icons::ICON_AUTO_AWESOME.codepoint
+                                            ))
+                                            .on_hover_text("Create the connections, API folders and diagrams of a repository from its .env, docker-compose and config files")
+                                            .clicked()
+                                        {
+                                            ui.close();
+                                            crate::window_egui::repo_setup_jobs::pick_and_start(self);
+                                        }
                                     });
                                     if self.connections.is_empty() && self.items_tree.is_empty() {
                                         ui.label("No connections configured");
@@ -1457,7 +1468,7 @@ impl Tabular {
                                                     [24.0, 24.0],
                                                     egui::Button::new(egui::RichText::new("➕").color(egui::Color32::WHITE))
                                                         .fill(style::theme_accent(ctx)),
-                                                ).on_hover_text("Add Database Connection");
+                                                ).on_hover_text("Add Database Connection (right-click: add from a Git folder)");
 
                                                 if plus_btn.clicked() {
                                                     self.test_connection_status = None;
@@ -1465,6 +1476,26 @@ impl Tabular {
                                                     self.new_connection = models::structs::ConnectionConfig::default();
                                                     self.show_add_connection = true;
                                                 }
+                                                plus_btn.context_menu(|ui| {
+                                                    if ui.button("Add Database Connection…").clicked() {
+                                                        ui.close();
+                                                        self.test_connection_status = None;
+                                                        self.test_connection_in_progress = false;
+                                                        self.new_connection = models::structs::ConnectionConfig::default();
+                                                        self.show_add_connection = true;
+                                                    }
+                                                    if ui
+                                                        .button(format!(
+                                                            "{} Add from Git Folder…",
+                                                            egui_icons::icons::ICON_AUTO_AWESOME.codepoint
+                                                        ))
+                                                        .on_hover_text("Create the connections, API folders and diagrams of a repository from its .env, docker-compose and config files")
+                                                        .clicked()
+                                                    {
+                                                        ui.close();
+                                                        crate::window_egui::repo_setup_jobs::pick_and_start(self);
+                                                    }
+                                                });
                                             }
                                             "Queries" => {
                                                 let open_btn = ui.add_sized(
@@ -1502,49 +1533,55 @@ impl Tabular {
                                         }
                                     }
                                     "Git" => {
-                                        ui.menu_button(
-                                            egui::RichText::new("➕").color(egui::Color32::WHITE),
-                                            |ui| crate::window_egui::git_sidebar::repo_menu(self, ui),
-                                        ).response.on_hover_text("Add repository");
+                                        let plus_btn = ui.add_sized(
+                                            [24.0, 24.0],
+                                            egui::Button::new(egui::RichText::new("➕").color(egui::Color32::WHITE))
+                                                .fill(style::theme_accent(ctx)),
+                                        ).on_hover_text("Add repository");
+                                        egui::Popup::menu(&plus_btn).show(|ui| {
+                                            crate::window_egui::git_sidebar::repo_menu(self, ui);
+                                        });
                                     }
                                     "APIs" => {
-                                        ui.menu_button(
-                                            egui::RichText::new("➕").color(egui::Color32::WHITE),
-                                            |ui| {
-                                                ui.set_min_width(170.0);
-                                                if ui.button("📄 New HTTP Request").clicked() {
-                                                    editor::create_new_http_tab(self, "New Request".to_string(), None);
-                                                    ui.close();
-                                                }
-                                                if ui.button("📁 Add New Collection").clicked() {
-                                                    self.pending_create_http_workspace = Some(String::new());
-                                                    ui.close();
-                                                }
-                                                if ui.button("🌐 Add HTTP Connection").clicked() {
-                                                    self.test_connection_status = None;
-                                                    self.test_connection_in_progress = false;
-                                                    self.new_connection = models::structs::ConnectionConfig {
-                                                        connection_type: models::enums::DatabaseType::ApiHttp,
-                                                        ..Default::default()
-                                                    };
-                                                    self.show_add_connection = true;
-                                                    ui.close();
-                                                }
-                                                ui.separator();
-                                                if ui.button("⬇ Import Yaak").clicked() {
-                                                    self.show_yaak_import_dialog = true;
-                                                    ui.close();
-                                                }
-                                                if ui.button("⬇ Import Postman").clicked() {
-                                                    self.show_postman_import_dialog = true;
-                                                    ui.close();
-                                                }
-                                                if ui.button("⬇ Import Flexurio NoCode").clicked() {
-                                                    self.show_flexurio_import_dialog = true;
-                                                    ui.close();
-                                                }
-                                            },
-                                        ).response.on_hover_text("New HTTP Request, Add Collection/Connection, or Import");
+                                        let plus_btn = ui.add_sized(
+                                            [24.0, 24.0],
+                                            egui::Button::new(egui::RichText::new("➕").color(egui::Color32::WHITE))
+                                                .fill(style::theme_accent(ctx)),
+                                        ).on_hover_text("New HTTP Request, Add Collection/Connection, or Import");
+                                        egui::Popup::menu(&plus_btn).show(|ui| {
+                                            ui.set_min_width(170.0);
+                                            if ui.button("📄 New HTTP Request").clicked() {
+                                                editor::create_new_http_tab(self, "New Request".to_string(), None);
+                                                ui.close();
+                                            }
+                                            if ui.button("📁 Add New Collection").clicked() {
+                                                self.pending_create_http_workspace = Some(String::new());
+                                                ui.close();
+                                            }
+                                            if ui.button("🌐 Add HTTP Connection").clicked() {
+                                                self.test_connection_status = None;
+                                                self.test_connection_in_progress = false;
+                                                self.new_connection = models::structs::ConnectionConfig {
+                                                    connection_type: models::enums::DatabaseType::ApiHttp,
+                                                    ..Default::default()
+                                                };
+                                                self.show_add_connection = true;
+                                                ui.close();
+                                            }
+                                            ui.separator();
+                                            if ui.button("⬇ Import Yaak").clicked() {
+                                                self.show_yaak_import_dialog = true;
+                                                ui.close();
+                                            }
+                                            if ui.button("⬇ Import Postman").clicked() {
+                                                self.show_postman_import_dialog = true;
+                                                ui.close();
+                                            }
+                                            if ui.button("⬇ Import Flexurio NoCode").clicked() {
+                                                self.show_flexurio_import_dialog = true;
+                                                ui.close();
+                                            }
+                                        });
                                     }
                                     _ => {}
                                 }
@@ -5702,6 +5739,7 @@ impl App for Tabular {
         crate::session_restore::render_quit_dialog(self, ctx);
         crate::session_restore::tick(self, ctx);
         crate::window_egui::git_jobs::poll(self, ctx);
+        crate::window_egui::repo_setup_jobs::tick(self, ctx);
 
         self.render_query_insights(ctx);
         #[cfg(not(any(target_os = "ios", target_os = "android")))]

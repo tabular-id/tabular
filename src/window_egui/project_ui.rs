@@ -171,6 +171,20 @@ fn replace_project(t: &mut Tabular, p: Project) {
     t.projects.list.sort_by_key(|p| p.name.to_lowercase());
 }
 
+/// Simpan project hasil repository setup (baru atau diperbarui): tulis
+/// secret ke keychain, simpan file project, perbarui daftar, dan tandai warna
+/// environment koneksinya.
+pub fn save_from_setup(t: &mut Tabular, p: Project) -> bool {
+    let before = t.projects.list.iter().find(|x| x.id == p.id).cloned();
+    write_secrets(before.as_ref(), &p);
+    if !persist(t, &p) {
+        return false;
+    }
+    replace_project(t, p.clone());
+    apply_environment_marks(t, &p);
+    true
+}
+
 fn persist(t: &mut Tabular, p: &Project) -> bool {
     t.projects.vars_cache = None;
     match project::save(&app_dir(), p) {

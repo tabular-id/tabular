@@ -86,7 +86,9 @@ pub(crate) fn begin_connect_attempt(connection_id: i64) -> Arc<AtomicBool> {
 pub(crate) fn signal_connect_cancel(connection_id: i64) {
     if let Some(entry) = lock_or_recover(&CANCEL_FLAGS).get_mut(&connection_id) {
         entry.flag.store(true, Ordering::SeqCst);
-        entry.cancelled_at.get_or_insert_with(std::time::Instant::now);
+        entry
+            .cancelled_at
+            .get_or_insert_with(std::time::Instant::now);
     }
 }
 
@@ -482,8 +484,7 @@ async fn create_connection_pool_for_config_inner(
                     return Err(format!("Cannot resolve target host: {}", err));
                 }
             };
-            let connect_opts =
-                mysql_connect_options(connection, &target_host, &target_port, None);
+            let connect_opts = mysql_connect_options(connection, &target_host, &target_port, None);
             let default_database = connection.database.trim().to_string();
 
             let mut last_err: Option<sqlx::Error> = None;
@@ -634,9 +635,7 @@ async fn create_connection_pool_for_config_inner(
                 format!("sqlite:{}", sqlite_path)
             };
 
-            let pool_result = sqlite_pool_options()
-                .connect(&connection_string)
-                .await;
+            let pool_result = sqlite_pool_options().connect(&connection_string).await;
 
             match pool_result {
                 Ok(pool) => {

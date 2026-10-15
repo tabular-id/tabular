@@ -272,16 +272,20 @@ impl super::Tabular {
             }
             DiagramAction::ConfigureTableGroups => {
                 let cid = conn_id.or_else(|| state.nodes.iter().find_map(|n| n.connection_id));
-                let db = db_name.or_else(|| state.nodes.iter().find_map(|n| n.database_name.clone()));
+                let db =
+                    db_name.or_else(|| state.nodes.iter().find_map(|n| n.database_name.clone()));
                 if let (Some(cid), Some(db)) = (cid, db) {
                     self.open_table_group_dialog(cid, db);
                 } else {
-                    self.toasts.warning("Cannot configure table groups: no connection or database selected");
+                    self.toasts.warning(
+                        "Cannot configure table groups: no connection or database selected",
+                    );
                 }
             }
             DiagramAction::ReloadSchema => {
                 let cid = conn_id.or_else(|| state.nodes.iter().find_map(|n| n.connection_id));
-                let db = db_name.or_else(|| state.nodes.iter().find_map(|n| n.database_name.clone()));
+                let db =
+                    db_name.or_else(|| state.nodes.iter().find_map(|n| n.database_name.clone()));
                 if let (Some(cid), Some(db)) = (cid, db) {
                     self.request_diagram_schema(cid, &db);
                 }

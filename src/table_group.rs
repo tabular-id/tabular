@@ -239,8 +239,13 @@ pub fn build_table_group_tree(
     tables: &[(String, Option<String>)],
 ) -> Vec<TableGroupTree> {
     // Map: Group -> (Direct Tables, Map<SubGroup, Tables>)
-    let mut groups: BTreeMap<String, (Vec<GroupedTableItem>, BTreeMap<String, Vec<GroupedTableItem>>)> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<
+        String,
+        (
+            Vec<GroupedTableItem>,
+            BTreeMap<String, Vec<GroupedTableItem>>,
+        ),
+    > = BTreeMap::new();
 
     for (tbl_name, raw_comment) in tables {
         let parsed = parse_table_comment(pattern, raw_comment.as_deref());
@@ -285,7 +290,9 @@ pub fn build_table_group_tree(
         } else if b.group_name.eq_ignore_ascii_case("Ungrouped") {
             std::cmp::Ordering::Less
         } else {
-            a.group_name.to_lowercase().cmp(&b.group_name.to_lowercase())
+            a.group_name
+                .to_lowercase()
+                .cmp(&b.group_name.to_lowercase())
         }
     });
 
@@ -346,17 +353,32 @@ mod tests {
 
         let res2 = parse_table_comment(pattern, Some("Hanya komentar biasa tanpa pola"));
         assert_eq!(res2.group, "Ungrouped");
-        assert_eq!(res2.description.as_deref(), Some("Hanya komentar biasa tanpa pola"));
+        assert_eq!(
+            res2.description.as_deref(),
+            Some("Hanya komentar biasa tanpa pola")
+        );
     }
 
     #[test]
     fn test_build_tree_hierarchy() {
         let pattern = "[GROUP]-[SUB GROUP]-[Comment Table]";
         let tables = vec![
-            ("users".to_string(), Some("[AUTH]-[USER]-[Tabel akun]".to_string())),
-            ("roles".to_string(), Some("[AUTH]-[ROLE]-[Tabel peran]".to_string())),
-            ("payroll".to_string(), Some("[HR]-[PAYROLL]-[Gaji]".to_string())),
-            ("employees".to_string(), Some("[HR] Data Karyawan".to_string())),
+            (
+                "users".to_string(),
+                Some("[AUTH]-[USER]-[Tabel akun]".to_string()),
+            ),
+            (
+                "roles".to_string(),
+                Some("[AUTH]-[ROLE]-[Tabel peran]".to_string()),
+            ),
+            (
+                "payroll".to_string(),
+                Some("[HR]-[PAYROLL]-[Gaji]".to_string()),
+            ),
+            (
+                "employees".to_string(),
+                Some("[HR] Data Karyawan".to_string()),
+            ),
             ("logs".to_string(), Some("Catatan log".to_string())),
         ];
 

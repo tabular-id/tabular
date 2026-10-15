@@ -41,7 +41,7 @@ const AI_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const READ_ONLY_TOOLS: [&str; 4] = ["Read", "Grep", "Glob", "LS"];
 
 /// Direktori yang tidak pernah berisi kode aplikasi yang relevan.
-const SKIP_DIRS: &[&str] = &[
+pub(crate) const SKIP_DIRS: &[&str] = &[
     ".git",
     ".hg",
     ".svn",

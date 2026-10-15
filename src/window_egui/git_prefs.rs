@@ -240,6 +240,55 @@ pub fn render(t: &mut Tabular, ui: &mut egui::Ui) {
         );
     });
 
+    let mut setup_changed = false;
+    section(ui, "Repository setup", |ui| {
+        hint(
+            ui,
+            "Repositories added with \"Add folder & set up everything\" get their database connections, API folders and diagrams from .env, docker-compose and config files. Tabular checks them for git changes in the background.",
+        );
+        let settings = &mut t.repo_setup.store.settings;
+        row(
+            ui,
+            "Check for changes every",
+            Some("Minutes between background checks; 0 checks only when Tabular regains focus"),
+            |ui| {
+                setup_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut settings.interval_min)
+                            .range(0..=240)
+                            .suffix(" min"),
+                    )
+                    .changed();
+            },
+        );
+        setup_changed |= toggle_row(
+            ui,
+            &mut settings.review_before_apply,
+            "Review before applying",
+            Some("Show what will be created or updated instead of applying it right away"),
+        );
+        setup_changed |= toggle_row(
+            ui,
+            &mut settings.open_diagrams,
+            "Open diagrams after setup",
+            Some(
+                "Open a diagram tab for each development database and group its tables by service",
+            ),
+        );
+        setup_changed |= toggle_row(
+            ui,
+            &mut settings.ai_enrich,
+            "Document new endpoints with AI",
+            Some(
+                "After a setup, run Generate Endpoints with the AI backend for folders that got new endpoints",
+            ),
+        );
+    });
+    if setup_changed && let Err(e) = t.repo_setup.store.save() {
+        t.toasts
+            .error(format!("Could not save repository setup preferences: {e}"));
+    }
+
     section(ui, "Git Graph", |ui| {
         let settings = &mut t.git.store.settings;
         row(ui, "Commit ordering", None, |ui| {

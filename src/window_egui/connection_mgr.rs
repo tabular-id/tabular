@@ -794,11 +794,7 @@ impl super::Tabular {
                     "DELETE FROM row_cache WHERE connection_id = ?",
                     "DELETE FROM index_cache WHERE connection_id = ?",
                 ] {
-                    if let Err(e) = sqlx::query(sql)
-                        .bind(connection_id)
-                        .execute(&mut *tx)
-                        .await
-                    {
+                    if let Err(e) = sqlx::query(sql).bind(connection_id).execute(&mut *tx).await {
                         log::warn!("[clear_connection_cache] `{}` gagal: {}", sql, e);
                     }
                 }

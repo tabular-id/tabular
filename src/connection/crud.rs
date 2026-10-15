@@ -29,7 +29,6 @@ pub(crate) fn update_connection_in_database(
                 .find(|c| c.id == Some(id))
                 .is_none_or(|previous| connection_endpoint_changed(previous, &with_options));
 
-
             // Externalize credentials to the secret store; columns get the
             // sentinel (or plaintext when no backend is available).
             let password_stored = crate::secrets::store_or_keep(

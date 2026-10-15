@@ -115,10 +115,6 @@ fn render_header(t: &mut Tabular, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new(i::ICON_WORK.codepoint).size(15.0));
         // Tombol kanan dulu; judul mengisi sisa lebar (rata kiri, terpotong).
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button(
-                egui::RichText::new(i::ICON_ADD.codepoint).size(15.0),
-                |ui| repo_menu(t, ui),
-            );
             if icon_button(
                 ui,
                 i::ICON_REFRESH.codepoint,
@@ -184,6 +180,25 @@ pub fn repo_menu(t: &mut Tabular, ui: &mut egui::Ui) {
             .pick_folder()
         {
             git_jobs::add_folder(t, &dir);
+        }
+    }
+    if ui
+        .button(format!(
+            "{} Add folder & set up everything…",
+            i::ICON_AUTO_AWESOME.codepoint
+        ))
+        .on_hover_text(
+            "Add a repository and create its database connections (from .env, docker-compose and config files), API folders and diagrams. Tabular keeps them in sync with git.",
+        )
+        .clicked()
+    {
+        ui.close();
+        if let Some(dir) = crate::rfd::FileDialog::new()
+            .set_title("Select a git repository to set up")
+            .pick_folder()
+        {
+            git_jobs::add_folder(t, &dir);
+            super::repo_setup_jobs::start(t, &dir, true);
         }
     }
     if ui
@@ -469,6 +484,35 @@ fn repo_context_menu(
             .clicked()
         {
             git_jobs::push(t, &key);
+            ui.close();
+        }
+        ui.separator();
+        let set_up = t.repo_setup.is_set_up(&key);
+        let syncing = t.repo_setup.is_running(&key);
+        if set_up {
+            if ui
+                .add_enabled(
+                    !syncing,
+                    egui::Button::new(format!("{} Sync connections, APIs & diagrams", i::ICON_AUTORENEW.codepoint)),
+                )
+                .clicked()
+            {
+                super::repo_setup_jobs::sync_now(t, &key);
+                ui.close();
+            }
+            if ui.button("Repository setup…").clicked() {
+                super::repo_setup_jobs::open_details(t, &key);
+                ui.close();
+            }
+        } else if ui
+            .add_enabled(
+                !syncing,
+                egui::Button::new(format!("{} Set up connections, APIs & diagrams", i::ICON_AUTO_AWESOME.codepoint)),
+            )
+            .on_hover_text("Read .env, docker-compose and config files, scan the routes, and build everything for this repository")
+            .clicked()
+        {
+            super::repo_setup_jobs::start(t, &path, true);
             ui.close();
         }
         ui.separator();

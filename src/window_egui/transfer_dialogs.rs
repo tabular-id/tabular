@@ -196,10 +196,8 @@ impl Tabular {
                     if summary.failed.is_empty() && summary.warnings.is_empty() {
                         self.toasts.success(message);
                     } else if summary.failed.is_empty() {
-                        self.toasts.warning(format!(
-                            "{message}; {} warning(s)",
-                            summary.warnings.len()
-                        ));
+                        self.toasts
+                            .warning(format!("{message}; {} warning(s)", summary.warnings.len()));
                     } else {
                         self.toasts
                             .warning(format!("{message}; {} failed", summary.failed.len()));
