@@ -7,6 +7,7 @@
 //! - `tabular mcp --print-config`  → cetak snippet konfigurasi untuk harness.
 //! - `tabular open <url>`          → buka deep link / DSN di instance GUI (M2).
 //! - `tabular connections [--json]`→ daftar koneksi tersimpan tanpa rahasia.
+//! - `tabular test list|run …`     → integration test HTTP (lihat `http_test_cli`).
 //! - `tabular tabular://...`       → sama dengan `open` (dipakai handler skema
 //!   URL di Linux/Windows).
 //! - `tabular --help` / `--version`.
@@ -25,6 +26,8 @@ USAGE:
   tabular open <url>           open a tabular:// link or a database URL in the running app
                                (e.g. tabular open postgres://user@localhost:5432/app)
   tabular connections [--json] list saved connections (never includes passwords)
+  tabular test list            list integration test suites
+  tabular test run <suite>     run a suite (add --group, --junit, --report; see `tabular test --help`)
   tabular --version
   tabular --help
 
@@ -41,6 +44,10 @@ pub fn try_run_from_args() -> Option<Result<(), String>> {
         Some("mcp") => Some(run_mcp(&args[1..])),
         Some("open") => run_open(args.get(1).map(String::as_str)),
         Some("connections") => Some(run_connections(&args[1..])),
+        Some("test") => {
+            init_headless_data_dir();
+            Some(crate::http_test_cli::run(&args[1..]))
+        }
         // Handler skema URL OS memanggil `tabular "tabular://..."`.
         Some(url) if url.to_ascii_lowercase().starts_with("tabular:") => run_open(Some(url)),
         Some("--help") | Some("-h") | Some("help") => {

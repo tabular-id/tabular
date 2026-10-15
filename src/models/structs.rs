@@ -235,6 +235,11 @@ pub struct HttpClientState {
     /// Language currently selected in the "Copy as Code" dialog.
     #[serde(skip)]
     pub code_dialog_lang: CodeLang,
+
+    /// Tab ini mengedit satu langkah integration test; simpan menulis ke
+    /// langkah tersebut, bukan ke collection. Tidak disimpan.
+    #[serde(skip)]
+    pub test_step: Option<crate::http_tests::TestStepRef>,
 }
 
 impl Default for HttpClientState {
@@ -281,6 +286,7 @@ impl Default for HttpClientState {
             save_dialog_name: String::new(),
             show_code_dialog: false,
             code_dialog_lang: CodeLang::default(),
+            test_step: None,
         }
     }
 }
@@ -1954,6 +1960,9 @@ pub struct QueryTab {
     pub git_state: Option<crate::window_egui::git_jobs::GitTabState>,
     /// Tab Multi-source Comparison.
     pub compare_state: Option<crate::window_egui::multi_compare_ui::MultiCompareTabState>,
+    /// Tab Integration Testing (suite langkah HTTP berurutan).
+    pub integration_test_state:
+        Option<crate::window_egui::integration_test_ui::IntegrationTestTabState>,
 
     // Manual-commit (transaction) mode — see connection/session.rs
     pub tx_mode: bool,
@@ -3228,6 +3237,7 @@ mod tests {
             user_manager_state: None,
             git_state: None,
             compare_state: None,
+            integration_test_state: None,
             tx_mode: false,
             tx_active: false,
             session: None,

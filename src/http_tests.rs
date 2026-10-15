@@ -2,8 +2,10 @@
 //! folder HTTP API (bisa dari repository berbeda) lalu dijalankan di Tabular.
 //!
 //! Modul ini headless: model suite, penyimpanan `{app_data}/http_tests/`,
-//! substitusi variabel `{{nama}}`, evaluasi assertion, prompt + parser AI,
-//! dan runner di thread background. UI ada di [`crate::http_repo`].
+//! substitusi variabel `{{nama}}`, evaluasi assertion, analisis relasi antar
+//! langkah, runner berurutan dengan fase cleanup yang selalu dijalankan,
+//! riwayat run, serta prompt + parser AI. UI ada di
+//! `window_egui::integration_test_ui`; laporan di [`crate::http_test_report`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,9 +102,56 @@ pub struct Extract {
     pub from: String,
 }
 
+/// Fase langkah. Urutan eksekusi: semua Setup, lalu Test, lalu Cleanup.
+/// Cleanup tetap dijalankan walau langkah sebelumnya gagal atau run dibatalkan.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StepPhase {
+    Setup,
+    #[default]
+    Test,
+    Cleanup,
+}
+
+impl StepPhase {
+    pub const ALL: [StepPhase; 3] = [StepPhase::Setup, StepPhase::Test, StepPhase::Cleanup];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StepPhase::Setup => "Setup",
+            StepPhase::Test => "Test",
+            StepPhase::Cleanup => "Cleanup",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "setup" | "arrange" | "before" | "precondition" => StepPhase::Setup,
+            "cleanup" | "teardown" | "after" | "clean_up" | "clean-up" => StepPhase::Cleanup,
+            _ => StepPhase::Test,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HttpTestStep {
+    /// Id stabil langkah di dalam suite (rujukan `cleanup_for` dan tab HTTP).
+    #[serde(default)]
+    pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub phase: StepPhase,
+    /// Group fungsional (mis. "Purchasing", "Plant"); kosong = tanpa group.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Untuk langkah Cleanup: id langkah yang datanya dihapus langkah ini.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_for: Option<String>,
+    /// Catatan bebas (tujuan langkah, requirement yang diuji).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
     /// Request dengan variabel `{{nama}}` (URL, header, body, auth).
     pub request: SavedRequest,
     #[serde(default)]
@@ -118,6 +167,22 @@ pub struct HttpTestStep {
 
 fn default_true() -> bool {
     true
+}
+
+fn sanitize_step_id(id: &str) -> String {
+    id.trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(40)
+        .collect()
+}
+
+/// Method yang (biasanya) mengubah data di server.
+pub fn is_mutating(method: &HttpMethod) -> bool {
+    !matches!(
+        method,
+        HttpMethod::GET | HttpMethod::HEAD | HttpMethod::OPTIONS
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,20 +202,190 @@ pub struct HttpTestSuite {
     /// RFC 3339.
     #[serde(default)]
     pub created_at: String,
+    /// RFC 3339, perubahan terakhir.
+    #[serde(default)]
+    pub updated_at: String,
+    /// Project pemilik suite (`Project::id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Hentikan langkah Test berikutnya setelah satu langkah gagal. Cleanup
+    /// tetap berjalan.
+    #[serde(default)]
+    pub stop_on_failure: bool,
+    /// Kriteria lulus (exit criteria) dalam persen; `None` = 100%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_pass_rate: Option<f64>,
+    /// Urutan group (mis. Purchasing → Plant → Sales). Group yang dipakai
+    /// langkah tetapi belum terdaftar ditambahkan di belakang.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl HttpTestSuite {
+    /// Suite kosong baru untuk project `project_id`.
+    pub fn new(name: &str, project_id: Option<String>) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: crate::http_collection::unique_id("suite"),
+            name: name.trim().to_string(),
+            project_id,
+            created_at: now.clone(),
+            updated_at: now,
+            ..Default::default()
+        }
+    }
+
+    /// Beri id unik pada langkah yang belum punya atau duplikat.
+    pub fn ensure_ids(&mut self) {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut next = self.steps.len() + 1;
+        for step in &mut self.steps {
+            let id = sanitize_step_id(&step.id);
+            if id.is_empty() || seen.contains(&id) {
+                // Rujukan `cleanup_for` ke id lama yang duplikat tetap ke langkah pertama.
+                loop {
+                    let candidate = format!("s{next}");
+                    next += 1;
+                    if !seen.contains(&candidate) {
+                        step.id = candidate;
+                        break;
+                    }
+                }
+            } else {
+                step.id = id;
+            }
+            seen.insert(step.id.clone());
+        }
+        for step in &mut self.steps {
+            if let Some(target) = &step.cleanup_for
+                && !seen.contains(target)
+            {
+                step.cleanup_for = None;
+            }
+        }
+    }
+
+    /// Id langkah baru yang belum dipakai.
+    pub fn next_step_id(&self) -> String {
+        let mut n = self.steps.len() + 1;
+        loop {
+            let id = format!("s{n}");
+            if !self.steps.iter().any(|s| s.id == id) {
+                return id;
+            }
+            n += 1;
+        }
+    }
+
+    pub fn step_index(&self, id: &str) -> Option<usize> {
+        self.steps.iter().position(|s| s.id == id)
+    }
+
+    /// Nama group berurutan: `groups` lalu group langkah yang belum terdaftar.
+    pub fn group_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for g in self
+            .groups
+            .iter()
+            .chain(self.steps.iter().map(|s| &s.group))
+        {
+            let g = g.trim();
+            if !g.is_empty() && !out.iter().any(|x| x == g) {
+                out.push(g.to_string());
+            }
+        }
+        out
+    }
+
+    /// Kunci urutan eksekusi: fase, lalu urutan group (Setup/Test). Langkah
+    /// tanpa group berjalan lebih dulu di fasenya. Cleanup memakai urutan
+    /// daftar (lihat [`auto_order_cleanup`]).
+    fn order_key(&self, groups: &[String], step: &HttpTestStep) -> (StepPhase, usize) {
+        let rank = if step.phase == StepPhase::Cleanup || step.group.trim().is_empty() {
+            0
+        } else {
+            groups
+                .iter()
+                .position(|g| g == step.group.trim())
+                .map(|p| p + 1)
+                .unwrap_or(groups.len() + 1)
+        };
+        (step.phase, rank)
+    }
+
+    /// Urutkan langkah per fase dan group tanpa mengubah urutan di dalamnya.
+    /// Daftar yang tampil = urutan eksekusi.
+    pub fn normalize_order(&mut self) {
+        let groups = self.group_names();
+        self.groups = groups.clone();
+        let mut steps = std::mem::take(&mut self.steps);
+        steps.sort_by_key(|s| self.order_key(&groups, s));
+        self.steps = steps;
+    }
+
+    /// Indeks langkah dalam urutan eksekusi.
+    pub fn execution_order(&self) -> Vec<usize> {
+        let groups = self.group_names();
+        let mut idx: Vec<usize> = (0..self.steps.len()).collect();
+        idx.sort_by_key(|&i| self.order_key(&groups, &self.steps[i]));
+        idx
+    }
+
+    /// Ganti nama group di daftar dan di semua langkah.
+    pub fn rename_group(&mut self, from: &str, to: &str) {
+        let to = to.trim();
+        for g in &mut self.groups {
+            if g == from {
+                *g = to.to_string();
+            }
+        }
+        for s in &mut self.steps {
+            if s.group == from {
+                s.group = to.to_string();
+            }
+        }
+        let names = self.group_names();
+        self.groups = names;
+    }
+
+    /// Hapus group; langkahnya menjadi tanpa group.
+    pub fn remove_group(&mut self, name: &str) {
+        self.groups.retain(|g| g != name);
+        for s in &mut self.steps {
+            if s.group == name {
+                s.group.clear();
+            }
+        }
+    }
+
+    /// Geser group satu posisi (`delta` = -1 naik, +1 turun).
+    pub fn move_group(&mut self, name: &str, delta: isize) {
+        self.groups = self.group_names();
+        let Some(i) = self.groups.iter().position(|g| g == name) else {
+            return;
+        };
+        let j = i as isize + delta;
+        if j < 0 || j as usize >= self.groups.len() {
+            return;
+        }
+        self.groups.swap(i, j as usize);
+        self.normalize_order();
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+
+    /// Pass rate minimum (persen) agar run dinyatakan lulus.
+    pub fn pass_threshold(&self) -> f64 {
+        self.min_pass_rate.unwrap_or(100.0).clamp(0.0, 100.0)
+    }
+
     /// Jumlah langkah aktif yang mengubah data (bukan GET/HEAD/OPTIONS).
     pub fn mutating_steps(&self) -> usize {
         self.steps
             .iter()
-            .filter(|s| s.enabled)
-            .filter(|s| {
-                !matches!(
-                    s.request.method,
-                    HttpMethod::GET | HttpMethod::HEAD | HttpMethod::OPTIONS
-                )
-            })
+            .filter(|s| s.enabled && is_mutating(&s.request.method))
             .count()
     }
 }
@@ -173,8 +408,78 @@ fn safe_file_id(id: &str) -> String {
         .collect()
 }
 
+/// Nomor revisi penyimpanan suite. Naik setiap kali suite ditulis, supaya
+/// tab yang membuka suite yang sama bisa memuat ulang dari disk.
+static SUITES_REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn suites_revision() -> u64 {
+    SUITES_REV.load(Ordering::SeqCst)
+}
+
 pub fn save_suite(suite: &HttpTestSuite) -> Result<(), String> {
-    save_suite_in(&suites_dir(), suite)
+    save_suite_in(&suites_dir(), suite)?;
+    SUITES_REV.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Muat satu suite dari disk.
+pub fn load_suite(id: &str) -> Option<HttpTestSuite> {
+    load_suite_in(&suites_dir(), id)
+}
+
+pub fn load_suite_in(dir: &std::path::Path, id: &str) -> Option<HttpTestSuite> {
+    let path = dir.join(format!("{}.json", safe_file_id(id)));
+    let bytes = std::fs::read(&path).ok()?;
+    match serde_json::from_slice::<HttpTestSuite>(&bytes) {
+        Ok(mut s) => {
+            s.ensure_ids();
+            Some(s)
+        }
+        Err(e) => {
+            log::warn!("[HTTP_TESTS] unreadable suite {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Suite milik project `project_id`, terbaru lebih dulu.
+pub fn load_project_suites(project_id: &str) -> Vec<HttpTestSuite> {
+    load_suites()
+        .into_iter()
+        .filter(|s| s.project_id.as_deref() == Some(project_id))
+        .collect()
+}
+
+/// Tulis ulang request satu langkah (dari tab HTTP client) ke suite di disk.
+/// Variabel `{{…}}` di request dipertahankan apa adanya.
+pub fn update_step_request(
+    suite_id: &str,
+    step_id: &str,
+    request: SavedRequest,
+) -> Result<String, String> {
+    let mut suite = load_suite(suite_id)
+        .ok_or_else(|| "The integration test suite no longer exists".to_string())?;
+    let step = suite
+        .steps
+        .iter_mut()
+        .find(|s| s.id == step_id)
+        .ok_or_else(|| "The test step no longer exists in its suite".to_string())?;
+    let keep = step.request.clone();
+    step.request = SavedRequest {
+        id: keep.id,
+        workspace_id: keep.workspace_id,
+        folder_id: keep.folder_id,
+        name: keep.name,
+        description: keep.description,
+        tables: keep.tables,
+        source: keep.source,
+        route: keep.route,
+        ..request
+    };
+    let name = step.name.clone();
+    suite.touch();
+    save_suite(&suite)?;
+    Ok(name)
 }
 
 pub fn save_suite_in(dir: &std::path::Path, suite: &HttpTestSuite) -> Result<(), String> {
@@ -205,7 +510,10 @@ pub fn load_suites_in(dir: &std::path::Path) -> Vec<HttpTestSuite> {
             .map_err(|e| e.to_string())
             .and_then(|b| serde_json::from_slice::<HttpTestSuite>(&b).map_err(|e| e.to_string()))
         {
-            Ok(s) => out.push(s),
+            Ok(mut s) => {
+                s.ensure_ids();
+                out.push(s)
+            }
             Err(e) => log::warn!("[HTTP_TESTS] skip unreadable {}: {e}", path.display()),
         }
     }
@@ -217,7 +525,11 @@ pub fn load_suites_in(dir: &std::path::Path) -> Vec<HttpTestSuite> {
 pub fn remove_suite(id: &str) -> Result<(), String> {
     let path = suites_dir().join(format!("{}.json", safe_file_id(id)));
     match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            SUITES_REV.fetch_add(1, Ordering::SeqCst);
+            let _ = std::fs::remove_dir_all(runs_dir().join(safe_file_id(id)));
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("Could not remove test suite: {e}")),
     }
@@ -360,7 +672,7 @@ pub fn read_target(resp: &HttpClientResponse, target: &str) -> Option<String> {
 }
 
 /// Hasil satu assertion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AssertResult {
     pub assertion: Assertion,
     pub passed: bool,
@@ -407,47 +719,558 @@ pub fn evaluate(
     }
 }
 
+// ─── Relasi antar langkah ───────────────────────────────────────────────────
+
+/// Variabel `{{x}}` yang dibaca langkah (request + nilai assertion).
+pub fn step_inputs(step: &HttpTestStep) -> Vec<String> {
+    let r = &step.request;
+    let mut texts: Vec<&str> = vec![
+        &r.url,
+        &r.body_text,
+        &r.bearer_token,
+        &r.basic_user,
+        &r.basic_pass,
+        &r.api_key_name,
+        &r.api_key_value,
+    ];
+    for rows in [&r.params, &r.headers, &r.form_data] {
+        for (k, v, enabled) in rows {
+            if *enabled {
+                texts.push(k);
+                texts.push(v);
+            }
+        }
+    }
+    for a in &step.assertions {
+        texts.push(&a.value);
+    }
+    let mut out: Vec<String> = Vec::new();
+    for t in texts {
+        for v in unresolved_vars(t) {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Variabel yang dihasilkan langkah lewat `extract`.
+pub fn step_outputs(step: &HttpTestStep) -> Vec<String> {
+    step.extract
+        .iter()
+        .map(|e| e.var.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// Relasi satu langkah dengan langkah lain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepDeps {
+    pub uses: Vec<String>,
+    pub provides: Vec<String>,
+    /// Indeks langkah (di `suite.steps`) yang menyediakan variabel yang dipakai.
+    pub depends_on: Vec<usize>,
+    /// Indeks langkah yang memakai variabel dari langkah ini.
+    pub used_by: Vec<usize>,
+}
+
+/// Relasi semua langkah menurut urutan eksekusi. Variabel diambil dari
+/// penyedia terakhir sebelum langkah tersebut.
+pub fn dependencies(suite: &HttpTestSuite) -> Vec<StepDeps> {
+    let mut deps: Vec<StepDeps> = suite
+        .steps
+        .iter()
+        .map(|s| StepDeps {
+            uses: step_inputs(s),
+            provides: step_outputs(s),
+            ..Default::default()
+        })
+        .collect();
+    let mut provider: HashMap<String, usize> = HashMap::new();
+    for i in suite.execution_order() {
+        let uses = deps[i].uses.clone();
+        for v in &uses {
+            if let Some(&p) = provider.get(v)
+                && p != i
+            {
+                if !deps[i].depends_on.contains(&p) {
+                    deps[i].depends_on.push(p);
+                }
+                if !deps[p].used_by.contains(&i) {
+                    deps[p].used_by.push(i);
+                }
+            }
+        }
+        if suite.steps[i].enabled {
+            for v in deps[i].provides.clone() {
+                provider.insert(v, i);
+            }
+        }
+    }
+    deps
+}
+
+/// Langkah yang datanya dibersihkan oleh langkah Cleanup `idx`: `cleanup_for`
+/// bila diisi, selain itu penyedia terakhir variabel yang dipakainya.
+pub fn cleanup_target(suite: &HttpTestSuite, deps: &[StepDeps], idx: usize) -> Option<usize> {
+    let step = suite.steps.get(idx)?;
+    if step.phase != StepPhase::Cleanup {
+        return None;
+    }
+    if let Some(t) = step
+        .cleanup_for
+        .as_deref()
+        .and_then(|id| suite.step_index(id))
+    {
+        return Some(t);
+    }
+    deps.get(idx)?
+        .depends_on
+        .iter()
+        .copied()
+        .filter(|&p| {
+            suite.steps[p].phase != StepPhase::Cleanup
+                && is_mutating(&suite.steps[p].request.method)
+        })
+        .max()
+}
+
+/// Langkah Setup/Test yang membuat data: method POST/PUT yang mengekstrak
+/// variabel bukan rahasia (mis. id baru). Login yang hanya mengekstrak token
+/// atau session tidak dihitung sebagai pembuat data.
+pub fn creates_data(step: &HttpTestStep) -> bool {
+    step.phase != StepPhase::Cleanup
+        && matches!(step.request.method, HttpMethod::POST | HttpMethod::PUT)
+        && step
+            .extract
+            .iter()
+            .any(|e| !e.var.trim().is_empty() && !sensitive_var(&e.var))
+}
+
+/// Langkah yang ikut dijalankan bila hanya group `groups` yang dipilih:
+/// langkah di group itu, semua langkah yang mereka butuhkan (transitif, dari
+/// group mana pun), Setup tanpa group, dan cleanup untuk langkah yang ikut.
+/// `groups` kosong = semua langkah.
+pub fn select_for_groups(suite: &HttpTestSuite, groups: &[String]) -> Vec<bool> {
+    let n = suite.steps.len();
+    if groups.is_empty() {
+        return vec![true; n];
+    }
+    let deps = dependencies(suite);
+    let in_group = |s: &HttpTestStep| groups.iter().any(|g| g.trim() == s.group.trim());
+    let mut include: Vec<bool> = suite
+        .steps
+        .iter()
+        .map(|s| {
+            (s.phase != StepPhase::Cleanup && in_group(s))
+                || (s.phase == StepPhase::Setup && s.group.trim().is_empty())
+        })
+        .collect();
+    // Tarik prasyarat secara transitif.
+    let mut stack: Vec<usize> = (0..n).filter(|&i| include[i]).collect();
+    while let Some(i) = stack.pop() {
+        for &p in &deps[i].depends_on {
+            if !include[p] && suite.steps[p].phase != StepPhase::Cleanup {
+                include[p] = true;
+                stack.push(p);
+            }
+        }
+    }
+    // Cleanup: milik langkah yang ikut, atau cleanup di group terpilih.
+    for i in 0..n {
+        if suite.steps[i].phase != StepPhase::Cleanup {
+            continue;
+        }
+        include[i] = match cleanup_target(suite, &deps, i) {
+            Some(t) => include[t],
+            None => in_group(&suite.steps[i]) || suite.steps[i].group.trim().is_empty(),
+        };
+    }
+    include
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LintLevel {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintIssue {
+    pub level: LintLevel,
+    /// Indeks langkah di `suite.steps`, `None` = seluruh suite.
+    pub step: Option<usize>,
+    pub message: String,
+}
+
+/// Periksa urutan dan relasi langkah. `known_vars` = variabel environment
+/// project yang tersedia saat run.
+pub fn lint(
+    suite: &HttpTestSuite,
+    known_vars: &std::collections::HashSet<String>,
+) -> Vec<LintIssue> {
+    let mut out = Vec::new();
+    let deps = dependencies(suite);
+    let suite_vars: std::collections::HashSet<String> = suite
+        .variables
+        .iter()
+        .map(|(k, _)| k.trim().to_string())
+        .collect();
+    let order = suite.execution_order();
+    let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(p, &i)| (i, p)).collect();
+    if suite.steps.iter().filter(|s| s.enabled).count() == 0 {
+        out.push(LintIssue {
+            level: LintLevel::Info,
+            step: None,
+            message: "The suite has no enabled steps".into(),
+        });
+    }
+    for &i in &order {
+        let step = &suite.steps[i];
+        if !step.enabled {
+            continue;
+        }
+        let d = &deps[i];
+        for v in &d.uses {
+            if v == "run_id" || suite_vars.contains(v) || known_vars.contains(v) {
+                continue;
+            }
+            if d.depends_on.iter().any(|&p| deps[p].provides.contains(v)) {
+                continue;
+            }
+            let later = order
+                .iter()
+                .find(|&&j| pos[&j] > pos[&i] && deps[j].provides.contains(v));
+            let disabled = suite
+                .steps
+                .iter()
+                .enumerate()
+                .find(|(j, s)| !s.enabled && deps[*j].provides.contains(v));
+            let message = if let Some(&j) = later {
+                format!(
+                    "Uses {{{{{v}}}}} which is only provided later by step {} '{}'. Move this step after it.",
+                    pos[&j] + 1,
+                    suite.steps[j].name
+                )
+            } else if let Some((j, s)) = disabled {
+                format!(
+                    "Uses {{{{{v}}}}} from disabled step {} '{}'",
+                    pos[&j] + 1,
+                    s.name
+                )
+            } else {
+                format!("Uses {{{{{v}}}}} but no variable or earlier step provides it")
+            };
+            out.push(LintIssue {
+                level: LintLevel::Error,
+                step: Some(i),
+                message,
+            });
+        }
+        if step.assertions.is_empty() {
+            out.push(LintIssue {
+                level: LintLevel::Warning,
+                step: Some(i),
+                message: "No assertions: the step passes on any response".into(),
+            });
+        }
+        if step.phase == StepPhase::Cleanup && !is_mutating(&step.request.method) {
+            out.push(LintIssue {
+                level: LintLevel::Warning,
+                step: Some(i),
+                message: format!(
+                    "Cleanup step uses {} which normally does not remove data",
+                    step.request.method.label()
+                ),
+            });
+        }
+        if step.phase == StepPhase::Cleanup && cleanup_target(suite, &deps, i).is_none() {
+            out.push(LintIssue {
+                level: LintLevel::Info,
+                step: Some(i),
+                message: "Cleanup step is not linked to a step; it runs whenever data was changed"
+                    .into(),
+            });
+        }
+    }
+    // Setiap langkah yang membuat data harus punya cleanup.
+    let cleanups: Vec<(usize, usize)> = (0..suite.steps.len())
+        .filter(|&i| suite.steps[i].enabled)
+        .filter_map(|i| cleanup_target(suite, &deps, i).map(|t| (i, t)))
+        .collect();
+    for (i, step) in suite.steps.iter().enumerate() {
+        if step.enabled && creates_data(step) && !cleanups.iter().any(|(_, t)| *t == i) {
+            out.push(LintIssue {
+                level: LintLevel::Warning,
+                step: Some(i),
+                message:
+                    "Creates data but no cleanup step removes it; test data will be left behind"
+                        .into(),
+            });
+        }
+    }
+    // Cleanup harus berjalan terbalik dari urutan pembuatan (hapus turunan dulu).
+    for a in 0..cleanups.len() {
+        for b in (a + 1)..cleanups.len() {
+            let (ca, ta) = cleanups[a];
+            let (cb, tb) = cleanups[b];
+            let (first, first_t, second_t) = if pos[&ca] < pos[&cb] {
+                (ca, ta, tb)
+            } else {
+                (cb, tb, ta)
+            };
+            if pos.get(&first_t) < pos.get(&second_t) {
+                out.push(LintIssue {
+                    level: LintLevel::Warning,
+                    step: Some(first),
+                    message: "Cleanup order: data created earlier is removed first; dependent data may block it. Use Auto-order cleanup."
+                        .into(),
+                });
+            }
+        }
+    }
+    out.sort_by_key(|i| {
+        (
+            i.level,
+            i.step.map(|s| pos.get(&s).copied().unwrap_or(usize::MAX)),
+        )
+    });
+    out.dedup();
+    out
+}
+
+/// Urutkan langkah Cleanup terbalik dari urutan pembuatan datanya (LIFO).
+/// Cleanup tanpa target ditaruh paling akhir dengan urutan semula.
+pub fn auto_order_cleanup(suite: &mut HttpTestSuite) {
+    suite.normalize_order();
+    let deps = dependencies(suite);
+    let first_cleanup = suite
+        .steps
+        .iter()
+        .position(|s| s.phase == StepPhase::Cleanup)
+        .unwrap_or(suite.steps.len());
+    let order = suite.execution_order();
+    let pos: HashMap<usize, usize> = order.iter().enumerate().map(|(p, &i)| (i, p)).collect();
+    let mut keyed: Vec<(usize, usize, HttpTestStep)> = suite.steps[first_cleanup..]
+        .iter()
+        .enumerate()
+        .map(|(n, s)| {
+            let target = cleanup_target(suite, &deps, first_cleanup + n);
+            // Target yang dieksekusi lebih akhir → dibersihkan lebih dulu.
+            let key = target
+                .map(|t| usize::MAX / 2 - pos[&t])
+                .unwrap_or(usize::MAX / 2 + 1);
+            (key, n, s.clone())
+        })
+        .collect();
+    keyed.sort_by_key(|(k, n, _)| (*k, *n));
+    suite.steps.truncate(first_cleanup);
+    suite.steps.extend(keyed.into_iter().map(|(_, _, s)| s));
+}
+
 // ─── Runner ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default)]
+/// Status hasil langkah menurut kategori ISTQB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutcome {
+    Passed,
+    /// Response diterima tetapi assertion gagal.
+    Failed,
+    /// Request tidak mendapat response (koneksi, timeout).
+    Error,
+    /// Tidak dijalankan karena prasyarat (variabel, setup) tidak terpenuhi.
+    Blocked,
+    /// Dinonaktifkan atau tidak perlu dijalankan.
+    Skipped,
+}
+
+impl StepOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            StepOutcome::Passed => "Passed",
+            StepOutcome::Failed => "Failed",
+            StepOutcome::Error => "Error",
+            StepOutcome::Blocked => "Blocked",
+            StepOutcome::Skipped => "Skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepResult {
     pub index: usize,
+    #[serde(default)]
+    pub step_id: String,
     pub name: String,
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub phase: StepPhase,
     pub method: String,
     pub url: String,
     pub status: u16,
     pub time_ms: u128,
     pub error: Option<String>,
     pub assertions: Vec<AssertResult>,
+    /// Variabel hasil ekstraksi; nilai rahasia sudah disamarkan.
     pub extracted: Vec<(String, String)>,
-    /// Variabel yang masih `{{…}}` saat request dikirim.
+    /// Variabel yang masih `{{…}}` saat request akan dikirim.
     pub unresolved: Vec<String>,
-    /// Potongan awal body respons.
+    /// Potongan awal body respons (nilai rahasia disamarkan).
     pub body_preview: String,
     pub skipped: bool,
+    #[serde(default)]
+    pub blocked: bool,
+    /// Alasan dilewati/diblokir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Jumlah percobaan ulang (hanya cleanup).
+    #[serde(default)]
+    pub retries: u8,
 }
 
 impl StepResult {
     pub fn passed(&self) -> bool {
-        !self.skipped && self.error.is_none() && self.assertions.iter().all(|a| a.passed)
+        self.outcome() == StepOutcome::Passed
     }
+
+    pub fn outcome(&self) -> StepOutcome {
+        if self.skipped {
+            StepOutcome::Skipped
+        } else if self.blocked {
+            StepOutcome::Blocked
+        } else if self.error.is_some() {
+            StepOutcome::Error
+        } else if self.assertions.iter().all(|a| a.passed) {
+            StepOutcome::Passed
+        } else {
+            StepOutcome::Failed
+        }
+    }
+
+    /// Request benar-benar terkirim dan mendapat response.
+    pub fn executed(&self) -> bool {
+        !self.skipped && !self.blocked && self.error.is_none()
+    }
+
+    fn not_run(index: usize, step: &HttpTestStep, blocked: bool, note: String) -> Self {
+        StepResult {
+            index,
+            step_id: step.id.clone(),
+            name: step.name.clone(),
+            group: step.group.clone(),
+            phase: step.phase,
+            method: step.request.method.label().to_string(),
+            url: crate::http_ai::redact_url(&step.request.url),
+            skipped: !blocked,
+            blocked,
+            note: Some(note),
+            ..Default::default()
+        }
+    }
+}
+
+/// Data uji yang mungkin tertinggal di server setelah run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Residue {
+    /// Langkah yang membuat data.
+    pub step_index: usize,
+    pub step_name: String,
+    pub method: String,
+    pub url: String,
+    /// Variabel hasil ekstraksi langkah pembuat (mis. id), disamarkan bila rahasia.
+    pub ids: Vec<(String, String)>,
+    pub reason: String,
+}
+
+/// Ringkasan akhir satu run.
+#[derive(Debug, Clone, Default)]
+pub struct RunSummary {
+    pub cancelled: bool,
+    pub aborted: bool,
+    pub results: Vec<StepResult>,
+    pub residue: Vec<Residue>,
 }
 
 #[derive(Debug)]
 pub enum TestEvent {
     StepStarted(usize),
     StepFinished(Box<StepResult>),
-    Finished { cancelled: bool },
+    /// Fase cleanup dimulai (dipakai UI untuk label kemajuan).
+    CleanupStarted,
+    Finished(Box<RunSummary>),
 }
 
 pub struct TestRunHandle {
     pub rx: mpsc::Receiver<TestEvent>,
     cancel: Arc<AtomicBool>,
+    abort: Arc<AtomicBool>,
 }
 
 impl TestRunHandle {
+    /// Hentikan langkah Setup/Test; langkah Cleanup tetap dijalankan.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Hentikan seketika, termasuk cleanup (data uji bisa tertinggal).
+    pub fn abort(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.abort.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelling(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// Body JSON dengan nilai kunci sensitif (token, password, …) disamarkan.
+pub fn redact_body(body: &str) -> String {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                for (k, val) in map.iter_mut() {
+                    if sensitive_var(k) {
+                        if !val.is_null() {
+                            *val = Value::String(crate::http_ai::REDACTED.to_string());
+                        }
+                    } else {
+                        walk(val);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<Value>(body) {
+        Ok(mut v) => {
+            walk(&mut v);
+            serde_json::to_string_pretty(&v).unwrap_or_default()
+        }
+        Err(_) => body.to_string(),
+    }
+}
+
+fn sensitive_var(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    crate::http_client_widgets::is_sensitive_key(name)
+        || [
+            "token", "password", "passwd", "secret", "api_key", "apikey", "cookie", "session",
+        ]
+        .iter()
+        .any(|s| lower.contains(s))
+}
+
+/// Nilai variabel untuk ditampilkan/disimpan: rahasia disamarkan.
+pub fn display_var_value(name: &str, value: &str) -> String {
+    if sensitive_var(name) && !value.is_empty() {
+        crate::http_ai::REDACTED.to_string()
+    } else {
+        value.to_string()
     }
 }
 
@@ -459,27 +1282,26 @@ pub fn run_step(
     send: &dyn Fn(RequestSpec) -> HttpClientResponse,
 ) -> StepResult {
     let req = resolve_request(&step.request, vars);
-    let mut unresolved = unresolved_vars(&req.url);
-    for text in [&req.body_text, &req.bearer_token, &req.api_key_value] {
-        for v in unresolved_vars(text) {
-            if !unresolved.contains(&v) {
-                unresolved.push(v);
-            }
-        }
-    }
+    let unresolved: Vec<String> = step_inputs(&HttpTestStep {
+        request: req.clone(),
+        ..Default::default()
+    });
     let spec = RequestSpec::from_saved(&req);
     let url = spec.full_url();
     let resp = send(spec);
     let mut result = StepResult {
         index,
+        step_id: step.id.clone(),
         name: step.name.clone(),
+        group: step.group.clone(),
+        phase: step.phase,
         method: req.method.label().to_string(),
         url: crate::http_ai::redact_url(&url),
         status: resp.status,
         time_ms: resp.time_ms,
         error: resp.error.clone(),
         unresolved,
-        body_preview: crate::repo_scan::truncate_chars(&resp.body, 2_000),
+        body_preview: crate::repo_scan::truncate_chars(&redact_body(&resp.body), 2_000),
         ..Default::default()
     };
     if resp.error.is_some() {
@@ -488,7 +1310,9 @@ pub fn run_step(
     for ex in &step.extract {
         if let Some(v) = read_target(&resp, &ex.from) {
             vars.insert(ex.var.clone(), v.clone());
-            result.extracted.push((ex.var.clone(), v));
+            result
+                .extracted
+                .push((ex.var.clone(), display_var_value(&ex.var, &v)));
         }
     }
     result.assertions = step
@@ -499,58 +1323,692 @@ pub fn run_step(
     result
 }
 
-/// Variabel awal satu run: variabel suite + `run_id` unik.
-pub fn initial_vars(suite: &HttpTestSuite) -> HashMap<String, String> {
-    let mut vars: HashMap<String, String> = suite
-        .variables
-        .iter()
-        .map(|(k, v)| (k.trim().to_string(), v.clone()))
-        .collect();
+/// Variabel awal satu run: variabel environment (`base`), ditimpa variabel
+/// suite yang tidak kosong, plus `run_id` unik.
+pub fn initial_vars_with(
+    suite: &HttpTestSuite,
+    base: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut vars = base.clone();
+    for (k, v) in &suite.variables {
+        let k = k.trim();
+        if k.is_empty() {
+            continue;
+        }
+        // Variabel suite kosong (mis. token) tidak menimpa nilai environment.
+        if v.is_empty() && vars.contains_key(k) {
+            continue;
+        }
+        vars.insert(k.to_string(), v.clone());
+    }
     vars.entry("run_id".to_string())
         .or_insert_with(|| chrono::Utc::now().timestamp_millis().to_string());
     vars
 }
 
-/// Jalankan suite berurutan di thread background. Langkah yang dinonaktifkan
-/// dilewati; langkah yang gagal tidak menghentikan suite (variabel hasil
-/// ekstraksinya saja yang tidak terisi).
-pub fn spawn_run(suite: HttpTestSuite) -> TestRunHandle {
+/// Variabel awal satu run tanpa environment project.
+pub fn initial_vars(suite: &HttpTestSuite) -> HashMap<String, String> {
+    initial_vars_with(suite, &HashMap::new())
+}
+
+/// Variabel yang belum terisi untuk langkah `step` dengan nilai `vars` saat ini.
+fn missing_vars(step: &HttpTestStep, vars: &HashMap<String, String>) -> Vec<String> {
+    step_inputs(step)
+        .into_iter()
+        .filter(|v| !vars.contains_key(v))
+        .collect()
+}
+
+/// Pilihan run: `include` = langkah yang ikut (lihat [`select_for_groups`]),
+/// `None` = semua.
+#[derive(Debug, Clone, Default)]
+pub struct RunScope {
+    pub include: Option<Vec<bool>>,
+    /// Nama group yang dipilih (untuk laporan); kosong = semua.
+    pub groups: Vec<String>,
+}
+
+impl RunScope {
+    pub fn groups(suite: &HttpTestSuite, groups: Vec<String>) -> Self {
+        if groups.is_empty() {
+            return Self::default();
+        }
+        Self {
+            include: Some(select_for_groups(suite, &groups)),
+            groups,
+        }
+    }
+
+    pub fn includes(&self, i: usize) -> bool {
+        self.include
+            .as_ref()
+            .is_none_or(|m| m.get(i).copied().unwrap_or(false))
+    }
+}
+
+/// Jalankan suite secara sinkron. Urutan: Setup → Test (per group) → Cleanup.
+///
+/// - Langkah dengan variabel yang belum terisi (mis. id dari langkah gagal)
+///   ditandai Blocked dan tidak dikirim.
+/// - Setup gagal memblokir langkah berikutnya; `stop_on_failure` memblokir
+///   langkah Test berikutnya setelah satu kegagalan.
+/// - `cancel` menghentikan Setup/Test, tetapi Cleanup **tetap** dijalankan
+///   untuk langkah yang sudah membuat data. Hanya `abort` yang menghentikannya.
+/// - Data yang tidak berhasil dibersihkan dicatat sebagai [`Residue`].
+pub fn run_suite(
+    suite: &HttpTestSuite,
+    scope: &RunScope,
+    mut vars: HashMap<String, String>,
+    send: &dyn Fn(RequestSpec) -> HttpClientResponse,
+    cancel: &AtomicBool,
+    abort: &AtomicBool,
+    emit: &mut dyn FnMut(TestEvent),
+) -> RunSummary {
+    let deps = dependencies(suite);
+    let order: Vec<usize> = suite
+        .execution_order()
+        .into_iter()
+        .filter(|&i| scope.includes(i))
+        .collect();
+    let mut results: Vec<Option<StepResult>> = vec![None; suite.steps.len()];
+    let mut halt: Option<String> = None;
+    let mut cancelled = false;
+    let finish = |i: usize,
+                  r: StepResult,
+                  results: &mut Vec<Option<StepResult>>,
+                  emit: &mut dyn FnMut(TestEvent)| {
+        emit(TestEvent::StepFinished(Box::new(r.clone())));
+        results[i] = Some(r);
+    };
+
+    for &i in order
+        .iter()
+        .filter(|&&i| suite.steps[i].phase != StepPhase::Cleanup)
+    {
+        let step = &suite.steps[i];
+        if cancel.load(Ordering::SeqCst) {
+            cancelled = true;
+        }
+        let r = if !step.enabled {
+            StepResult::not_run(i, step, false, "Disabled".into())
+        } else if cancelled {
+            StepResult::not_run(i, step, false, "Run stopped before this step".into())
+        } else if let Some(reason) = &halt {
+            StepResult::not_run(i, step, true, reason.clone())
+        } else {
+            let missing = missing_vars(step, &vars);
+            if !missing.is_empty() {
+                let mut r = StepResult::not_run(
+                    i,
+                    step,
+                    true,
+                    format!("Missing variable(s): {}", missing.join(", ")),
+                );
+                r.unresolved = missing;
+                r
+            } else {
+                emit(TestEvent::StepStarted(i));
+                run_step(i, step, &mut vars, send)
+            }
+        };
+        if !r.skipped && !r.passed() && halt.is_none() {
+            if step.phase == StepPhase::Setup {
+                halt = Some(format!("Setup step '{}' did not pass", step.name));
+            } else if suite.stop_on_failure {
+                halt = Some(format!("Stopped after failure of '{}'", step.name));
+            }
+        }
+        log::info!(
+            "[HTTP_TESTS] {} step '{}' -> {} {}",
+            suite.name,
+            step.name,
+            r.status,
+            r.outcome().label()
+        );
+        finish(i, r, &mut results, emit);
+    }
+
+    // Fase cleanup: selalu dijalankan kecuali abort.
+    emit(TestEvent::CleanupStarted);
+    let any_mutation_ran = results.iter().flatten().any(|r| {
+        r.executed()
+            && suite
+                .steps
+                .get(r.index)
+                .is_some_and(|s| is_mutating(&s.request.method))
+    });
+    let mut residue: Vec<Residue> = Vec::new();
+    let residue_for = |t: usize, reason: String, results: &[Option<StepResult>]| -> Residue {
+        let r = results[t].as_ref();
+        Residue {
+            step_index: t,
+            step_name: suite.steps[t].name.clone(),
+            method: suite.steps[t].request.method.label().to_string(),
+            url: r.map(|r| r.url.clone()).unwrap_or_default(),
+            ids: r.map(|r| r.extracted.clone()).unwrap_or_default(),
+            reason,
+        }
+    };
+    for &i in order
+        .iter()
+        .filter(|&&i| suite.steps[i].phase == StepPhase::Cleanup)
+    {
+        let step = &suite.steps[i];
+        let target = cleanup_target(suite, &deps, i);
+        let needed = match target {
+            Some(t) => results[t].as_ref().is_some_and(|r| r.executed()),
+            None => any_mutation_ran,
+        };
+        let r = if abort.load(Ordering::SeqCst) {
+            if needed && let Some(t) = target {
+                residue.push(residue_for(
+                    t,
+                    "Run aborted before cleanup".into(),
+                    &results,
+                ));
+            }
+            StepResult::not_run(i, step, true, "Run aborted; cleanup not executed".into())
+        } else if !needed {
+            StepResult::not_run(
+                i,
+                step,
+                false,
+                "Nothing to clean: the data was not created".into(),
+            )
+        } else if !step.enabled {
+            if let Some(t) = target {
+                residue.push(residue_for(
+                    t,
+                    format!("Cleanup step '{}' is disabled", step.name),
+                    &results,
+                ));
+            }
+            StepResult::not_run(i, step, false, "Disabled".into())
+        } else {
+            let missing = missing_vars(step, &vars);
+            if !missing.is_empty() {
+                if let Some(t) = target {
+                    residue.push(residue_for(
+                        t,
+                        format!(
+                            "Cleanup '{}' blocked: missing {}",
+                            step.name,
+                            missing.join(", ")
+                        ),
+                        &results,
+                    ));
+                }
+                let mut r = StepResult::not_run(
+                    i,
+                    step,
+                    true,
+                    format!("Missing variable(s): {}", missing.join(", ")),
+                );
+                r.unresolved = missing;
+                r
+            } else {
+                emit(TestEvent::StepStarted(i));
+                let mut r = run_step(i, step, &mut vars, send);
+                // Satu kali coba ulang untuk gangguan jaringan sesaat.
+                if r.error.is_some() && !abort.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    r = run_step(i, step, &mut vars, send);
+                    r.retries = 1;
+                }
+                if !r.passed()
+                    && let Some(t) = target
+                {
+                    let why = r
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| format!("HTTP {} / assertion failed", r.status));
+                    residue.push(residue_for(
+                        t,
+                        format!("Cleanup '{}' failed: {why}", step.name),
+                        &results,
+                    ));
+                }
+                r
+            }
+        };
+        finish(i, r, &mut results, emit);
+    }
+    // Data yang dibuat tanpa langkah cleanup sama sekali.
+    let covered: std::collections::HashSet<usize> = (0..suite.steps.len())
+        .filter_map(|i| cleanup_target(suite, &deps, i))
+        .collect();
+    for (t, step) in suite.steps.iter().enumerate() {
+        if creates_data(step)
+            && !covered.contains(&t)
+            && results[t].as_ref().is_some_and(|r| r.executed())
+        {
+            residue.push(residue_for(
+                t,
+                "No cleanup step removes this data".into(),
+                &results,
+            ));
+        }
+    }
+    residue.sort_by_key(|r| r.step_index);
+    residue.dedup_by_key(|r| r.step_index);
+
+    RunSummary {
+        cancelled,
+        aborted: abort.load(Ordering::SeqCst),
+        results: order.iter().filter_map(|&i| results[i].clone()).collect(),
+        residue,
+    }
+}
+
+/// Jalankan suite di thread background dengan variabel awal `vars`
+/// (lihat [`initial_vars_with`]).
+pub fn spawn_run(
+    suite: HttpTestSuite,
+    scope: RunScope,
+    vars: HashMap<String, String>,
+) -> TestRunHandle {
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
-    let flag = cancel.clone();
+    let abort = Arc::new(AtomicBool::new(false));
+    let (c, a) = (cancel.clone(), abort.clone());
     std::thread::spawn(move || {
-        let mut vars = initial_vars(&suite);
         let send = crate::http_send::send_blocking;
-        for (i, step) in suite.steps.iter().enumerate() {
-            if flag.load(Ordering::SeqCst) {
-                let _ = tx.send(TestEvent::Finished { cancelled: true });
-                return;
-            }
-            if !step.enabled {
-                let _ = tx.send(TestEvent::StepFinished(Box::new(StepResult {
-                    index: i,
-                    name: step.name.clone(),
-                    method: step.request.method.label().to_string(),
-                    skipped: true,
-                    ..Default::default()
-                })));
-                continue;
-            }
-            let _ = tx.send(TestEvent::StepStarted(i));
-            let result = run_step(i, step, &mut vars, &send);
-            log::info!(
-                "[HTTP_TESTS] {} step {} '{}' -> {} ({})",
-                suite.name,
-                i + 1,
-                step.name,
-                result.status,
-                if result.passed() { "pass" } else { "fail" }
-            );
-            let _ = tx.send(TestEvent::StepFinished(Box::new(result)));
-        }
-        let _ = tx.send(TestEvent::Finished { cancelled: false });
+        let mut emit = |e: TestEvent| {
+            let _ = tx.send(e);
+        };
+        let summary = run_suite(&suite, &scope, vars, &send, &c, &a, &mut emit);
+        let _ = tx.send(TestEvent::Finished(Box::new(summary)));
     });
-    TestRunHandle { rx, cancel }
+    TestRunHandle { rx, cancel, abort }
+}
+
+// ─── Riwayat run ────────────────────────────────────────────────────────────
+
+/// Pemeriksaan sisa data uji langsung di database setelah cleanup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DbResidueCheck {
+    pub connection: String,
+    pub table: String,
+    /// Baris yang masih memuat `run_id`; `None` bila tidak bisa diperiksa.
+    pub rows: Option<u64>,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Catatan satu run untuk laporan dan bukti validasi.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestRun {
+    pub run_id: String,
+    pub suite_id: String,
+    pub suite_name: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Group yang dipilih; kosong = seluruh suite.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub started_at: String,
+    pub finished_at: String,
+    #[serde(default)]
+    pub duration_ms: u128,
+    /// User OS yang menjalankan run.
+    #[serde(default)]
+    pub operator: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub app_version: String,
+    /// SHA-256 definisi suite saat dijalankan (identitas konfigurasi yang diuji).
+    #[serde(default)]
+    pub suite_fingerprint: String,
+    /// Origin server yang dihubungi.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
+    pub aborted: bool,
+    /// Hasil per langkah dalam urutan eksekusi.
+    pub results: Vec<StepResult>,
+    #[serde(default)]
+    pub residue: Vec<Residue>,
+    #[serde(default)]
+    pub db_checks: Vec<DbResidueCheck>,
+    #[serde(default)]
+    pub pass_threshold: f64,
+}
+
+/// Batas jumlah run tersimpan per suite.
+const MAX_RUNS_PER_SUITE: usize = 50;
+
+fn runs_dir() -> std::path::PathBuf {
+    suites_dir().join("runs")
+}
+
+/// SHA-256 (hex) dari definisi suite.
+pub fn suite_fingerprint(suite: &HttpTestSuite) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(&(&suite.steps, &suite.variables)).unwrap_or_default();
+    hex::encode(Sha256::digest(&json))
+}
+
+/// Origin unik (`scheme://host`) dari URL hasil run.
+pub fn run_targets(results: &[StepResult]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in results {
+        let Some((scheme, rest)) = r.url.split_once("://") else {
+            continue;
+        };
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        if host.is_empty() || host.contains("{{") {
+            continue;
+        }
+        let o = format!("{scheme}://{host}");
+        if !out.contains(&o) {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// User OS dan nama host untuk jejak audit.
+pub fn operator_and_host() -> (String, String) {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default();
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(system_hostname);
+    (user, host)
+}
+
+/// Nama host dari perintah `hostname` (macOS tidak mengekspor `HOSTNAME`).
+#[cfg(not(target_os = "ios"))]
+fn system_hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "ios")]
+fn system_hostname() -> String {
+    String::new()
+}
+
+impl TestRun {
+    /// Bangun catatan run dari ringkasan runner.
+    pub fn from_summary(
+        suite: &HttpTestSuite,
+        scope: &RunScope,
+        run_id: String,
+        started: chrono::DateTime<chrono::Utc>,
+        summary: RunSummary,
+    ) -> Self {
+        let finished = chrono::Utc::now();
+        let (operator, host) = operator_and_host();
+        Self {
+            run_id,
+            suite_id: suite.id.clone(),
+            suite_name: suite.name.clone(),
+            project_id: suite.project_id.clone(),
+            groups: scope.groups.clone(),
+            started_at: started.to_rfc3339(),
+            finished_at: finished.to_rfc3339(),
+            duration_ms: (finished - started).num_milliseconds().max(0) as u128,
+            operator,
+            host,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            suite_fingerprint: suite_fingerprint(suite),
+            targets: run_targets(&summary.results),
+            cancelled: summary.cancelled,
+            aborted: summary.aborted,
+            results: summary.results,
+            residue: summary.residue,
+            pass_threshold: suite.pass_threshold(),
+            ..Default::default()
+        }
+    }
+}
+
+pub fn save_run(run: &TestRun) -> Result<(), String> {
+    save_run_in(&runs_dir(), run)
+}
+
+pub fn save_run_in(dir: &std::path::Path, run: &TestRun) -> Result<(), String> {
+    let dir = dir.join(safe_file_id(&run.suite_id));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.json", safe_file_id(&run.run_id)));
+    let json = serde_json::to_string_pretty(run).map_err(|e| e.to_string())?;
+    crate::directory::write_file_atomically(&path, json.as_bytes())
+        .map_err(|e| format!("Could not save test run: {e}"))?;
+    // Buang run tertua di atas batas (nama file = run_id berbasis waktu).
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|it| it.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.extension().and_then(|e| e.to_str()) == Some("json"));
+    if files.len() > MAX_RUNS_PER_SUITE {
+        files.sort();
+        for old in &files[..files.len() - MAX_RUNS_PER_SUITE] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    Ok(())
+}
+
+/// Run suite, terbaru lebih dulu, maksimal `limit`.
+pub fn load_runs(suite_id: &str, limit: usize) -> Vec<TestRun> {
+    load_runs_in(&runs_dir(), suite_id, limit)
+}
+
+pub fn load_runs_in(dir: &std::path::Path, suite_id: &str, limit: usize) -> Vec<TestRun> {
+    let Ok(entries) = std::fs::read_dir(dir.join(safe_file_id(suite_id))) else {
+        return Vec::new();
+    };
+    let mut runs: Vec<TestRun> = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter_map(|e| {
+            let bytes = std::fs::read(e.path()).ok()?;
+            serde_json::from_slice::<TestRun>(&bytes)
+                .map_err(|err| log::warn!("[HTTP_TESTS] skip run {}: {err}", e.path().display()))
+                .ok()
+        })
+        .collect();
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.truncate(limit);
+    runs
+}
+
+// ─── Tab HTTP client untuk satu langkah ─────────────────────────────────────
+
+/// Penanda bahwa tab HTTP client sedang mengedit satu langkah suite. Simpan
+/// (Cmd+S) menulis request kembali ke langkah, bukan ke collection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestStepRef {
+    pub suite_id: String,
+    pub step_id: String,
+    /// Label untuk banner, mis. "Procure to pay › Create PO".
+    pub label: String,
+    /// Variabel run (suite + environment + hasil run terakhir) untuk mengirim
+    /// request dari tab tersebut.
+    pub vars: HashMap<String, String>,
+}
+
+// ─── Verifikasi sisa data di database ───────────────────────────────────────
+
+/// Koneksi database yang diperiksa (id lokal + nama untuk laporan).
+#[derive(Debug, Clone)]
+pub struct DbCheckTarget {
+    pub connection_id: i64,
+    pub connection_name: String,
+}
+
+/// Batas tabel dan kolom per pemeriksaan agar query tetap ringan.
+const DB_CHECK_MAX_TABLES: usize = 40;
+const DB_CHECK_MAX_COLUMNS: usize = 24;
+
+fn quote_ident(kind: &str, name: &str) -> String {
+    match kind {
+        "MySQL" => format!("`{}`", name.replace('`', "``")),
+        "MsSQL" => format!("[{}]", name.replace(']', "]]")),
+        _ => format!("\"{}\"", name.replace('"', "\"\"")),
+    }
+}
+
+/// `schema.table` → identifier berkutip per bagian.
+fn quote_table(kind: &str, table: &str) -> String {
+    table
+        .split('.')
+        .map(|p| quote_ident(kind, p))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn table_matches(cached: &str, wanted: &str) -> bool {
+    let c = cached.to_ascii_lowercase();
+    let w = wanted.trim().to_ascii_lowercase();
+    c == w || c.rsplit('.').next() == Some(w.as_str()) || w.rsplit('.').next() == Some(c.as_str())
+}
+
+/// SQL hitung baris yang kolom teksnya memuat `run_id`.
+pub fn residue_count_sql(
+    kind: &str,
+    table: &str,
+    columns: &[String],
+    run_id: &str,
+) -> Option<String> {
+    if columns.is_empty() || run_id.is_empty() || !run_id.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let cond: Vec<String> = columns
+        .iter()
+        .map(|c| format!("{} LIKE '%{run_id}%'", quote_ident(kind, c)))
+        .collect();
+    Some(format!(
+        "SELECT COUNT(*) AS n FROM {} WHERE {}",
+        quote_table(kind, table),
+        cond.join(" OR ")
+    ))
+}
+
+/// Cari baris yang masih memuat `run_id` di tabel `tables` pada koneksi
+/// `targets`. Hanya query baca (lewat gerbang read-only agent). Tabel yang
+/// tidak ada di cache skema koneksi tersebut dilewati.
+pub async fn check_db_residue(
+    session: &crate::agent::core::HeadlessSession,
+    targets: &[DbCheckTarget],
+    tables: &[String],
+    run_id: &str,
+) -> Vec<DbResidueCheck> {
+    let mut out = Vec::new();
+    if tables.is_empty() || targets.is_empty() {
+        return out;
+    }
+    let kinds: HashMap<i64, String> = session
+        .list_connections()
+        .await
+        .map(|l| l.into_iter().map(|c| (c.id, c.kind)).collect())
+        .unwrap_or_default();
+    for t in targets {
+        let Some(kind) = kinds.get(&t.connection_id).cloned() else {
+            continue;
+        };
+        if !matches!(kind.as_str(), "MySQL" | "PostgreSQL" | "SQLite" | "MsSQL") {
+            continue;
+        }
+        let cached: Vec<(String, String)> = sqlx::query_as(
+            "SELECT DISTINCT database_name, table_name FROM table_cache \
+             WHERE connection_id = ? AND table_type = 'table'",
+        )
+        .bind(t.connection_id)
+        .fetch_all(session.cache_pool())
+        .await
+        .unwrap_or_default();
+        for (db, table) in cached
+            .into_iter()
+            .filter(|(_, name)| tables.iter().any(|w| table_matches(name, w)))
+            .take(DB_CHECK_MAX_TABLES)
+        {
+            let cols: Vec<(String, String)> = sqlx::query_as(
+                "SELECT column_name, data_type FROM column_cache \
+                 WHERE connection_id = ? AND database_name = ? AND table_name = ? \
+                 ORDER BY ordinal_position",
+            )
+            .bind(t.connection_id)
+            .bind(&db)
+            .bind(&table)
+            .fetch_all(session.cache_pool())
+            .await
+            .unwrap_or_default();
+            let text_cols: Vec<String> = cols
+                .into_iter()
+                .filter(|(_, ty)| {
+                    let ty = ty.to_ascii_lowercase();
+                    ["char", "text", "string", "clob"]
+                        .iter()
+                        .any(|k| ty.contains(k))
+                })
+                .map(|(c, _)| c)
+                .take(DB_CHECK_MAX_COLUMNS)
+                .collect();
+            let mut check = DbResidueCheck {
+                connection: t.connection_name.clone(),
+                table: table.clone(),
+                columns: text_cols.clone(),
+                ..Default::default()
+            };
+            match residue_count_sql(&kind, &table, &text_cols, run_id) {
+                None => check.error = Some("No text columns to search".into()),
+                Some(sql) => match session
+                    .run_query(t.connection_id, &sql, Some(&db), Some(1))
+                    .await
+                {
+                    Ok(r) => {
+                        check.rows = r
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|v| v.trim().parse::<u64>().ok());
+                        if check.rows.is_none() {
+                            check.error = Some("Unexpected result".into());
+                        }
+                    }
+                    Err(e) => check.error = Some(e.to_string()),
+                },
+            }
+            out.push(check);
+        }
+    }
+    out
+}
+
+/// Tabel yang disentuh langkah pengubah data yang benar-benar dijalankan.
+pub fn touched_tables(suite: &HttpTestSuite, results: &[StepResult]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in results.iter().filter(|r| r.executed()) {
+        let Some(step) = suite.steps.iter().find(|s| s.id == r.step_id) else {
+            continue;
+        };
+        if !is_mutating(&step.request.method) {
+            continue;
+        }
+        for t in &step.request.tables {
+            if !out.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                out.push(t.clone());
+            }
+        }
+    }
+    out
 }
 
 // ─── Generate dengan AI ─────────────────────────────────────────────────────
@@ -682,37 +2140,140 @@ pub fn catalog_text(catalogs: &[FolderCatalog]) -> String {
     out
 }
 
+/// Aturan bersama semua prompt integration test.
+const TEST_RULES: &str = "Rules:\n\
+- Order matters: each step may only use variables provided by an earlier step's `extract` \
+  (ids, tokens) or by `variables`. Chain the steps so data flows from one to the next.\n\
+- Give every step a short unique `id` (s1, s2, ...), a `phase` and, when the system has \
+  business areas, a `group` (for example an ERP: \"Purchasing\", \"Inventory\", \"Plant\", \
+  \"Sales\", \"Finance\"). Groups run in the order they first appear.\n\
+- `phase` is `setup` (login, master data the tests need), `test` (the behaviour under test, \
+  including negative cases such as validation errors, not found and unauthorized) or \
+  `cleanup`.\n\
+- Every step that creates data MUST have a `cleanup` step that removes it, with \
+  `cleanup_for` set to the id of the creating step. Put cleanup steps last, in reverse order \
+  of creation (remove dependent records first). Test data must never be left behind.\n\
+- Make created data recognisable and unique: include `{{run_id}}` in names, codes and \
+  emails (for example \"PO-TEST-{{run_id}}\").\n\
+- Use `{{base_url_…}}` variables from the catalog for every URL; never hardcode hosts.\n\
+- Auth tokens are variables such as `{{token}}`; add them to `variables` with an empty value \
+  unless a login step extracts them.\n\
+- Assertion `target` is `status`, `time_ms`, `body`, `header:<Name>` or \
+  `json:$.path.to[0].field`. `op` is equals, not_equals, contains, not_contains, exists, \
+  not_exists, less_than, greater_than or matches (regex). Every step needs at least one \
+  assertion.\n\
+- `request_id` refers to the catalog id the step is based on, when there is one.\n\
+- Never include real secrets.\n";
+
+const STEP_EXAMPLE: &str = "{\"id\":\"s2\",\"name\":\"Create purchase order\",\"phase\":\"test\",\
+\"group\":\"Purchasing\",\"request_id\":\"sr_1\",\"method\":\"POST\",\
+\"url\":\"{{base_url_erp}}/purchase-orders\",\"headers\":{\"Content-Type\":\"application/json\"},\
+\"query\":{},\"auth\":\"bearer\",\"body\":{\"number\":\"PO-TEST-{{run_id}}\",\
+\"vendor_id\":\"{{vendor_id}}\"},\"extract\":{\"po_id\":\"json:$.id\"},\
+\"assert\":[{\"target\":\"status\",\"op\":\"equals\",\"value\":\"201\"},\
+{\"target\":\"json:$.id\",\"op\":\"exists\"}]},\
+{\"id\":\"s9\",\"name\":\"Delete purchase order\",\"phase\":\"cleanup\",\"group\":\"Purchasing\",\
+\"cleanup_for\":\"s2\",\"method\":\"DELETE\",\"url\":\"{{base_url_erp}}/purchase-orders/{{po_id}}\",\
+\"auth\":\"bearer\",\"assert\":[{\"target\":\"status\",\"op\":\"less_than\",\"value\":\"300\"}]}";
+
 pub fn build_test_prompts(catalogs: &[FolderCatalog], instructions: &str) -> (String, String) {
-    let system = String::from(
+    let system = format!(
         "You design end-to-end integration tests for HTTP APIs. The APIs may come from several \
          services; design flows that cross them when the data connects (ids created by one \
-         service used by another, shared tables).\n\
-         Rules:\n\
-         - Build realistic scenarios: create data, read it back, update, list/search, negative \
-           cases (validation errors, not found, unauthorized) and clean up what the suite created.\n\
-         - Use `{{base_url_…}}` variables from the catalog for every URL; never hardcode hosts.\n\
-         - Use `extract` to pass values (ids, tokens) between steps as `{{variable}}`.\n\
-         - Auth tokens are variables such as `{{token}}`; add them to `variables` with an empty \
-           value unless a login step extracts them.\n\
-         - Assertion `target` is `status`, `time_ms`, `body`, `header:<Name>` or \
-           `json:$.path.to[0].field`. `op` is equals, not_equals, contains, not_contains, \
-           exists, not_exists, less_than, greater_than or matches (regex).\n\
-         - `request_id` refers to the catalog id the step is based on, when there is one.\n\
-         - Never include real secrets.\n\
+         service used by another, shared tables).\n{TEST_RULES}\
          Reply with ONLY one JSON object, no prose and no markdown fence:\n\
-         {\"suites\":[{\"name\":\"Checkout flow\",\"description\":\"…\",\"variables\":\
-         {\"token\":\"\"},\"steps\":[{\"name\":\"Create user\",\"request_id\":\"sr_1\",\
-         \"method\":\"POST\",\"url\":\"{{base_url_shop}}/users\",\"headers\":\
-         {\"Content-Type\":\"application/json\"},\"query\":{},\"auth\":\"bearer\",\
-         \"body\":{\"email\":\"test+{{run_id}}@example.com\"},\"extract\":{\"user_id\":\
-         \"json:$.id\"},\"assert\":[{\"target\":\"status\",\"op\":\"equals\",\"value\":\"201\"},\
-         {\"target\":\"json:$.id\",\"op\":\"exists\"}]}]}]}\n\
-         The variable `{{run_id}}` is always available and unique per run.\n",
+         {{\"suites\":[{{\"name\":\"Procure to pay\",\"description\":\"…\",\"variables\":\
+         {{\"token\":\"\"}},\"steps\":[{STEP_EXAMPLE}]}}]}}\n\
+         The variable `{{{{run_id}}}}` is always available and unique per run.\n"
     );
     let mut user = String::from("Endpoint catalog:\n");
     user.push_str(&catalog_text(catalogs));
     if !instructions.trim().is_empty() {
         user.push_str("\nFocus: ");
+        user.push_str(instructions.trim());
+        user.push('\n');
+    }
+    (system, user)
+}
+
+/// Mode generate langkah untuk suite yang sudah ada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepGenMode {
+    /// Tambah langkah baru (mis. satu group) di belakang langkah yang ada.
+    Append,
+    /// Buat langkah cleanup untuk data yang belum dibersihkan.
+    Cleanup,
+}
+
+/// Ringkasan suite untuk prompt: langkah, variabel yang tersedia, group.
+pub fn suite_outline(suite: &HttpTestSuite) -> String {
+    let mut out = format!("Suite \"{}\"\n", suite.name);
+    let groups = suite.group_names();
+    if !groups.is_empty() {
+        out.push_str(&format!("Groups in order: {}\n", groups.join(", ")));
+    }
+    let vars: Vec<&str> = suite.variables.iter().map(|(k, _)| k.as_str()).collect();
+    if !vars.is_empty() {
+        out.push_str(&format!("Variables: {}\n", vars.join(", ")));
+    }
+    for i in suite.execution_order() {
+        let s = &suite.steps[i];
+        out.push_str(&format!(
+            "- id={} [{}{}] {} {} — {}",
+            s.id,
+            s.phase.label().to_ascii_lowercase(),
+            if s.group.is_empty() {
+                String::new()
+            } else {
+                format!(", group {}", s.group)
+            },
+            s.request.method.label(),
+            s.request.url,
+            s.name
+        ));
+        let outs = step_outputs(s);
+        if !outs.is_empty() {
+            out.push_str(&format!(" (extracts {})", outs.join(", ")));
+        }
+        if let Some(t) = &s.cleanup_for {
+            out.push_str(&format!(" (cleans {t})"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Prompt untuk menambah langkah ke suite yang ada.
+pub fn build_step_prompts(
+    catalogs: &[FolderCatalog],
+    suite: &HttpTestSuite,
+    instructions: &str,
+    mode: StepGenMode,
+) -> (String, String) {
+    let task = match mode {
+        StepGenMode::Append => {
+            "Add new steps to an existing integration test suite. Reuse variables and ids the \
+             existing steps already extract instead of creating the same data again. New step \
+             ids must not collide with existing ids."
+        }
+        StepGenMode::Cleanup => {
+            "Add only the missing `cleanup` steps for the existing suite: every step that \
+             creates data and has no cleanup yet needs one, linked with `cleanup_for`. Do not \
+             repeat existing steps."
+        }
+    };
+    let system = format!(
+        "You design end-to-end integration tests for HTTP APIs. {task}\n{TEST_RULES}\
+         Reply with ONLY one JSON object, no prose and no markdown fence:\n\
+         {{\"variables\":{{}},\"steps\":[{STEP_EXAMPLE}]}}\n\
+         The variable `{{{{run_id}}}}` is always available and unique per run.\n"
+    );
+    let mut user = String::from("Existing suite:\n");
+    user.push_str(&suite_outline(suite));
+    user.push_str("\nEndpoint catalog:\n");
+    user.push_str(&catalog_text(catalogs));
+    if !instructions.trim().is_empty() {
+        user.push_str("\nRequest: ");
         user.push_str(instructions.trim());
         user.push('\n');
     }
@@ -868,12 +2429,19 @@ fn parse_step(v: &Value, catalogs: &[FolderCatalog]) -> Option<HttpTestStep> {
                 .collect()
         })
         .unwrap_or_default();
+    let phase = StepPhase::parse(&s("phase"));
     Some(HttpTestStep {
+        id: sanitize_step_id(&s("id")),
         name: if req.name.is_empty() {
             format!("{} {}", req.method.label(), req.url)
         } else {
             req.name.clone()
         },
+        phase,
+        group: s("group"),
+        cleanup_for: Some(sanitize_step_id(&s("cleanup_for")))
+            .filter(|x| !x.is_empty() && phase == StepPhase::Cleanup),
+        notes: s("notes"),
         request: req,
         extract,
         assertions,
@@ -930,7 +2498,7 @@ pub fn parse_tests_reply(
             }
         }
         variables.retain(|(k, _)| k != "run_id");
-        out.push(HttpTestSuite {
+        let mut suite = HttpTestSuite {
             id: crate::http_collection::unique_id("suite"),
             name: sv
                 .get("name")
@@ -946,12 +2514,108 @@ pub fn parse_tests_reply(
             variables,
             steps,
             created_at: now.clone(),
-        });
+            updated_at: now.clone(),
+            ..Default::default()
+        };
+        suite.ensure_ids();
+        suite.normalize_order();
+        out.push(suite);
     }
     if out.is_empty() {
         return Err("The AI returned no test steps".into());
     }
     Ok(out)
+}
+
+/// Urai jawaban AI berisi `steps` (dan opsional `variables`) untuk suite yang ada.
+pub fn parse_steps_reply(
+    text: &str,
+    catalogs: &[FolderCatalog],
+) -> Result<(Vec<HttpTestStep>, Vec<(String, String)>), String> {
+    let v: Value = crate::repo_scan::slice_between(text, '{', '}')
+        .and_then(|s| serde_json::from_str(s).ok())
+        .ok_or_else(|| {
+            format!(
+                "AI reply is not JSON: {}",
+                crate::repo_scan::truncate_chars(text.trim(), 200)
+            )
+        })?;
+    let steps_v = v
+        .get("steps")
+        .and_then(Value::as_array)
+        .or_else(|| {
+            v.get("suites")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|s| s.get("steps"))
+                .and_then(Value::as_array)
+        })
+        .ok_or_else(|| "AI reply has no \"steps\"".to_string())?;
+    let steps: Vec<HttpTestStep> = steps_v
+        .iter()
+        .filter_map(|s| parse_step(s, catalogs))
+        .collect();
+    if steps.is_empty() {
+        return Err("The AI returned no test steps".into());
+    }
+    let mut vars = obj_pairs(v.get("variables"));
+    for (k, val) in vars.iter_mut() {
+        if sensitive_var(k) {
+            val.clear();
+        }
+    }
+    vars.retain(|(k, _)| k != "run_id");
+    Ok((steps, vars))
+}
+
+/// Gabungkan langkah hasil AI ke suite. Id yang bentrok diganti, rujukan
+/// `cleanup_for` ikut dipetakan. Mengembalikan jumlah langkah yang ditambah.
+pub fn merge_generated_steps(
+    suite: &mut HttpTestSuite,
+    steps: Vec<HttpTestStep>,
+    vars: Vec<(String, String)>,
+) -> usize {
+    let mut remap: HashMap<String, String> = HashMap::new();
+    let mut added = Vec::new();
+    for mut step in steps {
+        let wanted = step.id.clone();
+        if wanted.is_empty()
+            || suite.steps.iter().any(|s| s.id == wanted)
+            || added.iter().any(|s: &HttpTestStep| s.id == wanted)
+        {
+            let mut n = suite.steps.len() + added.len() + 1;
+            loop {
+                let id = format!("s{n}");
+                if !suite.steps.iter().any(|s| s.id == id) && !added.iter().any(|s| s.id == id) {
+                    step.id = id;
+                    break;
+                }
+                n += 1;
+            }
+            if !wanted.is_empty() {
+                remap.insert(wanted, step.id.clone());
+            }
+        }
+        added.push(step);
+    }
+    for step in &mut added {
+        if let Some(t) = step.cleanup_for.clone()
+            && let Some(new) = remap.get(&t)
+        {
+            step.cleanup_for = Some(new.clone());
+        }
+    }
+    let count = added.len();
+    suite.steps.extend(added);
+    for (k, v) in vars {
+        if !suite.variables.iter().any(|(x, _)| *x == k) {
+            suite.variables.push((k, v));
+        }
+    }
+    suite.ensure_ids();
+    suite.normalize_order();
+    suite.touch();
+    count
 }
 
 pub type TestGenEvent = crate::repo_scan::RepoJobEvent<Vec<HttpTestSuite>>;
@@ -1023,6 +2687,69 @@ pub fn spawn_generate(
         let _ = tx.send(RepoJobEvent::Finished(result));
     });
     TestGenHandle { rx, cancel }
+}
+
+pub type StepGenEvent = crate::repo_scan::RepoJobEvent<(Vec<HttpTestStep>, Vec<(String, String)>)>;
+
+pub struct StepGenHandle {
+    pub rx: mpsc::Receiver<StepGenEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl StepGenHandle {
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Generate langkah tambahan untuk suite yang ada di background.
+pub fn spawn_step_generate(
+    backend: crate::ai_assistant::ChatBackend,
+    backend_label: String,
+    catalogs: Vec<FolderCatalog>,
+    suite: HttpTestSuite,
+    instructions: String,
+    mode: StepGenMode,
+) -> StepGenHandle {
+    use crate::agent::harness::ProgressStatus;
+    use crate::repo_scan::{RepoJobEvent, step};
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    std::thread::spawn(move || {
+        let label = match mode {
+            StepGenMode::Append => format!("Asking {backend_label} for new test steps"),
+            StepGenMode::Cleanup => format!("Asking {backend_label} for cleanup steps"),
+        };
+        let _ = tx.send(step(1, label.clone(), None, ProgressStatus::Active));
+        let (system, user) = build_step_prompts(&catalogs, &suite, &instructions, mode);
+        let result = crate::repo_scan::ask_ai(
+            &backend,
+            system,
+            user,
+            crate::ai_assistant::ChatWorkspace::default(),
+            &tx,
+            &flag,
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|text| parse_steps_reply(&text, &catalogs))
+        .map(|(mut steps, vars)| {
+            if mode == StepGenMode::Cleanup {
+                steps.retain(|s| s.phase == StepPhase::Cleanup);
+            }
+            (steps, vars)
+        });
+        let (status, detail) = match &result {
+            Ok((s, _)) => (ProgressStatus::Done, format!("{} step(s)", s.len())),
+            Err(e) => (ProgressStatus::Error, e.clone()),
+        };
+        let _ = tx.send(step(1, label, Some(detail), status));
+        if let Err(e) = &result {
+            log::warn!("[HTTP_TESTS] step generation failed: {e}");
+        }
+        let _ = tx.send(RepoJobEvent::Finished(result));
+    });
+    StepGenHandle { rx, cancel }
 }
 
 #[cfg(test)]
@@ -1119,6 +2846,7 @@ mod tests {
             }],
             enabled: true,
             request_id: None,
+            ..Default::default()
         };
         let mut v = vars(&[("base", "http://h"), ("id", "3")]);
         let seen = std::cell::RefCell::new(String::new());
@@ -1237,5 +2965,518 @@ mod tests {
         let v = initial_vars(&s);
         assert_eq!(v.get("base").map(String::as_str), Some("x"));
         assert!(v.contains_key("run_id"));
+    }
+
+    // ─── Relasi, group, cleanup ─────────────────────────────────────────────
+
+    fn step(
+        id: &str,
+        group: &str,
+        phase: StepPhase,
+        method: HttpMethod,
+        url: &str,
+    ) -> HttpTestStep {
+        HttpTestStep {
+            id: id.into(),
+            name: id.into(),
+            group: group.into(),
+            phase,
+            request: SavedRequest {
+                method,
+                url: url.into(),
+                ..Default::default()
+            },
+            assertions: vec![Assertion {
+                target: "status".into(),
+                op: AssertOp::LessThan,
+                value: "300".into(),
+            }],
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn extract(mut s: HttpTestStep, var: &str) -> HttpTestStep {
+        s.extract.push(Extract {
+            var: var.into(),
+            from: "json:$.id".into(),
+        });
+        s
+    }
+
+    /// ERP mini: login (setup) → Purchasing (vendor, PO) → Plant (receipt
+    /// memakai PO) → cleanup.
+    fn erp_suite() -> HttpTestSuite {
+        let mut s = HttpTestSuite {
+            id: "erp".into(),
+            name: "ERP".into(),
+            groups: vec!["Purchasing".into(), "Plant".into()],
+            variables: vec![("base".into(), "http://erp".into())],
+            steps: vec![
+                {
+                    let mut l = step(
+                        "login",
+                        "",
+                        StepPhase::Setup,
+                        HttpMethod::POST,
+                        "{{base}}/login",
+                    );
+                    l.extract.push(Extract {
+                        var: "token".into(),
+                        from: "json:$.token".into(),
+                    });
+                    l
+                },
+                extract(
+                    step(
+                        "vendor",
+                        "Purchasing",
+                        StepPhase::Test,
+                        HttpMethod::POST,
+                        "{{base}}/vendors?t={{token}}",
+                    ),
+                    "vendor_id",
+                ),
+                extract(
+                    step(
+                        "po",
+                        "Purchasing",
+                        StepPhase::Test,
+                        HttpMethod::POST,
+                        "{{base}}/po?v={{vendor_id}}",
+                    ),
+                    "po_id",
+                ),
+                extract(
+                    step(
+                        "receipt",
+                        "Plant",
+                        StepPhase::Test,
+                        HttpMethod::POST,
+                        "{{base}}/receipts?po={{po_id}}",
+                    ),
+                    "receipt_id",
+                ),
+                {
+                    let mut c = step(
+                        "del_receipt",
+                        "Plant",
+                        StepPhase::Cleanup,
+                        HttpMethod::DELETE,
+                        "{{base}}/receipts/{{receipt_id}}",
+                    );
+                    c.cleanup_for = Some("receipt".into());
+                    c
+                },
+                {
+                    let mut c = step(
+                        "del_po",
+                        "Purchasing",
+                        StepPhase::Cleanup,
+                        HttpMethod::DELETE,
+                        "{{base}}/po/{{po_id}}",
+                    );
+                    c.cleanup_for = Some("po".into());
+                    c
+                },
+                {
+                    let mut c = step(
+                        "del_vendor",
+                        "Purchasing",
+                        StepPhase::Cleanup,
+                        HttpMethod::DELETE,
+                        "{{base}}/vendors/{{vendor_id}}",
+                    );
+                    c.cleanup_for = Some("vendor".into());
+                    c
+                },
+            ],
+            ..Default::default()
+        };
+        s.ensure_ids();
+        s
+    }
+
+    fn ok_json(id: &str) -> HttpClientResponse {
+        resp(201, &format!(r#"{{"id":"{id}","token":"secret-token"}}"#))
+    }
+
+    fn run_with(
+        suite: &HttpTestSuite,
+        scope: &RunScope,
+        send: &dyn Fn(RequestSpec) -> HttpClientResponse,
+        cancel_after: Option<usize>,
+        abort: bool,
+    ) -> (RunSummary, Vec<String>) {
+        let cancel = AtomicBool::new(false);
+        let abort_flag = AtomicBool::new(abort);
+        let mut order = Vec::new();
+        let mut done = 0usize;
+        let mut emit = |e: TestEvent| {
+            if let TestEvent::StepFinished(r) = e {
+                order.push(r.step_id.clone());
+                done += 1;
+                if cancel_after == Some(done) {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            }
+        };
+        let s = run_suite(
+            suite,
+            scope,
+            initial_vars(suite),
+            send,
+            &cancel,
+            &abort_flag,
+            &mut emit,
+        );
+        (s, order)
+    }
+
+    #[test]
+    fn login_that_only_extracts_a_token_does_not_create_data() {
+        let suite = erp_suite();
+        assert!(!creates_data(&suite.steps[0]));
+        assert!(creates_data(&suite.steps[1]));
+    }
+
+    #[test]
+    fn executes_setup_then_groups_then_cleanup_lifo() {
+        let suite = erp_suite();
+        let send = |spec: RequestSpec| ok_json(&spec.url.len().to_string());
+        let (summary, order) = run_with(&suite, &RunScope::default(), &send, None, false);
+        assert_eq!(
+            order,
+            vec![
+                "login",
+                "vendor",
+                "po",
+                "receipt",
+                "del_receipt",
+                "del_po",
+                "del_vendor"
+            ]
+        );
+        assert!(
+            summary.results.iter().all(|r| r.passed()),
+            "{:?}",
+            summary.results
+        );
+        assert!(summary.residue.is_empty());
+        // Token hasil login disamarkan di hasil maupun body.
+        let login = &summary.results[0];
+        assert_eq!(login.extracted[0].1, crate::http_ai::REDACTED);
+        assert!(!login.body_preview.contains("secret-token"));
+    }
+
+    #[test]
+    fn failed_step_blocks_dependents_but_cleanup_still_runs() {
+        let suite = erp_suite();
+        // PO gagal (500) → receipt diblokir; vendor tetap dibersihkan.
+        let send = |spec: RequestSpec| {
+            if spec.url.contains("/po?") {
+                resp(500, "{}")
+            } else {
+                ok_json("7")
+            }
+        };
+        let (summary, _) = run_with(&suite, &RunScope::default(), &send, None, false);
+        let by = |id: &str| summary.results.iter().find(|r| r.step_id == id).expect(id);
+        assert_eq!(by("po").outcome(), StepOutcome::Failed);
+        assert_eq!(by("receipt").outcome(), StepOutcome::Blocked);
+        assert_eq!(by("del_receipt").outcome(), StepOutcome::Skipped);
+        // PO terkirim (dapat response) → tetap dicoba dibersihkan; po_id tidak ada → residue.
+        assert_eq!(by("del_po").outcome(), StepOutcome::Blocked);
+        assert_eq!(by("del_vendor").outcome(), StepOutcome::Passed);
+        assert_eq!(summary.residue.len(), 1);
+        assert_eq!(summary.residue[0].step_name, "po");
+    }
+
+    #[test]
+    fn cancel_stops_tests_but_cleans_up_created_data() {
+        let suite = erp_suite();
+        let send = |_spec: RequestSpec| ok_json("9");
+        // Batal setelah 2 langkah (login, vendor).
+        let (summary, order) = run_with(&suite, &RunScope::default(), &send, Some(2), false);
+        assert!(summary.cancelled);
+        assert!(order.contains(&"del_vendor".to_string()));
+        let by = |id: &str| summary.results.iter().find(|r| r.step_id == id).expect(id);
+        assert_eq!(by("po").outcome(), StepOutcome::Skipped);
+        assert_eq!(by("del_vendor").outcome(), StepOutcome::Passed);
+        assert_eq!(by("del_po").outcome(), StepOutcome::Skipped);
+        assert!(summary.residue.is_empty());
+    }
+
+    #[test]
+    fn abort_skips_cleanup_and_reports_residue() {
+        let suite = erp_suite();
+        let send = |_spec: RequestSpec| ok_json("9");
+        let cancel = AtomicBool::new(false);
+        let abort = AtomicBool::new(false);
+        let mut n = 0;
+        let mut emit = |e: TestEvent| {
+            if let TestEvent::CleanupStarted = e {
+                abort.store(true, Ordering::SeqCst);
+            }
+            n += 1;
+        };
+        let summary = run_suite(
+            &suite,
+            &RunScope::default(),
+            initial_vars(&suite),
+            &send,
+            &cancel,
+            &abort,
+            &mut emit,
+        );
+        assert!(summary.aborted);
+        assert_eq!(summary.residue.len(), 3);
+    }
+
+    #[test]
+    fn group_scope_pulls_in_dependencies_and_their_cleanup() {
+        let suite = erp_suite();
+        let include = select_for_groups(&suite, &["Plant".to_string()]);
+        let picked: Vec<&str> = suite
+            .steps
+            .iter()
+            .zip(&include)
+            .filter(|(_, inc)| **inc)
+            .map(|(s, _)| s.id.as_str())
+            .collect();
+        // Plant butuh po → vendor → login (setup).
+        for id in [
+            "login",
+            "vendor",
+            "po",
+            "receipt",
+            "del_receipt",
+            "del_po",
+            "del_vendor",
+        ] {
+            assert!(picked.contains(&id), "{id} missing from {picked:?}");
+        }
+        let purchasing = select_for_groups(&suite, &["Purchasing".to_string()]);
+        let picked: Vec<&str> = suite
+            .steps
+            .iter()
+            .zip(&purchasing)
+            .filter(|(_, inc)| **inc)
+            .map(|(s, _)| s.id.as_str())
+            .collect();
+        assert!(!picked.contains(&"receipt"));
+        assert!(!picked.contains(&"del_receipt"));
+        assert!(picked.contains(&"del_po"));
+
+        let send = |_spec: RequestSpec| ok_json("1");
+        let scope = RunScope::groups(&suite, vec!["Purchasing".into()]);
+        let (summary, order) = run_with(&suite, &scope, &send, None, false);
+        assert_eq!(order, vec!["login", "vendor", "po", "del_po", "del_vendor"]);
+        assert!(summary.residue.is_empty());
+    }
+
+    #[test]
+    fn lint_reports_order_missing_cleanup_and_cleanup_order() {
+        let mut suite = erp_suite();
+        let known = std::collections::HashSet::new();
+        assert!(
+            lint(&suite, &known)
+                .iter()
+                .all(|i| i.level != LintLevel::Error)
+        );
+        // Pindahkan receipt ke group pertama → memakai po_id sebelum disediakan.
+        suite.steps[3].group = "Purchasing".into();
+        suite.steps.swap(2, 3);
+        let issues = lint(&suite, &known);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.level == LintLevel::Error && i.message.contains("only provided later"))
+        );
+        // Hapus cleanup vendor → peringatan data tertinggal.
+        let mut suite = erp_suite();
+        suite.steps.retain(|s| s.id != "del_vendor");
+        assert!(
+            lint(&suite, &known)
+                .iter()
+                .any(|i| i.message.starts_with("Creates data"))
+        );
+        // Cleanup urutan terbalik → peringatan, lalu auto-order memperbaikinya.
+        let mut suite = erp_suite();
+        let n = suite.steps.len();
+        suite.steps[n - 3..].reverse();
+        assert!(
+            lint(&suite, &known)
+                .iter()
+                .any(|i| i.message.starts_with("Cleanup order"))
+        );
+        auto_order_cleanup(&mut suite);
+        let tail: Vec<&str> = suite.steps[n - 3..].iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(tail, vec!["del_receipt", "del_po", "del_vendor"]);
+        assert!(
+            !lint(&suite, &known)
+                .iter()
+                .any(|i| i.message.starts_with("Cleanup order"))
+        );
+    }
+
+    #[test]
+    fn dependencies_and_cleanup_targets() {
+        let suite = erp_suite();
+        let deps = dependencies(&suite);
+        let idx = |id: &str| suite.step_index(id).expect(id);
+        assert_eq!(deps[idx("po")].depends_on, vec![idx("vendor")]);
+        assert_eq!(
+            deps[idx("vendor")].used_by,
+            vec![idx("po"), idx("del_vendor")]
+        );
+        let mut auto = suite.clone();
+        let c = auto.step_index("del_po").expect("del_po");
+        auto.steps[c].cleanup_for = None;
+        let deps = dependencies(&auto);
+        assert_eq!(cleanup_target(&auto, &deps, c), Some(idx("po")));
+    }
+
+    #[test]
+    fn groups_order_execution_and_can_be_renamed_or_moved() {
+        let mut suite = erp_suite();
+        suite.move_group("Plant", -1);
+        let order: Vec<&str> = suite
+            .execution_order()
+            .into_iter()
+            .map(|i| suite.steps[i].id.as_str())
+            .collect();
+        assert_eq!(&order[..4], &["login", "receipt", "vendor", "po"]);
+        suite.rename_group("Plant", "Warehouse");
+        assert_eq!(suite.group_names(), vec!["Warehouse", "Purchasing"]);
+        suite.remove_group("Warehouse");
+        assert!(suite.steps.iter().all(|s| s.group != "Warehouse"));
+    }
+
+    #[test]
+    fn ensure_ids_fixes_duplicates_and_dangling_cleanup() {
+        let mut suite = HttpTestSuite {
+            steps: vec![
+                HttpTestStep {
+                    id: "a".into(),
+                    ..Default::default()
+                },
+                HttpTestStep {
+                    id: "a".into(),
+                    ..Default::default()
+                },
+                HttpTestStep {
+                    id: String::new(),
+                    cleanup_for: Some("zzz".into()),
+                    phase: StepPhase::Cleanup,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        suite.ensure_ids();
+        let ids: std::collections::HashSet<&str> =
+            suite.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(suite.steps[2].cleanup_for, None);
+    }
+
+    #[test]
+    fn merges_ai_steps_with_id_remap() {
+        let mut suite = erp_suite();
+        let mut new_step = step(
+            "po",
+            "Sales",
+            StepPhase::Test,
+            HttpMethod::POST,
+            "{{base}}/so",
+        );
+        new_step.extract.push(Extract {
+            var: "so_id".into(),
+            from: "json:$.id".into(),
+        });
+        let mut clean = step(
+            "x",
+            "Sales",
+            StepPhase::Cleanup,
+            HttpMethod::DELETE,
+            "{{base}}/so/{{so_id}}",
+        );
+        clean.cleanup_for = Some("po".into());
+        let n = merge_generated_steps(
+            &mut suite,
+            vec![new_step, clean],
+            vec![("so_token".into(), "".into())],
+        );
+        assert_eq!(n, 2);
+        let created = suite
+            .steps
+            .iter()
+            .find(|s| s.request.url.ends_with("/so"))
+            .expect("so");
+        assert_ne!(created.id, "po");
+        let cleanup = suite
+            .steps
+            .iter()
+            .find(|s| s.request.url.contains("{{so_id}}"))
+            .expect("cleanup");
+        assert_eq!(cleanup.cleanup_for.as_deref(), Some(created.id.as_str()));
+        assert!(suite.group_names().contains(&"Sales".to_string()));
+    }
+
+    #[test]
+    fn parses_phase_group_and_cleanup_from_ai() {
+        let reply = r#"{"suites":[{"name":"P2P","steps":[
+          {"id":"s1","name":"Create PO","phase":"test","group":"Purchasing","method":"POST","url":"{{b}}/po","extract":{"po_id":"json:$.id"}},
+          {"id":"s2","name":"Delete PO","phase":"teardown","group":"Purchasing","cleanup_for":"s1","method":"DELETE","url":"{{b}}/po/{{po_id}}"}
+        ]}]}"#;
+        let suites = parse_tests_reply(reply, &[]).expect("parse");
+        let s = &suites[0];
+        assert_eq!(s.steps[0].group, "Purchasing");
+        assert_eq!(s.steps[1].phase, StepPhase::Cleanup);
+        assert_eq!(s.steps[1].cleanup_for.as_deref(), Some("s1"));
+        let (steps, _) = parse_steps_reply(r#"{"steps":[{"url":"{{b}}/x","method":"GET"}]}"#, &[])
+            .expect("steps");
+        assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn residue_sql_quotes_identifiers_and_validates_run_id() {
+        let cols = vec!["code".to_string(), "na\"me".to_string()];
+        let sql = residue_count_sql("PostgreSQL", "public.orders", &cols, "1700").expect("sql");
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) AS n FROM \"public\".\"orders\" WHERE \"code\" LIKE '%1700%' OR \"na\"\"me\" LIKE '%1700%'"
+        );
+        assert!(residue_count_sql("MySQL", "t", &cols, "1'; drop").is_none());
+        assert!(residue_count_sql("MySQL", "t", &[], "1").is_none());
+        assert!(
+            residue_count_sql("MySQL", "t", &cols, "17")
+                .expect("sql")
+                .contains("`code`")
+        );
+        assert!(table_matches("public.orders", "orders"));
+    }
+
+    #[test]
+    fn saves_runs_and_prunes_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "tabular-http-runs-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_millis()
+        ));
+        for i in 0..(MAX_RUNS_PER_SUITE + 3) {
+            let run = TestRun {
+                run_id: format!("{:05}", i),
+                suite_id: "s/1".into(),
+                started_at: format!("2026-10-15T00:{:02}:{:02}Z", i / 60, i % 60),
+                ..Default::default()
+            };
+            save_run_in(&dir, &run).expect("save");
+        }
+        let runs = load_runs_in(&dir, "s/1", 100);
+        assert_eq!(runs.len(), MAX_RUNS_PER_SUITE);
+        assert_eq!(runs[0].run_id, format!("{:05}", MAX_RUNS_PER_SUITE + 2));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

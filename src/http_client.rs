@@ -136,11 +136,22 @@ pub fn render_http_client(
         execute_request(state);
     }
 
+    // Tab langkah integration test: variabel suite/run ikut dipakai saat kirim.
+    if let Some(step) = &state.test_step {
+        for (k, v) in &step.vars {
+            state.env_vars.insert(k.clone(), v.clone());
+        }
+    }
+
     let mut workspaces_saved = false;
 
     egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
+            if state.test_step.is_some() {
+                render_test_step_banner(ui, state, toasts);
+                ui.add_space(8.0);
+            }
             if render_url_bar(ui, state, toasts, connection_id) {
                 workspaces_saved = true;
             }
@@ -161,6 +172,66 @@ pub fn render_http_client(
     render_code_dialog(ui, state, toasts);
 
     workspaces_saved
+}
+
+/// Banner tab yang mengedit langkah integration test.
+fn render_test_step_banner(
+    ui: &mut egui::Ui,
+    state: &mut HttpClientState,
+    toasts: &mut crate::window_egui::notifications::ToastManager,
+) {
+    let Some(step) = state.test_step.clone() else {
+        return;
+    };
+    let accent = crate::window_egui::style::theme_accent(ui.ctx());
+    egui::Frame::NONE
+        .fill(accent.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui_icons::icons::ICON_FACT_CHECK
+                        .rich_text()
+                        .color(accent),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Integration test step: {}", step.label)).strong(),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Save ({}S) writes the request back to the step. {{{{variables}}}} come from the suite and the last run.",
+                        mod_key()
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(crate::diagram_repo::accent_button(ui, "Save to step"))
+                        .clicked()
+                    {
+                        save_test_step(state, toasts);
+                    }
+                });
+            });
+        });
+}
+
+/// Tulis request tab ini kembali ke langkah suite.
+fn save_test_step(
+    state: &mut HttpClientState,
+    toasts: &mut crate::window_egui::notifications::ToastManager,
+) {
+    let Some(step) = state.test_step.clone() else {
+        return;
+    };
+    let snapshot = crate::http_collection::snapshot_from_state(state, "");
+    match crate::http_tests::update_step_request(&step.suite_id, &step.step_id, snapshot) {
+        Ok(name) => toasts.success(format!("Saved test step '{name}'")),
+        Err(e) => toasts.error(e),
+    }
 }
 
 fn can_send(state: &HttpClientState) -> bool {
@@ -1106,6 +1177,10 @@ pub fn save_or_update_http_tab(
     state: &mut HttpClientState,
     toasts: &mut crate::window_egui::notifications::ToastManager,
 ) -> bool {
+    if state.test_step.is_some() {
+        save_test_step(state, toasts);
+        return false;
+    }
     if let Some(req_id) = state.saved_request_id.clone() {
         let mut workspaces = crate::http_collection::load_workspaces();
         let mut updated = false;

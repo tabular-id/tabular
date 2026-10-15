@@ -259,10 +259,18 @@ pub fn show_job_owner(t: &mut Tabular, tab_id: Option<usize>, saved_id: Option<i
 
 // ─── Pemilih koneksi/database/tabel ─────────────────────────────────────────
 
-fn supported_connections(t: &Tabular) -> Vec<(i64, String, DatabaseType)> {
+/// Koneksi yang bisa dipilih: milik project aktif saja (semua bila tidak ada
+/// project aktif). Koneksi di `keep` (sudah dipilih entri) selalu ikut supaya
+/// comparison lama tidak kehilangan koneksinya di combobox.
+fn supported_connections(t: &Tabular, keep: &[i64]) -> Vec<(i64, String, DatabaseType)> {
+    let project = super::project_ui::active(t);
     t.connections
         .iter()
         .filter(|c| multi_compare::supports_engine(&c.connection_type))
+        .filter(|c| {
+            project.is_none_or(|p| p.owns_connection(c))
+                || c.id.is_some_and(|id| keep.contains(&id))
+        })
         .filter_map(|c| Some((c.id?, c.name.clone(), c.connection_type.clone())))
         .collect()
 }
@@ -396,6 +404,124 @@ fn insert_at_cursor(ctx: &egui::Context, id: egui::Id, target: &mut String, text
     target.insert_str(byte, text);
 }
 
+// ─── Komponen tampilan ──────────────────────────────────────────────────────
+
+/// Warna pembeda sumber A, B, C, …; sama di kartu sumber dan header hasil.
+fn source_color(index: usize, dark: bool) -> egui::Color32 {
+    const DARK: [(u8, u8, u8); 6] = [
+        (96, 165, 250),
+        (167, 139, 250),
+        (45, 212, 191),
+        (251, 146, 60),
+        (244, 114, 182),
+        (163, 230, 53),
+    ];
+    const LIGHT: [(u8, u8, u8); 6] = [
+        (37, 99, 235),
+        (124, 58, 237),
+        (13, 148, 136),
+        (234, 88, 12),
+        (219, 39, 119),
+        (77, 124, 15),
+    ];
+    let (r, g, b) = if dark { DARK } else { LIGHT }[index % DARK.len()];
+    egui::Color32::from_rgb(r, g, b)
+}
+
+fn source_letter(index: usize) -> String {
+    char::from(b'A' + (index % 26) as u8).to_string()
+}
+
+/// Lencana huruf sumber berwarna (A, B, C, …).
+fn source_badge(ui: &mut egui::Ui, index: usize, size: f32) {
+    let color = source_color(index, ui.visuals().dark_mode);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 5.0, color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        source_letter(index),
+        egui::FontId::proportional(size * 0.6),
+        egui::Color32::WHITE,
+    );
+}
+
+/// Judul langkah bernomor. `add_right` mengisi sisi kanan baris.
+fn step_header(
+    ui: &mut egui::Ui,
+    number: usize,
+    title: &str,
+    hint: &str,
+    add_right: impl FnOnce(&mut egui::Ui),
+) {
+    let ctx = ui.ctx().clone();
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+        ui.painter().circle(
+            rect.center(),
+            11.0,
+            style::nav_raised(&ctx),
+            egui::Stroke::new(1.0, style::nav_border(&ctx)),
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            number.to_string(),
+            egui::FontId::proportional(12.0),
+            style::nav_text_strong(&ctx),
+        );
+        ui.label(egui::RichText::new(title).strong().size(14.5));
+        if !hint.is_empty() {
+            ui.label(
+                egui::RichText::new(hint)
+                    .size(11.5)
+                    .color(style::nav_text_muted(&ctx)),
+            );
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add_right);
+    });
+    ui.add_space(4.0);
+}
+
+/// Label kecil di atas field.
+fn caption(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.5)
+            .strong()
+            .color(style::nav_text_muted(ui.ctx())),
+    );
+}
+
+/// Kotak non-aktif selebar field, untuk pilihan yang tidak berlaku.
+fn placeholder_box(ui: &mut egui::Ui, width: f32, text: &str) {
+    let ctx = ui.ctx().clone();
+    egui::Frame::new()
+        .fill(style::nav_track(&ctx))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.set_width(width - 16.0);
+            ui.set_min_height(ui.spacing().interact_size.y + 2.0);
+            ui.label(
+                egui::RichText::new(text)
+                    .size(12.0)
+                    .color(style::nav_text_muted(&ctx)),
+            );
+        });
+}
+
+/// Tombol ikon kecil tanpa bingkai.
+fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(egui::RichText::new(icon).size(15.0)).frame(false),
+    )
+    .on_hover_text(tip)
+    .clicked()
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_entry(
     t: &mut Tabular,
@@ -410,81 +536,98 @@ fn render_entry(
     let ctx = ui.ctx().clone();
     sync_tables(t, &ctx, e);
     let mut action = None;
-    let title = format!("Query {}", index + 1);
-    style::render_modal_card(ui, None, None, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(&title).strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut e.label)
-                    .hint_text("Label, e.g. MySQL prod")
-                    .desired_width(200.0),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(count > 2, egui::Button::new(i::ICON_DELETE.codepoint))
-                    .on_hover_text("Remove this query")
-                    .clicked()
-                {
-                    action = Some(EntryAction::Remove);
-                }
-                if ui
-                    .add_enabled(
+    let dark = ctx.global_style().visuals.dark_mode;
+    let color = source_color(index, dark);
+    let db_type = connection_type(t, e.conn_id);
+    let is_mongo = is_mongo_type(db_type.as_ref());
+    let before_conn = e.conn_id;
+    let mut picked_table: Option<String> = None;
+
+    let card = style::modal_card_frame(&ctx)
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 12,
+            top: 12,
+            bottom: 10,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let full = ui.available_width();
+
+            // Kepala kartu: huruf sumber, label, aksi.
+            ui.horizontal(|ui| {
+                source_badge(ui, index, 22.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.label)
+                        .hint_text(format!("Source {} name", source_letter(index)))
+                        .font(egui::TextStyle::Body)
+                        .desired_width((full - 110.0).max(80.0)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(ui, i::ICON_DELETE.codepoint, "Remove source", count > 2) {
+                        action = Some(EntryAction::Remove);
+                    }
+                    if icon_button(
+                        ui,
+                        i::ICON_ARROW_FORWARD.codepoint,
+                        "Move right",
                         index + 1 < count,
-                        egui::Button::new(i::ICON_ARROW_DOWNWARD.codepoint),
-                    )
-                    .on_hover_text("Move down")
-                    .clicked()
-                {
-                    action = Some(EntryAction::MoveDown);
-                }
-                if ui
-                    .add_enabled(index > 0, egui::Button::new(i::ICON_ARROW_UPWARD.codepoint))
-                    .on_hover_text("Move up")
-                    .clicked()
-                {
-                    action = Some(EntryAction::MoveUp);
-                }
+                    ) {
+                        action = Some(EntryAction::MoveDown);
+                    }
+                    if icon_button(ui, i::ICON_ARROW_BACK.codepoint, "Move left", index > 0) {
+                        action = Some(EntryAction::MoveUp);
+                    }
+                });
             });
-        });
-        ui.add_space(6.0);
+            ui.add_space(8.0);
 
-        let before_conn = e.conn_id;
-        let db_type = connection_type(t, e.conn_id);
-        let combo_width = (ui.available_width() - 120.0).clamp(160.0, 360.0);
-        let mut picked_table: Option<String> = None;
-        egui::Grid::new(("cmp_entry_grid", salt, index))
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Connection").weak().small());
-                let current = e
-                    .conn_id
-                    .and_then(|id| connections.iter().find(|c| c.0 == id))
-                    .map(|c| format!("{}  ({})", c.1, c.2.as_db_str()))
-                    .unwrap_or_else(|| "Select a connection".to_string());
-                egui::ComboBox::from_id_salt(("cmp_conn", salt, index))
-                    .selected_text(current)
-                    .width(combo_width)
-                    .show_ui(ui, |ui| {
-                        for (id, name, kind) in connections {
-                            let label = format!("{}  ({})", name, kind.as_db_str());
-                            if ui.selectable_label(e.conn_id == Some(*id), label).clicked() {
-                                e.conn_id = Some(*id);
-                            }
+            // Koneksi.
+            caption(ui, "CONNECTION");
+            let current = e
+                .conn_id
+                .and_then(|id| connections.iter().find(|c| c.0 == id))
+                .map(|c| format!("{}  ·  {}", c.1, c.2.as_db_str()))
+                .unwrap_or_else(|| "Select a connection".to_string());
+            egui::ComboBox::from_id_salt(("cmp_conn", salt, index))
+                .selected_text(current)
+                .width(full)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    if connections.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No SQL or MongoDB connection in this project")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    for (id, name, kind) in connections {
+                        let label = format!("{}  ·  {}", name, kind.as_db_str());
+                        if ui.selectable_label(e.conn_id == Some(*id), label).clicked() {
+                            e.conn_id = Some(*id);
                         }
-                    });
-                ui.end_row();
+                    }
+                });
+            ui.add_space(6.0);
 
-                ui.label(egui::RichText::new("Database").weak().small());
-                let has_db = db_type.as_ref().is_some_and(wants_database);
-                ui.add_enabled_ui(has_db, |ui| {
-                    if !has_db {
-                        ui.label(egui::RichText::new("Single database").weak());
+            // Database dan tabel berdampingan.
+            let gap = 8.0;
+            let half = ((full - gap) / 2.0).floor();
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    ui.horizontal(|ui| caption(ui, "DATABASE"));
+                    let has_db = db_type.as_ref().is_some_and(wants_database);
+                    if e.conn_id.is_none() {
+                        placeholder_box(ui, half, "Pick a connection");
+                    } else if !has_db {
+                        placeholder_box(ui, half, "Single database");
                     } else if e.databases.is_empty() {
                         ui.add(
                             egui::TextEdit::singleline(&mut e.database)
                                 .hint_text("Database name")
-                                .desired_width(combo_width),
+                                .desired_width(half),
                         );
                     } else {
                         let text = if e.database.trim().is_empty() {
@@ -496,7 +639,7 @@ fn render_entry(
                             ui,
                             ("cmp_db", salt, index),
                             &text,
-                            combo_width,
+                            half,
                             None,
                             &e.databases,
                         ) {
@@ -504,117 +647,176 @@ fn render_entry(
                         }
                     }
                 });
-                ui.end_row();
-
-                let is_mongo = matches!(db_type, Some(DatabaseType::MongoDB));
-                ui.label(
-                    egui::RichText::new(if is_mongo { "Collection" } else { "Table" })
-                        .weak()
-                        .small(),
-                );
-                ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    ui.horizontal(|ui| {
+                        caption(ui, if is_mongo { "COLLECTION" } else { "TABLE" });
+                        if e.tables_slot.is_some() {
+                            ui.add(egui::Spinner::new().size(10.0));
+                        }
+                    });
                     let text = if e.table.is_empty() {
-                        "Pick to fill the query".to_string()
+                        "Fill query from…".to_string()
                     } else {
                         e.table.clone()
                     };
-                    if let Some(ComboPick::Item(k)) = filter_combo(
-                        ui,
-                        ("cmp_table", salt, index),
-                        &text,
-                        combo_width,
-                        None,
-                        &e.tables,
-                    ) {
-                        picked_table = Some(e.tables[k].clone());
-                    }
-                    if e.tables_slot.is_some() {
-                        ui.add(egui::Spinner::new());
-                    }
-                });
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Key columns").weak().small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut e.key_columns)
-                        .hint_text("Comma separated; default _id, id or the first column")
-                        .desired_width(combo_width),
-                );
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Column aliases").weak().small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut e.aliases)
-                        .hint_text("source=common, e.g. customerId=customer_id")
-                        .desired_width(combo_width),
-                );
-                ui.end_row();
-            });
-        if let Some(err) = &e.tables_error {
-            error_label(ui, err);
-        }
-
-        let query_id = egui::Id::new(("cmp_query", salt, index));
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Query").weak().small());
-            ui.add_enabled_ui(!variables.is_empty(), |ui| {
-                ui.menu_button(
-                    format!("{} Insert variable", i::ICON_DATA_OBJECT.codepoint),
-                    |ui| {
-                        for var in variables {
-                            let name = var.name.trim();
-                            if !multi_compare::is_valid_variable_name(name) {
-                                continue;
-                            }
-                            let placeholder = variable_placeholder(name);
-                            if ui
-                                .button(&placeholder)
-                                .on_hover_text(format!("Value: {}", var.value))
-                                .clicked()
-                            {
-                                insert_at_cursor(ui.ctx(), query_id, &mut e.query, &placeholder);
-                                ui.close();
-                            }
+                    ui.add_enabled_ui(e.conn_id.is_some(), |ui| {
+                        if let Some(ComboPick::Item(k)) = filter_combo(
+                            ui,
+                            ("cmp_table", salt, index),
+                            &text,
+                            half,
+                            None,
+                            &e.tables,
+                        ) {
+                            picked_table = Some(e.tables[k].clone());
                         }
-                    },
-                )
-                .response
-                .on_disabled_hover_text("Add a variable above first");
+                    });
+                });
+            });
+            if let Some(err) = &e.tables_error {
+                error_label(ui, err);
+            }
+            ui.add_space(6.0);
+
+            // Query.
+            let query_id = egui::Id::new(("cmp_query", salt, index));
+            ui.horizontal(|ui| {
+                caption(ui, if is_mongo { "QUERY (JSON)" } else { "QUERY" });
+                if is_mongo {
+                    ui.label(
+                        egui::RichText::new(i::ICON_HELP_OUTLINE.codepoint)
+                            .size(13.0)
+                            .color(style::nav_text_muted(&ctx)),
+                    )
+                    .on_hover_text(
+                        "JSON with \"collection\" plus filter, projection, sort and limit, \
+                         or a \"pipeline\" array. Nested fields become columns like address.city.",
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(!variables.is_empty(), |ui| {
+                        ui.menu_button(
+                            egui::RichText::new(format!(
+                                "{} Variable",
+                                i::ICON_DATA_OBJECT.codepoint
+                            ))
+                            .size(11.5),
+                            |ui| {
+                                for var in variables {
+                                    let name = var.name.trim();
+                                    if !multi_compare::is_valid_variable_name(name) {
+                                        continue;
+                                    }
+                                    let placeholder = variable_placeholder(name);
+                                    if ui
+                                        .button(&placeholder)
+                                        .on_hover_text(format!("Value: {}", var.value))
+                                        .clicked()
+                                    {
+                                        insert_at_cursor(
+                                            ui.ctx(),
+                                            query_id,
+                                            &mut e.query,
+                                            &placeholder,
+                                        );
+                                        ui.close();
+                                    }
+                                }
+                            },
+                        )
+                        .response
+                        .on_hover_text("Insert a variable at the cursor")
+                        .on_disabled_hover_text("Add a variable in step 1 first");
+                    });
+                });
+            });
+            ui.add(
+                egui::TextEdit::multiline(&mut e.query)
+                    .id(query_id)
+                    .code_editor()
+                    .desired_rows(5)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(if is_mongo {
+                        "{\"collection\": \"orders\", \"filter\": {\"status\": \"${status}\"}}"
+                    } else {
+                        "SELECT o.id, c.name, o.total\nFROM orders o JOIN customers c ON c.id = o.customer_id\nWHERE o.created_at >= '${from}'"
+                    }),
+            );
+            ui.add_space(6.0);
+
+            // Kunci dan alias berdampingan.
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    ui.horizontal(|ui| {
+                        caption(ui, "KEY COLUMNS");
+                        ui.label(
+                            egui::RichText::new(i::ICON_HELP_OUTLINE.codepoint)
+                                .size(14.0)
+                                .color(style::nav_text_muted(&ctx)),
+                        )
+                        .on_hover_text(
+                            "Columns that identify a row, comma separated. The 1st key of every \
+                             source is matched with the 1st key of the others, and so on. \
+                             Empty = _id, id, or the first column.",
+                        );
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut e.key_columns)
+                            .hint_text("id")
+                            .desired_width(half),
+                    );
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(half);
+                    ui.horizontal(|ui| {
+                        caption(ui, "RENAME COLUMNS");
+                        ui.label(
+                            egui::RichText::new(i::ICON_HELP_OUTLINE.codepoint)
+                                .size(14.0)
+                                .color(style::nav_text_muted(&ctx)),
+                        )
+                        .on_hover_text(
+                            "Value columns are compared by name. When this source uses another \
+                             name, map it: source=common, e.g. amount=total.",
+                        );
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut e.aliases)
+                            .hint_text("amount=total")
+                            .desired_width(half),
+                    );
+                });
             });
         });
-        ui.add(
-            egui::TextEdit::multiline(&mut e.query)
-                .id(query_id)
-                .code_editor()
-                .desired_rows(4)
-                .desired_width(f32::INFINITY)
-                .hint_text(if is_mongo_type(db_type.as_ref()) {
-                    "{\"collection\": \"orders\", \"filter\": {\"status\": \"${status}\"}}"
-                } else {
-                    "SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.created_at >= '${from}'"
-                }),
-        );
-        if is_mongo_type(db_type.as_ref()) {
-            muted_label(
-                ui,
-                "MongoDB: JSON with collection plus filter, projection, sort and limit, or a pipeline array. Nested fields become columns like address.city.",
-            );
-        }
 
-        if let Some(table) = picked_table
-            && let Some(kind) = db_type.clone()
-        {
-            e.query = multi_compare::default_query(&kind, &table);
-            if e.key_columns.trim().is_empty() {
-                e.key_columns = default_key(t, e, &kind, &table);
-            }
-            e.table = table;
+    // Garis warna sumber di tepi atas kartu.
+    let rect = card.response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 3.0)),
+        egui::CornerRadius {
+            nw: 8,
+            ne: 8,
+            sw: 0,
+            se: 0,
+        },
+        color,
+    );
+
+    if let Some(table) = picked_table
+        && let Some(kind) = db_type.clone()
+    {
+        e.query = multi_compare::default_query(&kind, &table);
+        if e.key_columns.trim().is_empty() {
+            e.key_columns = default_key(t, e, &kind, &table);
         }
-        if e.conn_id != before_conn {
-            on_connection_changed(t, e);
-        }
-    });
+        e.table = table;
+    }
+    if e.conn_id != before_conn {
+        on_connection_changed(t, e);
+    }
     action
 }
 
@@ -670,7 +872,7 @@ fn on_connection_changed(t: &mut Tabular, e: &mut EntryForm) {
 
 // ─── Render tab ─────────────────────────────────────────────────────────────
 
-/// Gambar tab Comparison yang aktif.
+/// Gambar tab Comparison yang aktif: toolbar tetap di atas, isi bergulir.
 pub fn render_active_tab(t: &mut Tabular, ui: &mut egui::Ui) {
     let idx = t.active_tab_index;
     let Some(tab) = t.query_tabs.get_mut(idx) else {
@@ -680,16 +882,39 @@ pub fn render_active_tab(t: &mut Tabular, ui: &mut egui::Ui) {
     let Some(mut st) = tab.compare_state.take() else {
         return;
     };
-    let mut new_title = None;
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(12, 10))
+    let ctx = ui.ctx().clone();
+    let job = t
+        .multi_compare
+        .job_for_tab(tab_id, st.saved_id)
+        .map(|j| (j.progress_text(), j.elapsed()));
+    let actions = egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 10,
+            bottom: 8,
+        })
+        .show(ui, |ui| render_toolbar(ui, &mut st, job.as_ref()))
+        .inner;
+    let y = ui.cursor().top();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        y,
+        egui::Stroke::new(1.0, style::nav_border(&ctx)),
+    );
+    let new_title = apply_toolbar(t, &ctx, tab_id, &mut st, actions);
+    egui::ScrollArea::vertical()
+        .id_salt(("compare_tab_scroll", tab_id))
+        .auto_shrink([false, false])
         .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt(("compare_tab_scroll", tab_id))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    new_title = render_tab(t, ui, tab_id, &mut st);
-                });
+            egui::Frame::new()
+                .inner_margin(egui::Margin {
+                    left: 14,
+                    right: 14,
+                    top: 12,
+                    bottom: 16,
+                })
+                .show(ui, |ui| render_body(t, ui, tab_id, &mut st));
         });
     // Tab bisa saja berganti selama render (mis. tab lain dibuka).
     if let Some(tab) = t.query_tabs.iter_mut().find(|q| q.id == tab_id) {
@@ -729,108 +954,144 @@ fn export_caption(name: &str) -> String {
     format!("compare_{clean}")
 }
 
-/// Mengembalikan judul tab baru bila nama berubah lewat Save.
-fn render_tab(
-    t: &mut Tabular,
-    ui: &mut egui::Ui,
-    tab_id: usize,
-    st: &mut MultiCompareTabState,
-) -> Option<String> {
-    let ctx = ui.ctx().clone();
-    let mut new_title = None;
-    let job = t
-        .multi_compare
-        .job_for_tab(tab_id, st.saved_id)
-        .map(|j| (j.progress_text(), j.elapsed()));
-    let running = job.is_some();
+#[derive(Default)]
+struct ToolbarActions {
+    save: bool,
+    process: bool,
+    cancel: bool,
+    export: bool,
+}
 
-    // ── Kepala: nama dan tombol utama ──
-    let mut save_clicked = false;
-    let mut process_clicked = false;
-    let mut cancel_clicked = false;
-    let mut export_clicked = false;
+fn status_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    style::render_badge(ui, text, color.gamma_multiply(0.18), color);
+}
+
+fn render_toolbar(
+    ui: &mut egui::Ui,
+    st: &mut MultiCompareTabState,
+    job: Option<&(String, std::time::Duration)>,
+) -> ToolbarActions {
+    let ctx = ui.ctx().clone();
+    let mut a = ToolbarActions::default();
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(i::ICON_DIFFERENCE.codepoint)
                 .size(20.0)
                 .color(style::theme_accent(&ctx)),
         );
-        ui.add(
-            egui::TextEdit::singleline(&mut st.name)
-                .hint_text("Comparison name")
-                .font(egui::TextStyle::Heading)
-                .desired_width(320.0),
+        style::render_text_field(
+            ui,
+            egui::TextEdit::singleline(&mut st.name).hint_text("Name this comparison"),
+            300.0,
+            None,
         );
-        if st.unsaved() {
-            muted_label(
-                ui,
-                if st.saved_id.is_some() {
-                    "Unsaved changes"
-                } else {
-                    "Not saved yet"
-                },
-            );
-        }
+        let (text, color) = if st.saved_id.is_none() {
+            ("NEW", style::nav_text_muted(&ctx))
+        } else if st.unsaved() {
+            ("UNSAVED", style::theme_warning(&ctx))
+        } else {
+            ("SAVED", style::theme_success(&ctx))
+        };
+        status_badge(ui, text, color);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let has_rows = st.result.as_ref().is_some_and(|r| !r.diffs.is_empty());
-            if ui
-                .add_enabled(
-                    has_rows,
-                    egui::Button::new(format!("{} Export", i::ICON_FILE_DOWNLOAD.codepoint)),
-                )
-                .on_hover_text("Export the differing rows (CSV, Excel, JSON, ...)")
-                .clicked()
-            {
-                export_clicked = true;
-            }
-            if running {
+            if job.is_some() {
+                let btn = style::btn_field_action(ui, format!("{} Cancel", i::ICON_STOP.codepoint));
+                if ui.add(btn).clicked() {
+                    a.cancel = true;
+                }
+            } else {
+                let btn = style::btn_field_action_primary(
+                    ui,
+                    format!("{}  PROCESS", i::ICON_PLAY_ARROW.codepoint),
+                );
                 if ui
-                    .button(format!("{} Cancel", i::ICON_STOP.codepoint))
+                    .add(btn)
+                    .on_hover_text("Run every source in the background and list the differences")
                     .clicked()
                 {
-                    cancel_clicked = true;
+                    a.process = true;
                 }
-            } else if ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new(format!("{} PROCESS", i::ICON_PLAY_ARROW.codepoint))
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(style::theme_accent(&ctx)),
-                )
-                .on_hover_text("Run every query in the background and compare the results")
-                .clicked()
-            {
-                process_clicked = true;
             }
+            let has_rows = st.result.as_ref().is_some_and(|r| !r.diffs.is_empty());
+            let btn =
+                style::btn_field_action(ui, format!("{} Export", i::ICON_FILE_DOWNLOAD.codepoint));
             if ui
-                .button(format!("{} Save", i::ICON_SAVE.codepoint))
+                .add_enabled(has_rows, btn)
+                .on_hover_text("Export every differing row (CSV, Excel, JSON, …)")
+                .on_disabled_hover_text("Nothing to export yet")
                 .clicked()
             {
-                save_clicked = true;
+                a.export = true;
+            }
+            let btn = style::btn_field_action(ui, format!("{} Save", i::ICON_SAVE.codepoint));
+            if ui
+                .add(btn)
+                .on_hover_text("Save to the Comp list in the sidebar")
+                .clicked()
+            {
+                a.save = true;
+            }
+            let label = if st.setup_open {
+                "Hide setup"
+            } else {
+                "Edit setup"
+            };
+            let btn = style::btn_field_action(ui, format!("{} {label}", i::ICON_TUNE.codepoint));
+            if ui.add(btn).clicked() {
+                st.setup_open = !st.setup_open;
             }
         });
     });
-    if let Some((text, elapsed)) = &job {
-        ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new());
-            ui.label(format!(
-                "{text} · {}",
-                super::background_tasks::format_duration(*elapsed)
-            ));
-            muted_label(
-                ui,
-                "Runs in the background; you can keep working in other tabs.",
+    if let Some((text, elapsed)) = job {
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(style::nav_track(&ctx))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label(egui::RichText::new(text).strong());
+                    ui.label(
+                        egui::RichText::new(super::background_tasks::format_duration(*elapsed))
+                            .color(style::nav_text_muted(&ctx)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Running in the background. You can keep working in other tabs.",
+                            )
+                            .size(11.5)
+                            .color(style::nav_text_muted(&ctx)),
+                        );
+                    });
+                });
+            });
+    }
+    if let Some(e) = &st.error {
+        ui.add_space(6.0);
+        style::theme_alert_frame(&ctx, true).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(format!("{}  {e}", i::ICON_ERROR.codepoint))
+                    .color(style::theme_danger(&ctx)),
             );
         });
     }
-    if let Some(e) = &st.error {
-        error_label(ui, e);
-    }
-    ui.add_space(6.0);
+    a
+}
 
-    if save_clicked {
+/// Jalankan aksi toolbar. Mengembalikan judul tab baru bila nama berubah.
+fn apply_toolbar(
+    t: &mut Tabular,
+    ctx: &egui::Context,
+    tab_id: usize,
+    st: &mut MultiCompareTabState,
+    a: ToolbarActions,
+) -> Option<String> {
+    let mut new_title = None;
+    if a.save {
         match save(t, st) {
             Ok(spec) => {
                 st.error = None;
@@ -841,7 +1102,7 @@ fn render_tab(
             Err(e) => st.error = Some(e),
         }
     }
-    if process_clicked {
+    if a.process {
         // Comparison tersimpan disimpan ulang dulu supaya statistik sidebar
         // sesuai dengan definisi yang dijalankan.
         let spec = if st.saved_id.is_some() && st.unsaved() {
@@ -849,7 +1110,7 @@ fn render_tab(
         } else {
             st.spec()
         };
-        match spec.and_then(|spec| jobs::start(t, &ctx, Some(tab_id), st.saved_id, &spec)) {
+        match spec.and_then(|spec| jobs::start(t, ctx, Some(tab_id), st.saved_id, &spec)) {
             Ok(()) => {
                 st.error = None;
                 st.result_error = None;
@@ -857,125 +1118,182 @@ fn render_tab(
             Err(e) => st.error = Some(e),
         }
     }
-    if cancel_clicked {
+    if a.cancel {
         jobs::cancel(t, tab_id, st.saved_id);
     }
-    if export_clicked && let Some(result) = &st.result {
+    if a.export
+        && let Some(result) = &st.result
+    {
         t.open_export_dialog_for(result.to_table_data(), export_caption(&st.name), None);
     }
-
-    // ── Definisi ──
-    let toggle = ui.add(
-        egui::Button::new(
-            egui::RichText::new(format!(
-                "{} Definition  ·  {} queries, {} variables",
-                if st.setup_open {
-                    i::ICON_EXPAND_MORE.codepoint
-                } else {
-                    i::ICON_CHEVRON_RIGHT.codepoint
-                },
-                st.entries.len(),
-                st.variables.len()
-            ))
-            .strong(),
-        )
-        .frame(false),
-    );
-    if toggle.clicked() {
-        st.setup_open = !st.setup_open;
-    }
-    if st.setup_open {
-        ui.add_space(4.0);
-        render_definition(t, ui, tab_id, st);
-    }
-
-    ui.add_space(10.0);
-    ui.separator();
-    render_results(ui, st);
     new_title
 }
 
-fn render_definition(
+fn render_body(t: &mut Tabular, ui: &mut egui::Ui, tab_id: usize, st: &mut MultiCompareTabState) {
+    if st.setup_open {
+        render_variables(ui, st);
+        ui.add_space(14.0);
+        render_sources(t, ui, tab_id, st);
+        ui.add_space(4.0);
+        render_options(ui, st);
+        ui.add_space(16.0);
+    } else {
+        render_setup_summary(ui, st);
+        ui.add_space(12.0);
+    }
+    render_results(ui, st);
+}
+
+/// Ringkasan satu baris saat form disembunyikan.
+fn render_setup_summary(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
+    let ctx = ui.ctx().clone();
+    egui::Frame::new()
+        .fill(style::nav_track(&ctx))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                for (k, e) in st.entries.iter().enumerate() {
+                    source_badge(ui, k, 16.0);
+                    let label = multi_compare::entry_label(&e.to_entry(), k);
+                    ui.label(egui::RichText::new(label).strong());
+                    ui.add_space(8.0);
+                }
+                if !st.variables.is_empty() {
+                    let vars: Vec<String> = st
+                        .variables
+                        .iter()
+                        .map(|v| format!("{}={}", v.name.trim(), clip(&v.value)))
+                        .collect();
+                    ui.label(
+                        egui::RichText::new(vars.join("  "))
+                            .family(egui::FontFamily::Monospace)
+                            .size(11.5)
+                            .color(style::nav_text_muted(&ctx)),
+                    );
+                }
+            });
+        });
+}
+
+fn render_variables(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
+    let ctx = ui.ctx().clone();
+    step_header(
+        ui,
+        1,
+        "Variables",
+        "Optional. Define a value once and use it in every query as ${name}.",
+        |_| {},
+    );
+    let mut remove = None;
+    let mut add = false;
+    let muted = style::nav_text_muted(&ctx);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for (k, var) in st.variables.iter_mut().enumerate() {
+            egui::Frame::new()
+                .fill(style::nav_track(&ctx))
+                .stroke(egui::Stroke::new(1.0, style::nav_border(&ctx)))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin {
+                    left: 8,
+                    right: 4,
+                    top: 3,
+                    bottom: 3,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let h = ui.spacing().interact_size.y;
+                        let mono = |s: &str| {
+                            egui::RichText::new(s)
+                                .family(egui::FontFamily::Monospace)
+                                .color(muted)
+                        };
+                        ui.label(mono("${"));
+                        ui.add_sized(
+                            [96.0, h],
+                            egui::TextEdit::singleline(&mut var.name)
+                                .hint_text("name")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        ui.label(mono("} ="));
+                        ui.add_sized(
+                            [160.0, h],
+                            egui::TextEdit::singleline(&mut var.value).hint_text("value"),
+                        );
+                        if icon_button(ui, i::ICON_CLOSE.codepoint, "Remove variable", true) {
+                            remove = Some(k);
+                        }
+                    });
+                });
+        }
+        let btn = style::btn_field_action(ui, format!("{} Add variable", i::ICON_ADD.codepoint));
+        if ui.add(btn).clicked() {
+            add = true;
+        }
+    });
+    if let Some(k) = remove {
+        st.variables.remove(k);
+    }
+    if add {
+        st.variables.push(CompareVariable {
+            name: format!("var{}", st.variables.len() + 1),
+            value: String::new(),
+        });
+    }
+}
+
+fn render_sources(
     t: &mut Tabular,
     ui: &mut egui::Ui,
     tab_id: usize,
     st: &mut MultiCompareTabState,
 ) {
-    // Variabel
-    style::render_modal_card(
+    super::project_ui::ensure_loaded(t);
+    let selected: Vec<i64> = st.entries.iter().filter_map(|e| e.conn_id).collect();
+    let connections = supported_connections(t, &selected);
+    let mut add = false;
+    step_header(
         ui,
-        Some("Variables"),
-        Some(
-            "Use ${name} in any query below. Values are inserted as-is, so add quotes in SQL where needed.",
-        ),
+        2,
+        "Sources",
+        "One query per connection. Rows are matched on the key columns.",
         |ui| {
-            let mut remove = None;
-            egui::Grid::new(("cmp_vars", tab_id))
-                .num_columns(3)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    for (k, var) in st.variables.iter_mut().enumerate() {
-                        // Grid menyusutkan TextEdit ke isi teksnya; lebar dipaksa.
-                        let h = ui.spacing().interact_size.y;
-                        ui.add_sized(
-                            [160.0, h],
-                            egui::TextEdit::singleline(&mut var.name).hint_text("name"),
-                        );
-                        ui.add_sized(
-                            [300.0, h],
-                            egui::TextEdit::singleline(&mut var.value).hint_text("value"),
-                        );
-                        if ui
-                            .button(i::ICON_DELETE.codepoint)
-                            .on_hover_text("Remove variable")
-                            .clicked()
-                        {
-                            remove = Some(k);
-                        }
-                        ui.end_row();
-                    }
-                });
-            if let Some(k) = remove {
-                st.variables.remove(k);
-            }
-            if ui
-                .button(format!("{} Add variable", i::ICON_ADD.codepoint))
-                .clicked()
-            {
-                st.variables.push(CompareVariable {
-                    name: format!("var{}", st.variables.len() + 1),
-                    value: String::new(),
-                });
+            let btn = style::btn_field_action(ui, format!("{} Add source", i::ICON_ADD.codepoint));
+            if ui.add(btn).clicked() {
+                add = true;
             }
         },
     );
-    ui.add_space(8.0);
-
-    // Query per koneksi
-    ui.label(egui::RichText::new("Queries to compare").strong());
-    muted_label(
-        ui,
-        "Rows are matched on the key columns, by position across queries. Value columns are matched by name; use aliases when names differ.",
-    );
-    ui.add_space(4.0);
-    let connections = supported_connections(t);
     let count = st.entries.len();
+    let avail = ui.available_width();
+    // Kartu berdampingan: 1 kolom di layar sempit, sampai 3 kolom.
+    let cols = (((avail + 12.0) / 370.0).floor() as usize)
+        .clamp(1, 3)
+        .min(count.max(1));
     let variables = st.variables.clone();
     let mut action = None;
-    for k in 0..count {
-        if let Some(a) = render_entry(
-            t,
-            ui,
-            &mut st.entries[k],
-            k,
-            count,
-            &variables,
-            &connections,
-            tab_id,
-        ) {
-            action = Some((k, a));
-        }
-        ui.add_space(6.0);
+    let indices: Vec<usize> = (0..count).collect();
+    for chunk in indices.chunks(cols) {
+        ui.columns(cols, |columns| {
+            for (ci, &k) in chunk.iter().enumerate() {
+                if let Some(a) = render_entry(
+                    t,
+                    &mut columns[ci],
+                    &mut st.entries[k],
+                    k,
+                    count,
+                    &variables,
+                    &connections,
+                    tab_id,
+                ) {
+                    action = Some((k, a));
+                }
+            }
+        });
+        ui.add_space(10.0);
     }
     match action {
         Some((k, EntryAction::Remove)) => {
@@ -985,42 +1303,41 @@ fn render_definition(
         Some((k, EntryAction::MoveDown)) if k + 1 < st.entries.len() => st.entries.swap(k, k + 1),
         _ => {}
     }
-    if ui
-        .button(format!("{} Add query", i::ICON_ADD.codepoint))
-        .clicked()
-    {
+    if add {
         st.entries.push(EntryForm::default());
     }
-    ui.add_space(8.0);
+}
 
-    // Opsi
-    style::render_modal_card(ui, Some("Options"), None, |ui| {
-        egui::Grid::new(("cmp_opts", tab_id))
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Row limit per query").weak().small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut st.row_limit)
-                        .hint_text("Empty = no limit")
-                        .desired_width(160.0),
-                );
-                ui.end_row();
-                ui.label(egui::RichText::new("Ignore columns").weak().small());
-                ui.add(
+fn render_options(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
+    let ctx = ui.ctx().clone();
+    step_header(ui, 3, "Options", "", |_| {});
+    style::modal_card_frame(&ctx)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let h = ui.spacing().interact_size.y;
+                caption(ui, "ROW LIMIT");
+                ui.add_sized(
+                    [90.0, h],
+                    egui::TextEdit::singleline(&mut st.row_limit).hint_text("no limit"),
+                )
+                .on_hover_text("Maximum rows read per source. Empty = no limit.");
+                ui.separator();
+                caption(ui, "IGNORE COLUMNS");
+                ui.add_sized(
+                    [220.0, h],
                     egui::TextEdit::singleline(&mut st.ignore_columns)
-                        .hint_text("updated_at, version")
-                        .desired_width(320.0),
+                        .hint_text("updated_at, version"),
                 );
-                ui.end_row();
+                ui.separator();
+                ui.checkbox(&mut st.tolerant, "Tolerant formats")
+                    .on_hover_text("1.0 = 1, true = 1, and timestamp formats are treated as equal");
+                ui.checkbox(&mut st.trim, "Trim trailing spaces");
+                ui.checkbox(&mut st.case_insensitive, "Ignore letter case");
             });
-        ui.checkbox(
-            &mut st.tolerant,
-            "Tolerant values (1.0 = 1, true = 1, timestamp formats)",
-        );
-        ui.checkbox(&mut st.trim, "Ignore trailing spaces");
-        ui.checkbox(&mut st.case_insensitive, "Ignore letter case in values");
-    });
+        });
 }
 
 fn clip(value: &str) -> String {
@@ -1031,20 +1348,6 @@ fn clip(value: &str) -> String {
         out.push('…');
         out
     }
-}
-
-fn stat(ui: &mut egui::Ui, label: &str, value: usize, color: Option<egui::Color32>) {
-    ui.vertical(|ui| {
-        let mut text = egui::RichText::new(fmt_count(value as u64))
-            .strong()
-            .size(18.0);
-        if let Some(c) = color {
-            text = text.color(c);
-        }
-        ui.label(text);
-        ui.label(egui::RichText::new(label).weak().small());
-    });
-    ui.add_space(18.0);
 }
 
 fn row_matches(diff: &multi_compare::MultiRowDiff, needle: &str) -> bool {
@@ -1060,70 +1363,155 @@ fn row_matches(diff: &multi_compare::MultiRowDiff, needle: &str) -> bool {
             .any(|v| v.to_lowercase().contains(needle))
 }
 
+/// Kartu angka ringkasan hasil.
+fn stat_tile(ui: &mut egui::Ui, label: &str, value: usize, color: egui::Color32) {
+    style::modal_card_frame(ui.ctx())
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(fmt_count(value as u64))
+                    .strong()
+                    .size(20.0)
+                    .color(color),
+            );
+            caption(ui, label);
+        });
+}
+
+#[allow(clippy::too_many_lines)]
 fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
     let ctx = ui.ctx().clone();
-    ui.label(egui::RichText::new("Differences").strong().size(15.0));
+    let dark = ctx.global_style().visuals.dark_mode;
+    let result = st.result.clone();
+    let counts = result.as_ref().map(|r| r.counts()).unwrap_or_default();
+    let show_filters = result.as_ref().is_some_and(|r| !r.diffs.is_empty());
+    step_header(
+        ui,
+        4,
+        "Differences",
+        "Only keys that are missing somewhere or have different values.",
+        |ui| {
+            if show_filters {
+                style::render_search_field(ui, &mut st.result_filter, "Filter rows…", 200.0);
+                ui.checkbox(
+                    &mut st.show_changed,
+                    format!("Changed ({})", fmt_count(counts.1 as u64)),
+                );
+                ui.checkbox(
+                    &mut st.show_missing,
+                    format!("Missing ({})", fmt_count(counts.0 as u64)),
+                );
+            }
+        },
+    );
     if let Some(e) = &st.result_error {
-        error_label(ui, e);
-    }
-    let Some(result) = st.result.clone() else {
-        if st.result_error.is_none() {
-            muted_label(
-                ui,
-                "Press PROCESS to compare. Only keys that are missing somewhere or whose values differ are listed.",
+        style::theme_alert_frame(&ctx, true).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(format!("{}  {e}", i::ICON_ERROR.codepoint))
+                    .color(style::theme_danger(&ctx)),
             );
+        });
+        ui.add_space(6.0);
+    }
+    let Some(result) = result else {
+        if st.result_error.is_none() {
+            egui::Frame::new()
+                .fill(style::nav_track(&ctx))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(i::ICON_PLAY_ARROW.codepoint)
+                                .size(18.0)
+                                .color(style::nav_text_muted(&ctx)),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Press PROCESS to read every source and list the rows that differ here.",
+                            )
+                            .color(style::nav_text_muted(&ctx)),
+                        );
+                    });
+                });
         }
         return;
     };
-    let (missing, changed) = result.counts();
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        stat(ui, "keys compared", result.total_keys, None);
-        stat(
-            ui,
-            "identical",
+    let (missing, changed) = counts;
+
+    ui.columns(4, |cols| {
+        stat_tile(
+            &mut cols[0],
+            "KEYS COMPARED",
+            result.total_keys,
+            style::nav_text_strong(&ctx),
+        );
+        stat_tile(
+            &mut cols[1],
+            "IDENTICAL",
             result.identical,
-            Some(style::theme_success(&ctx)),
+            style::theme_success(&ctx),
         );
-        stat(
-            ui,
-            "missing somewhere",
+        stat_tile(
+            &mut cols[2],
+            "MISSING SOMEWHERE",
             missing,
-            Some(style::theme_danger(&ctx)),
+            style::theme_danger(&ctx),
         );
-        stat(
-            ui,
-            "values differ",
+        stat_tile(
+            &mut cols[3],
+            "VALUES DIFFER",
             changed,
-            Some(style::theme_warning(&ctx)),
+            style::theme_warning(&ctx),
         );
     });
+    ui.add_space(8.0);
 
-    egui::Grid::new("cmp_sources")
-        .num_columns(4)
-        .striped(true)
-        .spacing([18.0, 4.0])
-        .show(ui, |ui| {
-            for h in ["Query", "Rows read", "Missing here", "Duplicate keys"] {
-                ui.label(egui::RichText::new(h).weak().small());
-            }
-            ui.end_row();
-            for s in &result.sources {
-                ui.label(&s.label);
-                let rows = fmt_count(s.rows as u64);
-                if s.truncated {
-                    ui.label(
-                        egui::RichText::new(format!("{rows} (limit reached)"))
-                            .color(style::theme_warning(&ctx)),
-                    );
-                } else {
-                    ui.label(rows);
-                }
-                ui.label(fmt_count(s.missing as u64));
-                ui.label(fmt_count(s.duplicate_keys as u64));
-                ui.end_row();
-            }
-        });
+    // Ringkasan per sumber.
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        for (k, s) in result.sources.iter().enumerate() {
+            egui::Frame::new()
+                .fill(style::nav_track(&ctx))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        source_badge(ui, k, 16.0);
+                        ui.label(egui::RichText::new(&s.label).strong());
+                        let mut text = format!(
+                            "{} rows · {} missing",
+                            fmt_count(s.rows as u64),
+                            fmt_count(s.missing as u64)
+                        );
+                        if s.duplicate_keys > 0 {
+                            text.push_str(&format!(
+                                " · {} duplicate keys",
+                                fmt_count(s.duplicate_keys as u64)
+                            ));
+                        }
+                        ui.label(
+                            egui::RichText::new(text)
+                                .size(11.5)
+                                .color(style::nav_text_muted(&ctx)),
+                        );
+                        if s.truncated {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} limit reached",
+                                    i::ICON_WARNING.codepoint
+                                ))
+                                .size(11.5)
+                                .color(style::theme_warning(&ctx)),
+                            );
+                        }
+                    });
+                });
+        }
+    });
     if result.truncated() {
         warning_label(
             ui,
@@ -1133,39 +1521,34 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
     if result.columns.is_empty() {
         warning_label(
             ui,
-            "No value column exists in every query, so only the presence of keys was compared. Use column aliases to match names.",
+            "No value column exists in every source, so only the presence of keys was compared. Use Rename columns to match names.",
         );
     }
     if !result.partial_columns.is_empty() {
         warning_label(
             ui,
             &format!(
-                "Not compared (missing from some queries): {}",
+                "Not compared (missing from some sources): {}",
                 result.partial_columns.join(", ")
             ),
         );
     }
+    ui.add_space(8.0);
     if result.diffs.is_empty() {
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(format!("{} All rows match.", i::ICON_CHECK.codepoint))
+        style::theme_alert_frame(&ctx, false).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}  All rows match across {} sources.",
+                    i::ICON_CHECK_CIRCLE.codepoint,
+                    result.labels.len()
+                ))
                 .color(style::theme_success(&ctx)),
-        );
+            );
+        });
         return;
     }
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.checkbox(
-            &mut st.show_missing,
-            format!("Missing ({})", fmt_count(missing as u64)),
-        );
-        ui.checkbox(
-            &mut st.show_changed,
-            format!("Changed ({})", fmt_count(changed as u64)),
-        );
-        style::render_search_field(ui, &mut st.result_filter, "Filter rows…", 220.0);
-    });
     let needle = st.result_filter.trim().to_lowercase();
     let visible: Vec<&multi_compare::MultiRowDiff> = result
         .diffs
@@ -1179,75 +1562,103 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
         })
         .filter(|d| row_matches(d, &needle))
         .collect();
-    let headers = result.table_headers();
-    let key_count = result.key_columns.len();
     let sources = result.labels.len();
     let danger = style::theme_danger(&ctx);
     let warn = style::theme_warning(&ctx);
-    let muted = style::theme_muted_text(&ctx);
+    let muted = style::nav_text_muted(&ctx);
+    let mono = egui::FontFamily::Monospace;
 
-    ui.add_space(4.0);
-    egui::ScrollArea::horizontal()
-        .id_salt("cmp_result_scroll")
+    style::modal_card_frame(&ctx)
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            egui::Grid::new("cmp_result_grid")
-                .striped(true)
-                .spacing([14.0, 4.0])
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt("cmp_result_scroll")
                 .show(ui, |ui| {
-                    for h in &headers {
-                        ui.label(egui::RichText::new(h).strong().small());
-                    }
-                    ui.end_row();
-                    for diff in visible.iter().take(MAX_ROWS_SHOWN) {
-                        for k in &diff.key {
-                            let text = if k == crate::data_transfer::NULL_MARKER {
-                                "NULL".to_string()
-                            } else {
-                                clip(k)
-                            };
-                            ui.label(egui::RichText::new(text).family(egui::FontFamily::Monospace));
-                        }
-                        let status = diff.status(&result.labels, &result.columns);
-                        ui.label(
-                            egui::RichText::new(status)
-                                .small()
-                                .color(if diff.is_missing() { danger } else { warn }),
-                        );
-                        for c in 0..result.columns.len() {
-                            let differs = diff.changed.contains(&c);
-                            for s in 0..sources {
-                                if !diff.present.get(s).copied().unwrap_or(false) {
-                                    ui.label(
-                                        egui::RichText::new("missing")
-                                            .italics()
-                                            .small()
-                                            .color(danger),
-                                    );
-                                    continue;
-                                }
-                                let value =
-                                    diff.values.get(s).and_then(|v| v.get(c)).cloned().flatten();
-                                let mut text = match &value {
-                                    Some(v) => egui::RichText::new(clip(v))
-                                        .family(egui::FontFamily::Monospace),
-                                    None => egui::RichText::new("NULL").italics().color(muted),
-                                };
-                                if differs {
-                                    text = text.color(warn).strong();
-                                }
-                                let response = ui.label(text);
-                                if let Some(v) = value
-                                    && v.chars().count() > MAX_CELL_CHARS
-                                {
-                                    response.on_hover_text(v);
+                    egui::Grid::new("cmp_result_grid")
+                        .striped(true)
+                        .spacing([16.0, 5.0])
+                        .show(ui, |ui| {
+                            for k in &result.key_columns {
+                                ui.label(egui::RichText::new(k).strong().size(12.0));
+                            }
+                            ui.label(egui::RichText::new("Status").strong().size(12.0));
+                            for col in &result.columns {
+                                for s in 0..sources {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                        source_badge(ui, s, 14.0);
+                                        ui.label(
+                                            egui::RichText::new(col)
+                                                .strong()
+                                                .size(12.0)
+                                                .color(source_color(s, dark)),
+                                        );
+                                    })
+                                    .response
+                                    .on_hover_text(format!("{col} in {}", result.labels[s]));
                                 }
                             }
-                        }
-                        ui.end_row();
-                    }
+                            ui.end_row();
+                            for diff in visible.iter().take(MAX_ROWS_SHOWN) {
+                                for k in &diff.key {
+                                    let text = if k == crate::data_transfer::NULL_MARKER {
+                                        "NULL".to_string()
+                                    } else {
+                                        clip(k)
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(text).family(mono.clone()).strong(),
+                                    );
+                                }
+                                let status = diff.status(&result.labels, &result.columns);
+                                ui.label(
+                                    egui::RichText::new(status)
+                                        .size(12.0)
+                                        .color(if diff.is_missing() { danger } else { warn }),
+                                );
+                                for c in 0..result.columns.len() {
+                                    let differs = diff.changed.contains(&c);
+                                    for s in 0..sources {
+                                        if !diff.present.get(s).copied().unwrap_or(false) {
+                                            ui.label(
+                                                egui::RichText::new("missing")
+                                                    .italics()
+                                                    .size(12.0)
+                                                    .color(danger),
+                                            );
+                                            continue;
+                                        }
+                                        let value = diff
+                                            .values
+                                            .get(s)
+                                            .and_then(|v| v.get(c))
+                                            .cloned()
+                                            .flatten();
+                                        let mut text = match &value {
+                                            Some(v) => {
+                                                egui::RichText::new(clip(v)).family(mono.clone())
+                                            }
+                                            None => {
+                                                egui::RichText::new("NULL").italics().color(muted)
+                                            }
+                                        };
+                                        if differs {
+                                            text = text.color(warn).strong();
+                                        }
+                                        let response = ui.label(text);
+                                        if let Some(v) = value
+                                            && v.chars().count() > MAX_CELL_CHARS
+                                        {
+                                            response.on_hover_text(v);
+                                        }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
         });
-    let _ = key_count;
     if visible.len() > MAX_ROWS_SHOWN {
         muted_label(
             ui,

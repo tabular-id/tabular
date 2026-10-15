@@ -24,6 +24,7 @@ pub enum TaskOwner {
     AiFix,
     RepoSetup,
     Compare,
+    IntegrationTest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

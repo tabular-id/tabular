@@ -244,35 +244,146 @@ open these diagrams but drop the cards when they save them. The cards come back
 from the endpoint links the next time a current version opens the diagram; the
 steps need to be generated again.
 
-## Integration tests (AI)
+## Integration tests
 
-Right-click a folder or a workspace and choose **Generate Integration Tests
-(AI)…**. Select one or more folders, from the same or different repositories,
-and optionally describe what to focus on. The AI receives the endpoint catalog
-(method, path, name, auth type, query names, tables and redacted body examples,
-never auth values) and designs suites that:
+Integration tests live in a tab per project. Click the **Integration Testing**
+button in the top bar, next to the project name. The tab opens the project's
+most recent suite, or a new empty suite when the project has none yet. A suite
+is an ordered list of HTTP steps that pass data to each other.
 
-- create data, read it back, update, list and clean up;
-- cover negative cases such as validation errors, not found and unauthorized;
-- pass values between steps and across services with `extract` and
-  `{{variables}}`.
+### Steps, phases and groups
 
-Suites are saved in `{app data}/http_tests/` and open in **Integration Tests…**
-(workspace menu).
+Each step has a **phase**, and the list always shows the execution order:
 
-### Running a suite
+1. **Setup** steps run first, for example login or master data the tests need.
+2. **Test** steps run next, group by group.
+3. **Cleanup** steps run last and remove the test data.
 
-- **Variables**: each folder gets a `base_url_<folder>` variable with the host
-  its requests use. Tokens, passwords and API keys start empty; fill them in
-  before running. `{{run_id}}` is unique per run, useful for unique emails.
-- Uncheck a step to skip it.
-- **Run** sends the steps in order. If the suite has steps that create, change
-  or remove data, Tabular asks for confirmation and shows the target servers.
-  Use a development or test environment.
-- Each step shows pass or fail, status and time. Expand it for assertions with
-  the actual value on failure, extracted variables, unresolved `{{variables}}`
-  and the start of the response body. **Open in HTTP client** opens the step with
-  the variables filled in.
+**Groups** split a suite into business areas, for example *Purchasing*,
+*Plant* and *Sales* in an ERP. Add groups in the left column, rename or reorder
+them from their context menu, and assign a step to a group in its details.
+Select a group and click **Run Purchasing** to test only that group. Steps the
+group depends on run too, even when they belong to another group. For example,
+*Plant* needs the purchase order that *Purchasing* creates, so that step runs
+as well. These steps are shown in italics. Cleanup runs for every step that
+created data.
+
+### Data flow between steps
+
+A step passes values to later steps with **Extract**, for example
+`po_id = json:$.id`. Later steps use the value as `{{po_id}}` in the URL,
+headers, body or auth. The **Data flow** column shows where each step's input
+comes from and which steps use its output.
+
+The **Checks** panel lists problems before you run:
+
+- A step uses a variable that only a later step provides, or that nothing provides.
+- A step creates data but no cleanup step removes it.
+- Cleanup steps remove data in the wrong order. **Auto-order cleanup** removes
+  dependent data first, in reverse order of creation.
+- A step has no assertions.
+
+### Editing a step
+
+Click a step to edit its phase, group, extract variables, assertions and the
+requirement it verifies. Double-click it, or use **Edit request in HTTP
+client**, to open the request in a new HTTP client tab. Variables are filled
+from the suite, the project environment and the last run, so you can send the
+request from there. **Save** in that tab writes the request back to the step.
+
+Add steps from the project's API collection with **Add step**. The host is
+replaced by the folder's `base_url_<folder>` variable, and auth values are
+replaced by variables such as `{{token}}`.
+
+### Generating steps with AI
+
+Open **AI** in the tab toolbar and describe the flow, for example
+*"Purchasing: create vendor, create PO, approve, receive goods"*.
+
+- **Add steps** appends steps to the suite, in the selected group. The AI
+  reuses ids that existing steps already extract.
+- **Add missing cleanup** adds cleanup steps for data that is not removed yet.
+- **Design new suites** creates complete suites from all API endpoints of the
+  project.
+
+The AI receives the endpoint catalog (method, path, name, auth type, query
+names, tables and redacted body examples, never auth values). It is asked to
+use `{{run_id}}` in created names and codes, and to add a cleanup step for
+every step that creates data. You can also start from a folder: right-click it
+and choose **Generate Integration Tests (AI)…**.
+
+### Running and cleaning up
+
+**Run all** or **Run <group>** shows the number of steps, the steps that change
+data, the cleanup steps, the environment and the target servers before
+anything is sent. Running against an environment marked Production needs an
+extra confirmation.
+
+- Steps run strictly in order. A step whose variables are missing, because
+  the step that provides them failed, is **Blocked** and not sent.
+- A failing Setup step blocks the remaining tests. **Stop after first failure**
+  in the menu does the same for test steps.
+- **Cleanup always runs**, also when tests fail or you press **Stop**. A
+  cleanup step only runs when the data it removes was actually created. Network
+  errors are retried once. Only **Abort** skips cleanup.
+- Data that could not be removed is listed as left behind, with its ids.
+- When the project has database connections and the steps are linked to
+  tables, Tabular then counts the rows that still contain the run id in those
+  tables. The query is read-only.
+
+Runs continue in the background when you switch tabs. They appear in the
+Background Tasks panel.
+
+### Report and validation evidence
+
+The **Report** view shows the verdict and statistics of the last run. The
+**History** view lists earlier runs. Statistics use ISTQB terms and follow the
+ISO/IEC/IEEE 29119-3 test completion report:
+
+| Item | Meaning |
+|---|---|
+| Verdict | PASS, PASS WITH DEVIATIONS (blocked steps or test data left behind), FAIL (below the pass criterion, or a setup step failed) or INCOMPLETE (stopped) |
+| Passed, Failed, Error, Blocked, Skipped | Failed means assertions failed; Error means no response |
+| Pass rate | Passed divided by executed steps |
+| Execution rate | Executed steps divided by planned steps, without disabled steps |
+| Pass criterion | Minimum pass rate, 100% unless changed in the menu |
+| Per group | The same counts for each group |
+| Response time | Minimum, average, p50, p90, p95 and maximum |
+| Endpoint coverage | API endpoints of the project that a step exercises, and the ones without a test |
+| Failures per endpoint | Endpoints that failed most |
+| Flaky steps | Steps whose result changed between recent runs |
+
+**Open full report** opens an HTML report you can print to PDF. **Export**
+saves HTML, Markdown, JUnit XML or JSON. The report contains validation
+evidence in the style of GAMP 5:
+
+- who ran it, on which machine and when;
+- the SHA-256 fingerprint of the suite definition that was run;
+- expected versus actual results for every step;
+- deviations and test data cleanup;
+- a traceability matrix from step to endpoint, tables and requirement note;
+- a review and approval table for signatures.
+
+Tokens, passwords and other secret values are redacted in results and
+reports.
+
+### Command line and CI
+
+```bash
+tabular test list [--project <name>] [--json]
+tabular test run "Procure to pay" --group Purchasing --junit report.xml --report report.html
+```
+
+`run` uses the project's active environment, or `--env <name>`. It refuses a
+Production environment unless you pass `--allow-production`. The exit code is
+0 for PASS and PASS WITH DEVIATIONS, and 1 otherwise.
+
+### Storage
+
+| What | Where |
+|---|---|
+| Suites | `{app data}/http_tests/<suite id>.json` |
+| Run history (last 50 per suite) | `{app data}/http_tests/runs/<suite id>/<run id>.json` |
 
 Assertions use `status`, `time_ms`, `body`, `header:<Name>` or
 `json:$.path.to[0].field` with `equals`, `not_equals`, `contains`,

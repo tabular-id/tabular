@@ -2885,6 +2885,48 @@ impl Tabular {
                             // 3. Switcher project (paling kiri di grup kanan). Picker koneksi/database
                             // kini ada di kartu melayang pojok kanan atas editor (db_context_bar).
                             crate::window_egui::project_ui::render_switcher(self, ui);
+
+                            // 4. Integration Testing, tepat di sebelah nama project.
+                            let it_active = self
+                                .query_tabs
+                                .get(self.active_tab_index)
+                                .is_some_and(|t| t.integration_test_state.is_some());
+                            let it_running = self
+                                .integration_tests
+                                .runs
+                                .values()
+                                .any(|j| j.is_running());
+                            let it_label = egui_icons::icons::ICON_FACT_CHECK
+                                .rich_text()
+                                .size(ai_icon_size)
+                                .color(if it_active {
+                                    egui::Color32::WHITE
+                                } else if it_running {
+                                    style::theme_accent(ui.ctx())
+                                } else {
+                                    ui.visuals().text_color()
+                                });
+                            if ui
+                                .add_sized(
+                                    ai_btn_size,
+                                    egui::Button::new(it_label)
+                                        .fill(if it_active {
+                                            style::theme_accent(ui.ctx())
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .stroke(egui::Stroke::NONE)
+                                        .corner_radius(egui::CornerRadius::same(5)),
+                                )
+                                .on_hover_text(if it_running {
+                                    "Integration Testing (a run is in progress)"
+                                } else {
+                                    "Integration Testing for this project"
+                                })
+                                .clicked()
+                            {
+                                crate::window_egui::integration_test_ui::open_for_active_project(self);
+                            }
                         },
                     );
                     // Kartu melayang konteks database (koneksi/database/schema) di pojok
@@ -3806,6 +3848,17 @@ impl Tabular {
                             .is_some_and(|t| t.compare_state.is_some())
                         {
                             crate::window_egui::multi_compare_ui::render_active_tab(self, ui);
+                            rendered_compare = true;
+                        }
+
+                        // Tab Integration Testing.
+                        if !rendered_compare
+                            && self
+                                .query_tabs
+                                .get(self.active_tab_index)
+                                .is_some_and(|t| t.integration_test_state.is_some())
+                        {
+                            crate::window_egui::integration_test_ui::render_active_tab(self, ui);
                             rendered_compare = true;
                         }
 
@@ -5769,6 +5822,7 @@ impl App for Tabular {
         crate::window_egui::git_jobs::poll(self, ctx);
         crate::window_egui::repo_setup_jobs::tick(self, ctx);
         crate::window_egui::multi_compare_jobs::tick(self, ctx);
+        crate::window_egui::integration_test_jobs::tick(self, ctx);
 
         self.render_query_insights(ctx);
         #[cfg(not(any(target_os = "ios", target_os = "android")))]

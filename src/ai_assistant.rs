@@ -808,6 +808,7 @@ pub fn is_sql_tab(tab: &QueryTab) -> bool {
         && tab.diagram_state.is_none()
         && tab.git_state.is_none()
         && tab.compare_state.is_none()
+        && tab.integration_test_state.is_none()
 }
 
 fn truncate_utf8(s: &str, max: usize) -> (&str, bool) {

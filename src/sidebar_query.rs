@@ -568,6 +568,7 @@ pub(crate) fn open_query_file(
         user_manager_state: None,
         git_state: None,
         compare_state: None,
+        integration_test_state: None,
         tx_mode: false,
         tx_active: false,
         session: None,

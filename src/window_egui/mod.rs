@@ -49,6 +49,8 @@ pub mod query_insight;
 pub mod query_jobs;
 pub mod query_stats_ui;
 pub mod render_dialogs;
+pub mod integration_test_jobs;
+pub mod integration_test_ui;
 pub mod multi_compare_jobs;
 pub mod multi_compare_ui;
 pub mod repo_setup_jobs;
@@ -814,6 +816,8 @@ pub struct Tabular {
     pub repo_setup: repo_setup_jobs::RepoSetupState,
     /// Multi-source Comparison: daftar tersimpan, job background, hasil terakhir.
     pub multi_compare: multi_compare_jobs::MultiCompareUi,
+    /// Integration Testing: run suite, generate AI, hasil terakhir per suite.
+    pub integration_tests: integration_test_jobs::IntegrationTestUi,
     /// State integrasi platform: deep link, Handoff, environment koneksi, Touch ID.
     pub platform_ui: platform_ui::PlatformUiState,
     // Visual data filter state for table browsing

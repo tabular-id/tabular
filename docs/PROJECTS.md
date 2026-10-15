@@ -75,6 +75,14 @@ role can read a shared project; owners and admins can also edit it.
 **Stop sharing** removes all four shares. Renaming a shared project shares it again
 under the new name.
 
+## Integration testing
+
+The **Integration Testing** button next to the project name opens the project's
+integration test suites. Suites use the project's HTTP API workspace for
+endpoints, its active environment for variables, and its database connections
+to verify that test data was cleaned up. See
+[HTTP API repository: Integration tests](HTTP_API_REPOSITORY.md#integration-tests).
+
 ## Where it is stored
 
 | What | Where |
@@ -83,4 +91,5 @@ under the new name.
 | Memory | `<data dir>/projects/<id>/memory/` |
 | Active project and filter | `<data dir>/projects/ui_state.json` |
 | Secret values | OS keychain or Tabular's encrypted secrets file |
+| Integration test suites and runs | `<data dir>/http_tests/`; each suite records its project id |
 | On the sync server | One encrypted row per project; the server cannot read it |

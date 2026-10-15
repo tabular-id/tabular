@@ -4,21 +4,22 @@
 //!   dan review hasil, lalu request ditambahkan ke folder dan endpoint
 //!   ditautkan ke tabel diagram yang group-nya memakai repository yang sama;
 //! - jendela "Generate Integration Tests" dari satu atau beberapa folder;
-//! - jendela "Integration Tests" untuk mengatur variabel dan menjalankan suite;
+//!   suite hasilnya dibuka di tab Integration Testing
+//!   (`window_egui::integration_test_ui`);
 //! - popup daftar folder/group yang saling bertaut.
 //!
 //! Menu konteks sidebar dan diagram hanya punya `egui::Context`, jadi mereka
 //! meminta aksi lewat [`request`]; aksi dijalankan di [`render`] yang
 //! dipanggil tiap frame dengan akses ke `Tabular`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
 use crate::agent::harness::{ProgressStatus, ProgressStep};
 use crate::http_collection::{HttpFolder, save_workspaces};
-use crate::http_tests::{HttpTestSuite, StepResult, TestEvent, TestGenHandle, TestRunHandle};
+use crate::http_tests::{HttpTestSuite, TestGenHandle};
 use crate::models::structs::{DiagramState, GroupRepoDraft};
 use crate::repo_endpoints::{EndpointScanHandle, GeneratedEndpoint};
 use crate::repo_links::{ApplyStats, EndpointTables, FolderRef, GroupRef, RepoIndex};
@@ -173,25 +174,6 @@ struct TestGenWindow {
     task_id: Option<u64>,
 }
 
-struct RunState {
-    suite_id: String,
-    handle: TestRunHandle,
-    current: Option<usize>,
-}
-
-#[derive(Default)]
-struct SuitesWindow {
-    suites: Vec<HttpTestSuite>,
-    selected: Option<String>,
-    /// Hasil run terakhir per suite: indeks langkah → hasil.
-    results: HashMap<String, Vec<Option<StepResult>>>,
-    run: Option<RunState>,
-    confirm_run: Option<String>,
-    confirm_remove: Option<String>,
-    expanded: HashSet<usize>,
-    dirty: bool,
-}
-
 #[derive(Default)]
 struct LinksPopup {
     title: String,
@@ -209,7 +191,6 @@ pub struct HttpRepoUi {
     /// Pilihan user untuk batch AI paralel per job (0 = bawaan).
     parallel_batches: usize,
     test_gen: Option<TestGenWindow>,
-    suites: Option<SuitesWindow>,
     links: Option<LinksPopup>,
 }
 
@@ -650,7 +631,6 @@ pub fn render(app: &mut Tabular, ctx: &egui::Context) {
     ui.render_editor(app, ctx);
     ui.render_endpoints(app, ctx);
     ui.render_test_gen(app, ctx);
-    ui.render_suites(app, ctx);
     ui.render_links(app, ctx);
     app.http_repo = ui;
 }
@@ -716,7 +696,9 @@ impl HttpRepoUi {
                     task_id: None,
                 });
             }
-            RepoAction::OpenSuites => self.open_suites(None),
+            RepoAction::OpenSuites => {
+                crate::window_egui::integration_test_ui::open_for_active_project(app);
+            }
         }
     }
 
@@ -776,17 +758,6 @@ impl HttpRepoUi {
             had_repo: folder.has_repository(),
             auto_import_flexurio: is_empty,
         });
-    }
-
-    fn open_suites(&mut self, select: Option<String>) {
-        let win = self.suites.get_or_insert_with(SuitesWindow::default);
-        if win.run.is_none() {
-            win.suites = crate::http_tests::load_suites();
-        }
-        win.selected = select
-            .or_else(|| win.selected.clone())
-            .filter(|id| win.suites.iter().any(|s| &s.id == id))
-            .or_else(|| win.suites.first().map(|s| s.id.clone()));
     }
 
     fn parallel(&self) -> usize {
@@ -1027,9 +998,11 @@ impl HttpRepoUi {
                 }
             }
         }
-        if let Some(suites) = generated {
+        if let Some(mut suites) = generated {
             let mut saved = 0;
-            for s in &suites {
+            let project_id = crate::window_egui::project_ui::active(app).map(|p| p.id.clone());
+            for s in &mut suites {
+                s.project_id = project_id.clone();
                 match crate::http_tests::save_suite(s) {
                     Ok(()) => saved += 1,
                     Err(e) => app.toasts.error(e),
@@ -1040,55 +1013,11 @@ impl HttpRepoUi {
                 "Generated {saved} integration test suite(s) with {steps} step(s)"
             ));
             self.test_gen = None;
-            self.open_suites(suites.first().map(|s| s.id.clone()));
+            if let Some(first) = suites.first() {
+                crate::window_egui::integration_test_ui::open_suite(app, &first.id);
+            }
         }
 
-        if let Some(win) = self.suites.as_mut()
-            && let Some(run) = win.run.as_mut()
-        {
-            busy = true;
-            let results = win.results.entry(run.suite_id.clone()).or_default();
-            let mut done = None;
-            loop {
-                match run.handle.rx.try_recv() {
-                    Ok(TestEvent::StepStarted(i)) => run.current = Some(i),
-                    Ok(TestEvent::StepFinished(r)) => {
-                        let i = r.index;
-                        if results.len() <= i {
-                            results.resize(i + 1, None);
-                        }
-                        results[i] = Some(*r);
-                    }
-                    Ok(TestEvent::Finished { cancelled }) => {
-                        done = Some(cancelled);
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        done = Some(true);
-                        break;
-                    }
-                }
-            }
-            if let Some(cancelled) = done {
-                let finished: Vec<&StepResult> = results.iter().flatten().collect();
-                let passed = finished.iter().filter(|r| r.passed()).count();
-                let failed = finished
-                    .iter()
-                    .filter(|r| !r.passed() && !r.skipped)
-                    .count();
-                let msg = format!(
-                    "Test run {}: {passed} passed, {failed} failed",
-                    if cancelled { "stopped" } else { "finished" }
-                );
-                if failed > 0 || cancelled {
-                    app.toasts.error(msg);
-                } else {
-                    app.toasts.success(msg);
-                }
-                win.run = None;
-            }
-        }
         if busy {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
@@ -1682,87 +1611,6 @@ impl HttpRepoUi {
         self.test_gen = Some(win);
     }
 
-    fn render_suites(&mut self, app: &mut Tabular, ctx: &egui::Context) {
-        let Some(mut win) = self.suites.take() else {
-            return;
-        };
-        let mut open = true;
-        let mut start_run: Option<String> = None;
-        let mut open_request: Option<crate::http_collection::SavedRequest> = None;
-        egui::Window::new("Integration Tests")
-            .id(egui::Id::new("http_repo_suites"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_size(egui::vec2(880.0, 600.0))
-            .show(ctx, |ui| {
-                if win.suites.is_empty() {
-                    small_weak(
-                        ui,
-                        "No integration tests yet. Right-click an HTTP API folder and choose \
-                         Generate Integration Tests (AI)….",
-                    );
-                    return;
-                }
-                ui.horizontal_top(|ui| {
-                    suites_list(ui, &mut win);
-                    ui.separator();
-                    ui.vertical(|ui| suite_detail(ui, &mut win, &mut start_run, &mut open_request));
-                });
-            });
-
-        if let Some(id) = confirm_run_dialog(ctx, &mut win) {
-            start_run = Some(id);
-        }
-        confirm_remove_dialog(app, ctx, &mut win);
-
-        // Simpan perubahan (nama, variabel, langkah aktif) saat input dilepas.
-        if win.dirty && !ctx.egui_wants_keyboard_input() {
-            for s in &win.suites {
-                if let Err(e) = crate::http_tests::save_suite(s) {
-                    app.toasts.error(e);
-                    break;
-                }
-            }
-            win.dirty = false;
-        }
-        if let Some(id) = start_run
-            && let Some(suite) = win.suites.iter().find(|s| s.id == id).cloned()
-        {
-            if win.dirty {
-                if let Err(e) = crate::http_tests::save_suite(&suite) {
-                    app.toasts.error(e);
-                }
-                win.dirty = false;
-            }
-            win.results
-                .insert(id.clone(), vec![None; suite.steps.len()]);
-            win.expanded.clear();
-            win.run = Some(RunState {
-                suite_id: id,
-                handle: crate::http_tests::spawn_run(suite),
-                current: None,
-            });
-        }
-        if let Some(req) = open_request {
-            let vars = win
-                .selected
-                .as_ref()
-                .and_then(|id| win.suites.iter().find(|s| &s.id == id))
-                .map(crate::http_tests::initial_vars)
-                .unwrap_or_default();
-            let resolved = crate::http_tests::resolve_request(&req, &vars);
-            crate::sidebar_collection::apply_collection_request_to_active_tab(app, &resolved);
-        }
-        if !open {
-            if let Some(run) = win.run.take() {
-                run.handle.cancel();
-            }
-            return;
-        }
-        self.suites = Some(win);
-    }
-
     fn render_links(&mut self, app: &mut Tabular, ctx: &egui::Context) {
         let Some(popup) = self.links.take() else {
             return;
@@ -2104,341 +1952,6 @@ fn add_endpoints(app: &mut Tabular, win: &EndpointWindow) {
     app.toasts.success(msg);
 }
 
-fn suites_list(ui: &mut egui::Ui, win: &mut SuitesWindow) {
-    ui.vertical(|ui| {
-        ui.set_width(220.0);
-        egui::ScrollArea::vertical()
-            .id_salt("http_repo_suite_list")
-            .show(ui, |ui| {
-                let mut pick = None;
-                for s in &win.suites {
-                    let (pass, fail) = win.results.get(&s.id).map_or((0, 0), |r| {
-                        let done: Vec<&StepResult> = r.iter().flatten().collect();
-                        (
-                            done.iter().filter(|x| x.passed()).count(),
-                            done.iter().filter(|x| !x.passed() && !x.skipped).count(),
-                        )
-                    });
-                    let mut text = format!("{}\n{} step(s)", s.name, s.steps.len());
-                    if pass + fail > 0 {
-                        text.push_str(&format!(" · {pass} passed · {fail} failed"));
-                    }
-                    let selected = win.selected.as_deref() == Some(s.id.as_str());
-                    if ui.selectable_label(selected, text).clicked() {
-                        pick = Some(s.id.clone());
-                    }
-                }
-                if let Some(id) = pick {
-                    win.selected = Some(id);
-                    win.expanded.clear();
-                }
-            });
-    });
-}
-
-fn step_icon(ui: &mut egui::Ui, running_here: bool, result: Option<&StepResult>) {
-    use egui_icons::icons as i;
-    if running_here && result.is_none() {
-        ui.add(egui::Spinner::new().size(12.0));
-        return;
-    }
-    let (glyph, color) = match result {
-        Some(r) if r.skipped => (i::ICON_SKIP_NEXT.codepoint, ui.visuals().weak_text_color()),
-        Some(r) if r.passed() => (
-            i::ICON_CHECK_CIRCLE.codepoint,
-            egui::Color32::from_rgb(76, 175, 80),
-        ),
-        Some(_) => (i::ICON_CANCEL.codepoint, ui.visuals().error_fg_color),
-        None => (
-            i::ICON_RADIO_BUTTON_UNCHECKED.codepoint,
-            ui.visuals().weak_text_color(),
-        ),
-    };
-    ui.label(egui::RichText::new(glyph).color(color));
-}
-
-fn suite_detail(
-    ui: &mut egui::Ui,
-    win: &mut SuitesWindow,
-    start_run: &mut Option<String>,
-    open_request: &mut Option<crate::http_collection::SavedRequest>,
-) {
-    use egui_icons::icons as i;
-    let Some(idx) = win
-        .selected
-        .as_ref()
-        .and_then(|id| win.suites.iter().position(|s| &s.id == id))
-    else {
-        small_weak(ui, "Select a suite.");
-        return;
-    };
-    let running_id = win.run.as_ref().map(|r| r.suite_id.clone());
-    let current_step = win.run.as_ref().and_then(|r| r.current);
-    let suite_id = win.suites[idx].id.clone();
-    let is_running = running_id.as_deref() == Some(suite_id.as_str());
-    let results = win.results.get(&suite_id).cloned().unwrap_or_default();
-    let mut stop = false;
-    let mut confirm_run = None;
-    let mut confirm_remove = None;
-    let mut dirty = false;
-    let suite = &mut win.suites[idx];
-    ui.horizontal(|ui| {
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut suite.name)
-                    .desired_width((ui.available_width() - 200.0).max(120.0))
-                    .font(egui::TextStyle::Heading),
-            )
-            .changed()
-        {
-            dirty = true;
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if is_running {
-                if ui
-                    .button(format!("{} Stop", i::ICON_STOP.codepoint))
-                    .clicked()
-                {
-                    stop = true;
-                }
-            } else if ui
-                .add_enabled(
-                    running_id.is_none(),
-                    crate::diagram_repo::accent_button(
-                        ui,
-                        format!("{} Run", i::ICON_PLAY_ARROW.codepoint),
-                    ),
-                )
-                .clicked()
-            {
-                if suite.mutating_steps() > 0 {
-                    confirm_run = Some(suite_id.clone());
-                } else {
-                    *start_run = Some(suite_id.clone());
-                }
-            }
-            if ui
-                .add_enabled(!is_running, egui::Button::new(i::ICON_DELETE.codepoint))
-                .on_hover_text("Remove this suite")
-                .clicked()
-            {
-                confirm_remove = Some(suite_id.clone());
-            }
-        });
-    });
-    if !suite.description.is_empty() {
-        small_weak(ui, &suite.description);
-    }
-    ui.add_space(4.0);
-    egui::CollapsingHeader::new(format!("Variables ({})", suite.variables.len()))
-        .id_salt(("suite_vars", &suite_id))
-        .default_open(true)
-        .show(ui, |ui| {
-            let mut remove_var = None;
-            egui::Grid::new(("suite_vars_grid", &suite_id))
-                .num_columns(3)
-                .spacing([6.0, 4.0])
-                .show(ui, |ui| {
-                    for (i, (k, v)) in suite.variables.iter_mut().enumerate() {
-                        dirty |= ui
-                            .add(egui::TextEdit::singleline(k).desired_width(180.0))
-                            .changed();
-                        let secret = ["token", "password", "secret", "key"]
-                            .iter()
-                            .any(|s| k.to_ascii_lowercase().contains(s));
-                        dirty |= ui
-                            .add(
-                                egui::TextEdit::singleline(v)
-                                    .password(secret)
-                                    .desired_width(300.0),
-                            )
-                            .changed();
-                        if ui
-                            .small_button(egui_icons::icons::ICON_CLOSE.codepoint)
-                            .on_hover_text("Remove variable")
-                            .clicked()
-                        {
-                            remove_var = Some(i);
-                        }
-                        ui.end_row();
-                    }
-                });
-            if let Some(i) = remove_var {
-                suite.variables.remove(i);
-                dirty = true;
-            }
-            ui.horizontal(|ui| {
-                if ui.small_button("➕ Add variable").clicked() {
-                    suite.variables.push((String::new(), String::new()));
-                    dirty = true;
-                }
-                small_weak(ui, "{{run_id}} is set automatically for each run.");
-            });
-        });
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .id_salt(("suite_steps", &suite_id))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for (i, step) in suite.steps.iter_mut().enumerate() {
-                let result = results.get(i).and_then(|r| r.as_ref());
-                let resp = ui
-                    .horizontal(|ui| {
-                        dirty |= ui
-                            .add_enabled(!is_running, egui::Checkbox::new(&mut step.enabled, ""))
-                            .changed();
-                        step_icon(ui, is_running && current_step == Some(i), result);
-                        small_weak(ui, format!("{}.", i + 1));
-                        method_chip(ui, step.request.method.label());
-                        ui.label(egui::RichText::new(&step.name).strong());
-                        ui.label(
-                            egui::RichText::new(&step.request.url)
-                                .family(egui::FontFamily::Monospace)
-                                .size(11.0)
-                                .weak(),
-                        );
-                        if let Some(r) = result.filter(|r| !r.skipped) {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    small_weak(ui, format!("{} ms", r.time_ms));
-                                    let status = if r.error.is_some() {
-                                        "error".to_string()
-                                    } else {
-                                        r.status.to_string()
-                                    };
-                                    ui.label(egui::RichText::new(status).small().strong());
-                                },
-                            );
-                        }
-                    })
-                    .response
-                    .interact(egui::Sense::click());
-                if resp.clicked() && !win.expanded.remove(&i) {
-                    win.expanded.insert(i);
-                }
-                if win.expanded.contains(&i) {
-                    ui.indent(("step_detail", i), |ui| {
-                        step_details(ui, step, result);
-                        if ui.small_button("Open in HTTP client").clicked() {
-                            *open_request = Some(step.request.clone());
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-            }
-        });
-    if stop && let Some(run) = &win.run {
-        run.handle.cancel();
-    }
-    if confirm_run.is_some() {
-        win.confirm_run = confirm_run;
-    }
-    if confirm_remove.is_some() {
-        win.confirm_remove = confirm_remove;
-    }
-    win.dirty |= dirty;
-}
-
-/// Konfirmasi sebelum request yang mengubah data dikirim. Mengembalikan id
-/// suite yang boleh dijalankan.
-fn confirm_run_dialog(ctx: &egui::Context, win: &mut SuitesWindow) -> Option<String> {
-    let id = win.confirm_run.clone()?;
-    let Some(suite) = win.suites.iter().find(|s| s.id == id) else {
-        win.confirm_run = None;
-        return None;
-    };
-    let mut decided: Option<bool> = None;
-    let targets: Vec<String> = suite
-        .variables
-        .iter()
-        .filter(|(k, _)| k.starts_with("base_url"))
-        .map(|(k, v)| format!("{k} = {v}"))
-        .collect();
-    style::render_modal_backdrop(ctx, "http_repo_confirm_run", true);
-    egui::Window::new("Run integration tests?")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            ui.label(format!(
-                "This run sends {} request(s) that create, change or remove data.",
-                suite.mutating_steps()
-            ));
-            if !targets.is_empty() {
-                ui.label("Target servers:");
-                for t in &targets {
-                    ui.label(egui::RichText::new(t).family(egui::FontFamily::Monospace));
-                }
-            }
-            ui.label(
-                egui::RichText::new("Use a development or test environment, not production.")
-                    .color(ui.visuals().warn_fg_color),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(false);
-                }
-                if ui
-                    .add(crate::diagram_repo::accent_button(ui, "Run"))
-                    .clicked()
-                {
-                    decided = Some(true);
-                }
-            });
-        });
-    match decided {
-        Some(yes) => {
-            win.confirm_run = None;
-            yes.then_some(id)
-        }
-        None => None,
-    }
-}
-
-fn confirm_remove_dialog(app: &mut Tabular, ctx: &egui::Context, win: &mut SuitesWindow) {
-    let Some(id) = win.confirm_remove.clone() else {
-        return;
-    };
-    let mut decided: Option<bool> = None;
-    let name = win
-        .suites
-        .iter()
-        .find(|s| s.id == id)
-        .map(|s| s.name.clone())
-        .unwrap_or_default();
-    egui::Window::new("Remove test suite?")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            ui.label(format!("Remove \"{name}\"? This cannot be undone."));
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decided = Some(false);
-                }
-                if ui.button("Remove").clicked() {
-                    decided = Some(true);
-                }
-            });
-        });
-    let Some(yes) = decided else {
-        return;
-    };
-    win.confirm_remove = None;
-    if !yes {
-        return;
-    }
-    match crate::http_tests::remove_suite(&id) {
-        Ok(()) => {
-            win.suites.retain(|s| s.id != id);
-            win.results.remove(&id);
-            win.selected = win.suites.first().map(|s| s.id.clone());
-        }
-        Err(e) => app.toasts.error(e),
-    }
-}
-
 fn param_lines(ui: &mut egui::Ui, title: &str, params: &[crate::repo_endpoints::ParamSpec]) {
     if params.is_empty() {
         return;
@@ -2514,67 +2027,31 @@ fn endpoint_details(ui: &mut egui::Ui, ep: &GeneratedEndpoint) {
     code_block(ui, "Response example", &ep.response_example);
 }
 
-fn step_details(
-    ui: &mut egui::Ui,
-    step: &crate::http_tests::HttpTestStep,
-    result: Option<&StepResult>,
-) {
-    if !step.request.body_text.trim().is_empty() {
-        code_block(ui, "Body", &step.request.body_text);
-    }
-    if !step.extract.is_empty() {
-        ui.label(egui::RichText::new("Extract").small().strong());
-        for e in &step.extract {
-            let value = result
-                .and_then(|r| r.extracted.iter().find(|(k, _)| *k == e.var))
-                .map(|(_, v)| format!(" = {}", crate::repo_scan::truncate_chars(v, 80)))
-                .unwrap_or_default();
-            ui.label(
-                egui::RichText::new(format!("  {} from {}{value}", e.var, e.from))
-                    .family(egui::FontFamily::Monospace)
-                    .size(11.0),
-            );
+#[cfg(test)]
+mod tmp_probe_linked_groups {
+    #[test]
+    #[ignore]
+    fn probe() {
+        for fid in ["fld_1792034115297_4", "fld_1791991342113_3", "fl_B9nZsmiWdX"] {
+            let mut app = crate::window_egui::Tabular::default();
+            app.data_directory = "/private/tmp/claude-503/-Users-jayuda-Documents-PROJECT-TABULAR-tabular-client/227b34ba-d6c3-4a21-893a-8889a5a3397b/scratchpad/data".to_string();
+            app.yaak_workspaces = crate::http_collection::load_workspaces();
+            app.selected_menu = "APIs".to_string();
+            let tabs_before = app.query_tabs.len();
+            let ctx = eframe::egui::Context::default();
+            for frame in 0..3 {
+                let mut out = ctx.run_ui(Default::default(), |ui| {
+                    let ctx = ui.ctx().clone();
+                    if frame == 0 {
+                        super::request(&ctx, super::RepoAction::ShowLinkedGroups { folder_id: fid.to_string() });
+                    }
+                    super::render(&mut app, &ctx);
+                });
+                out.textures_delta.clear();
+            }
+            let active = app.query_tabs.get(app.active_tab_index).map(|t| (t.title.clone(), t.diagram_state.is_some()));
+            eprintln!("== {fid}: tabs {tabs_before}->{} active={:?} popup={:?}", app.query_tabs.len(), active,
+                app.http_repo.links.as_ref().map(|l| (l.title.clone(), l.groups.len())));
         }
-    }
-    ui.label(egui::RichText::new("Assertions").small().strong());
-    if step.assertions.is_empty() {
-        small_weak(ui, "  (none)");
-    }
-    for (i, a) in step.assertions.iter().enumerate() {
-        let res = result.and_then(|r| r.assertions.get(i));
-        let (mark, color) = match res {
-            Some(r) if r.passed => ("✅", egui::Color32::from_rgb(76, 175, 80)),
-            Some(_) => ("❌", ui.visuals().error_fg_color),
-            None => ("•", ui.visuals().weak_text_color()),
-        };
-        let actual = res
-            .filter(|r| !r.passed)
-            .and_then(|r| r.actual.as_ref())
-            .map(|v| format!("  (actual: {})", crate::repo_scan::truncate_chars(v, 80)))
-            .unwrap_or_default();
-        ui.label(
-            egui::RichText::new(format!("  {mark} {}{actual}", a.describe()))
-                .size(11.5)
-                .color(color),
-        );
-    }
-    if let Some(r) = result {
-        if let Some(e) = &r.error {
-            ui.colored_label(ui.visuals().error_fg_color, e);
-        }
-        if !r.unresolved.is_empty() {
-            ui.label(
-                egui::RichText::new(format!(
-                    "Variables without a value: {}",
-                    r.unresolved.join(", ")
-                ))
-                .small()
-                .color(ui.visuals().warn_fg_color),
-            );
-        }
-        if !r.url.is_empty() {
-            small_weak(ui, format!("{} {}", r.method, r.url));
-        }
-        code_block(ui, "Response", &r.body_preview);
     }
 }
