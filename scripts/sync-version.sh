@@ -17,7 +17,8 @@
 #   5. .SRCINFO (root Arch package metadata)
 #   6. aur/tabular-bin/PKGBUILD (AUR binary package)
 #   7. aur/tabular-bin/.SRCINFO (AUR binary metadata)
-#   8. Tabular.xcodeproj/project.pbxproj (MARKETING_VERSION & CURRENT_PROJECT_VERSION)
+#   8. Xcode projects: Tabular.xcodeproj, macos/Xcode/Tabular.xcodeproj,
+#      ios/Xcode/TabulariOS/TabulariOS.xcodeproj (MARKETING_VERSION & CURRENT_PROJECT_VERSION)
 #   9. SECURITY.md (Supported versions table)
 # ==============================================================================
 
@@ -183,15 +184,21 @@ if metainfo_file.exists():
             metainfo_file.write_text(new_content, encoding="utf-8")
             updated_files.append("id.tabular.database.metainfo.xml")
 
-# 8. Tabular.xcodeproj/project.pbxproj
-pbxproj_file = root / "Tabular.xcodeproj" / "project.pbxproj"
-if pbxproj_file.exists():
+# 8. Xcode projects (MARKETING_VERSION & CURRENT_PROJECT_VERSION)
+for pbxproj_rel in (
+    "Tabular.xcodeproj/project.pbxproj",
+    "macos/Xcode/Tabular.xcodeproj/project.pbxproj",
+    "ios/Xcode/TabulariOS/TabulariOS.xcodeproj/project.pbxproj",
+):
+    pbxproj_file = root / pbxproj_rel
+    if not pbxproj_file.exists():
+        continue
     content = pbxproj_file.read_text(encoding="utf-8")
     new_content = re.sub(r'MARKETING_VERSION = [^;]+;', f'MARKETING_VERSION = {target_version};', content)
     new_content = re.sub(r'CURRENT_PROJECT_VERSION = [^;]+;', f'CURRENT_PROJECT_VERSION = {build_version};', new_content)
     if new_content != content:
         pbxproj_file.write_text(new_content, encoding="utf-8")
-        updated_files.append("Tabular.xcodeproj/project.pbxproj")
+        updated_files.append(pbxproj_rel)
 
 # 9. SECURITY.md
 security_file = root / "SECURITY.md"
