@@ -33,8 +33,10 @@ and close. Its header shows the current branch, commits behind/ahead, the number
 changes, and buttons for **Git Graph** and **Fetch**. Right-click the header for
 Pull, Push, Reveal in file manager, Copy path, and Remove from list.
 
-An open section has its own **Changes / Branches / History / Review** buttons, and
-remembers which one you used. Operations run per repository, so a fetch in one
+An open section has its own **Changes / Branches / History / Review / Files** buttons,
+and remembers which one you used. **Files** lists the repository's tracked files plus new
+files that are not ignored, as a folder tree with a name search; clicking a file opens it
+in the File Viewer (see `docs/FILE_VIEWER.md`). Operations run per repository, so a fetch in one
 repository does not block a commit in another.
 
 A repository belongs to a project when the project's repository URL points to it, when

@@ -44,6 +44,9 @@
 
 #![allow(dead_code)]
 
+#[path = "syntax_code.rs"]
+mod code_highlight;
+
 use eframe::egui::text::{ByteIndex, LayoutJob, LayoutSection}; // For public highlight API (ported from legacy syntax.rs)
 use eframe::egui::{Color32, TextFormat};
 use std::collections::hash_map::DefaultHasher;
@@ -58,6 +61,8 @@ pub enum LanguageKind {
     Redis,
     Mongo,
     Plain,
+    /// Source code / konfigurasi di File Viewer (highlighter heuristik per baris).
+    Code(crate::file_viewer::CodeLang),
 }
 
 /// Basic filename / path heuristic to detect language. (Formerly `syntax.rs`)
@@ -65,6 +70,11 @@ pub fn detect_language_from_name(name: &str) -> LanguageKind {
     let lower = name.to_lowercase();
     if lower.ends_with(".sql") {
         return LanguageKind::Sql;
+    }
+    if let Some(lang) = crate::file_viewer::CodeLang::from_path(std::path::Path::new(name))
+        && lang != crate::file_viewer::CodeLang::PlainText
+    {
+        return LanguageKind::Code(lang);
     }
     if lower.contains("redis") {
         return LanguageKind::Redis;
@@ -192,7 +202,7 @@ mod ts {
                 LanguageKind::Sql => Some(GrammarKind::Sql),
                 LanguageKind::Redis => Some(GrammarKind::Json),
                 LanguageKind::Mongo => Some(GrammarKind::Javascript),
-                LanguageKind::Plain => None,
+                LanguageKind::Plain | LanguageKind::Code(_) => None,
             }
         }
     }
@@ -1223,7 +1233,7 @@ mod ts {
             LanguageKind::Sql => Some(&SQL_SERVICE),
             LanguageKind::Redis => Some(&JSON_SERVICE),
             LanguageKind::Mongo => Some(&JS_SERVICE),
-            LanguageKind::Plain => None,
+            LanguageKind::Plain | LanguageKind::Code(_) => None,
         }
     }
 
@@ -1520,6 +1530,15 @@ fn line_kind(line: &str, ai_block: bool) -> LineKind {
     }
 }
 
+/// Blok AI hanya berlaku di editor query; file kode tidak punya konvensi itu.
+fn ai_lines_for(text: &str, lang: LanguageKind) -> std::collections::HashSet<usize> {
+    if matches!(lang, LanguageKind::Code(_)) {
+        std::collections::HashSet::new()
+    } else {
+        ai_block_lines(text)
+    }
+}
+
 /// Indeks baris yang berada di dalam blok `--AI ... --` (inklusif).
 fn ai_block_lines(text: &str) -> std::collections::HashSet<usize> {
     let mut in_ai_block = false;
@@ -1595,7 +1614,7 @@ impl HighlightCache {
         if self.lines.len() > LINE_CACHE_CAPACITY {
             self.lines.clear();
         }
-        let ai_lines = ai_block_lines(text);
+        let ai_lines = ai_lines_for(text, lang);
         let mut job = LayoutJob::default();
         for (i, line) in text.lines().enumerate() {
             if i > 0 {
@@ -1680,7 +1699,7 @@ pub fn highlight_text_cached(
 pub fn highlight_text(text: &str, lang: LanguageKind, dark: bool) -> LayoutJob {
     let mut job = LayoutJob::default();
 
-    let ai_lines = ai_block_lines(text);
+    let ai_lines = ai_lines_for(text, lang);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
             job.append("\n", 0.0, TextFormat::default());
@@ -1704,6 +1723,10 @@ pub fn highlight_line(line: &str, lang: LanguageKind, dark: bool) -> LayoutJob {
 }
 
 fn highlight_single_line(line: &str, lang: LanguageKind, dark: bool, job: &mut LayoutJob) {
+    if let LanguageKind::Code(code) = lang {
+        code_highlight::highlight_code_line(line, code, dark, job);
+        return;
+    }
     if matches!(lang, LanguageKind::Redis) {
         highlight_json_like_line(line, dark, job);
         return;

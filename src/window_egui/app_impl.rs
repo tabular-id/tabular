@@ -2749,6 +2749,10 @@ impl Tabular {
                                                 use super::transfer_ui::TransferAction;
                                                 let none = || (None, None, None);
                                                 let mut picked = None;
+                                                if draw_menu_item(ui, egui_icons::icons::ICON_DESCRIPTION.codepoint, "Open File...", None) {
+                                                    self.show_settings_menu = false;
+                                                    super::file_viewer_ui::open_dialog(self);
+                                                }
                                                 if draw_menu_item(ui, egui_icons::icons::ICON_FILE_OPEN.codepoint, "Open Data File...", None) {
                                                     picked = Some(TransferAction::OpenDataFile(None));
                                                 }
@@ -3861,6 +3865,17 @@ impl Tabular {
                                 .is_some_and(|t| t.integration_test_state.is_some())
                         {
                             crate::window_egui::integration_test_ui::render_active_tab(self, ui);
+                            rendered_compare = true;
+                        }
+
+                        // Tab File Viewer (gambar, PDF, Markdown, CSV/XLSX, source code).
+                        if !rendered_compare
+                            && self
+                                .query_tabs
+                                .get(self.active_tab_index)
+                                .is_some_and(|t| t.file_viewer_state.is_some())
+                        {
+                            crate::window_egui::file_viewer_ui::render_active_tab(self, ui);
                             rendered_compare = true;
                         }
 

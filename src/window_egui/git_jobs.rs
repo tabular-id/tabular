@@ -162,6 +162,8 @@ pub enum GitSubMenu {
     Branches,
     History,
     Review,
+    /// Pohon file working tree; klik membuka file di File Viewer.
+    Files,
 }
 
 impl GitSubMenu {
@@ -171,6 +173,7 @@ impl GitSubMenu {
             GitSubMenu::Branches => "Branches",
             GitSubMenu::History => "History",
             GitSubMenu::Review => "Review",
+            GitSubMenu::Files => "Files",
         }
     }
 
@@ -179,6 +182,7 @@ impl GitSubMenu {
             "Branches" => GitSubMenu::Branches,
             "History" => GitSubMenu::History,
             "Review" => GitSubMenu::Review,
+            "Files" => GitSubMenu::Files,
             _ => GitSubMenu::Changes,
         }
     }
@@ -262,6 +266,14 @@ pub struct RepoUi {
     pub mrs_loaded_at: Option<Instant>,
     /// Review menampilkan MR "Assigned to me" dari semua repository.
     pub mrs_mine: bool,
+    /// Submenu Files: semua path relatif (terurut) dan pohonnya.
+    pub files: Option<Arc<Vec<String>>>,
+    pub file_tree: Option<Arc<crate::git::files::FileTree>>,
+    pub files_loading: bool,
+    pub files_error: Option<String>,
+    pub files_filter: String,
+    /// Folder yang sedang dibuka di pohon (path relatif).
+    pub files_open: std::collections::HashSet<String>,
 }
 
 impl RepoUi {
@@ -292,6 +304,12 @@ impl RepoUi {
             mrs_loading: false,
             mrs_loaded_at: None,
             mrs_mine: false,
+            files: None,
+            file_tree: None,
+            files_loading: false,
+            files_error: None,
+            files_filter: String::new(),
+            files_open: std::collections::HashSet::new(),
         }
     }
 
@@ -323,6 +341,11 @@ pub enum JobResult {
         key: String,
         skip: usize,
         res: Result<Vec<CommitInfo>, GitError>,
+    },
+    /// Daftar file working tree (submenu Files).
+    Files {
+        key: String,
+        res: Result<Vec<String>, GitError>,
     },
     /// Operasi yang mengubah repository selesai.
     Op {
@@ -722,6 +745,7 @@ pub fn set_sub(t: &mut Tabular, key: &str, sub: GitSubMenu) {
         GitSubMenu::Review if needs_mrs => load_mrs(t, Some(key.to_string())),
         GitSubMenu::History if needs_log => refresh_log(t, key, true),
         GitSubMenu::Changes => refresh_status_of(t, key),
+        GitSubMenu::Files if t.git.ui_mut(key).files.is_none() => refresh_files(t, key),
         _ => {}
     }
 }
@@ -916,6 +940,23 @@ pub fn refresh_log(t: &mut Tabular, key: &str, reset: bool) {
         key,
         skip,
         res: gitlog::page(&path, None, skip, gitlog::PAGE_SIZE),
+    });
+}
+
+/// Muat ulang daftar file working tree repository `key` (submenu Files).
+pub fn refresh_files(t: &mut Tabular, key: &str) {
+    let Some(path) = t.git.path_of(key) else {
+        return;
+    };
+    let ui = t.git.ui_mut(key);
+    if ui.files_loading {
+        return;
+    }
+    ui.files_loading = true;
+    let key = key.to_string();
+    t.git.spawn(move || JobResult::Files {
+        key,
+        res: crate::git::files::list_files(&path),
     });
 }
 
@@ -1745,6 +1786,21 @@ fn apply(t: &mut Tabular, r: JobResult, ctx: &egui::Context) {
             Ok(b) => t.git.ui_mut(&key).branches = b,
             Err(e) => log::warn!("[GIT] branch list failed: {e}"),
         },
+        JobResult::Files { key, res } => {
+            let ui = t.git.ui_mut(&key);
+            ui.files_loading = false;
+            match res {
+                Ok(files) => {
+                    ui.file_tree = Some(Arc::new(crate::git::files::FileTree::build(&files)));
+                    ui.files = Some(Arc::new(files));
+                    ui.files_error = None;
+                }
+                Err(e) => {
+                    log::warn!("[GIT] list files failed: {e}");
+                    ui.files_error = Some(e.to_string());
+                }
+            }
+        }
         JobResult::Log { key, skip, res } => {
             let ui = t.git.ui_mut(&key);
             ui.commits_loading = false;

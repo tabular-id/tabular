@@ -30,6 +30,9 @@ pub struct SessionTab {
     pub database_name: Option<String>,
     pub is_pinned: bool,
     pub is_modified: bool,
+    /// Tab File Viewer: dibuka ulang dari `file_path`, isinya tidak disimpan.
+    #[serde(default)]
+    pub viewer: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -71,6 +74,7 @@ fn is_plain_query_tab(tab: &crate::models::structs::QueryTab) -> bool {
         && tab.git_state.is_none()
         && tab.compare_state.is_none()
         && tab.integration_test_state.is_none()
+        && tab.file_viewer_state.is_none()
         && !tab.is_table_browse_mode
 }
 
@@ -89,6 +93,9 @@ pub fn tab_has_unsaved_changes(tabular: &Tabular, index: usize) -> bool {
     let Some(tab) = tabular.query_tabs.get(index) else {
         return false;
     };
+    if let Some(viewer) = &tab.file_viewer_state {
+        return viewer.is_modified();
+    }
     if !is_plain_query_tab(tab) || current_content(tabular, index).trim().is_empty() {
         return false;
     }
@@ -115,6 +122,22 @@ fn snapshot(tabular: &Tabular, window: Option<WindowGeometry>) -> SessionSnapsho
     let mut tabs = Vec::new();
     let mut active_index = 0;
     for (index, tab) in tabular.query_tabs.iter().enumerate() {
+        if let Some(viewer) = &tab.file_viewer_state {
+            if index == tabular.active_tab_index {
+                active_index = tabs.len();
+            }
+            tabs.push(SessionTab {
+                title: tab.title.clone(),
+                content: String::new(),
+                file_path: Some(viewer.path.to_string_lossy().to_string()),
+                connection_id: None,
+                database_name: None,
+                is_pinned: tab.is_pinned,
+                is_modified: false,
+                viewer: true,
+            });
+            continue;
+        }
         if !is_plain_query_tab(tab) {
             continue;
         }
@@ -133,6 +156,7 @@ fn snapshot(tabular: &Tabular, window: Option<WindowGeometry>) -> SessionSnapsho
             database_name: tab.database_name.clone(),
             is_pinned: tab.is_pinned,
             is_modified: tab_has_unsaved_changes(tabular, index),
+            viewer: false,
         });
     }
     SessionSnapshot {
@@ -296,6 +320,18 @@ pub fn restore_on_startup(tabular: &mut Tabular) {
     tabular.active_tab_index = 0;
     let mut restored_drafts = 0;
     for saved in &snap.tabs {
+        if saved.viewer {
+            // File yang sudah tidak ada dilewati diam-diam.
+            if let Some(path) = saved.file_path.as_deref().map(std::path::Path::new)
+                && path.is_file()
+            {
+                crate::window_egui::file_viewer_ui::open_path(tabular, path);
+                if let Some(tab) = tabular.query_tabs.last_mut() {
+                    tab.is_pinned = saved.is_pinned;
+                }
+            }
+            continue;
+        }
         // File yang tidak diubah dibaca ulang dari disk supaya perubahan dari
         // luar aplikasi ikut terlihat; jika file hilang, konten sesi dipakai.
         let (content, is_modified) = match (&saved.file_path, saved.is_modified) {
@@ -643,7 +679,16 @@ mod tests {
             database_name: Some("app".into()),
             is_pinned: false,
             is_modified: true,
+            viewer: false,
         }
+    }
+
+    #[test]
+    fn old_session_without_viewer_field_loads_as_query_tab() {
+        let json = r#"{"title":"a.sql","content":"select 1","file_path":null,
+            "connection_id":null,"database_name":null,"is_pinned":false,"is_modified":true}"#;
+        let tab: SessionTab = serde_json::from_str(json).unwrap();
+        assert!(!tab.viewer);
     }
 
     #[test]
@@ -674,6 +719,7 @@ mod tests {
                     database_name: None,
                     is_pinned: true,
                     is_modified: false,
+                    viewer: false,
                 },
             ],
             window: Some(WindowGeometry {

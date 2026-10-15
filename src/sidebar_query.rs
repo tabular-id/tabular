@@ -569,6 +569,7 @@ pub(crate) fn open_query_file(
         git_state: None,
         compare_state: None,
         integration_test_state: None,
+        file_viewer_state: None,
         tx_mode: false,
         tx_active: false,
         session: None,
@@ -929,6 +930,25 @@ pub(crate) fn prompt_open_sql_file(
 /// Tangani file .sql yang di-drop ke jendela Tabular.
 /// Otomatis simpan ke direktori queries (atau folder target) lalu langsung buka.
 pub(crate) fn handle_dropped_sql_files(tabular: &mut window_egui::Tabular, ctx: &egui::Context) {
+    // File lain (gambar, PDF, Markdown, source code, ...) dibuka di File Viewer.
+    // File data (CSV/XLSX/JSON/...) tetap ditangani dialog Data Files di transfer_ui.
+    let viewer_paths: Vec<std::path::PathBuf> = ctx.input(|i| {
+        i.raw
+            .dropped_files
+            .iter()
+            .map(|f| f.path().to_path_buf())
+            .filter(|p| {
+                p.is_file()
+                    && !p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("sql"))
+                    && !window_egui::transfer_ui::is_data_file(p)
+            })
+            .collect()
+    });
+    window_egui::file_viewer_ui::open_paths(tabular, &viewer_paths);
+
     let dropped_paths: Vec<std::path::PathBuf> = ctx.input(|i| {
         i.raw
             .dropped_files

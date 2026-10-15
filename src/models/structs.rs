@@ -1963,6 +1963,8 @@ pub struct QueryTab {
     /// Tab Integration Testing (suite langkah HTTP berurutan).
     pub integration_test_state:
         Option<crate::window_egui::integration_test_ui::IntegrationTestTabState>,
+    /// Tab File Viewer (gambar, SVG, Markdown, CSV/XLSX, PDF, source code).
+    pub file_viewer_state: Option<crate::window_egui::file_viewer_ui::FileViewerTabState>,
 
     // Manual-commit (transaction) mode — see connection/session.rs
     pub tx_mode: bool,
@@ -3238,6 +3240,7 @@ mod tests {
             git_state: None,
             compare_state: None,
             integration_test_state: None,
+            file_viewer_state: None,
             tx_mode: false,
             tx_active: false,
             session: None,

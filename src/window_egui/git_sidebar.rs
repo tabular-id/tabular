@@ -282,6 +282,7 @@ fn repo_section(t: &mut Tabular, ui: &mut egui::Ui, entry: &RepoEntry, has_proje
                 GitSubMenu::Branches => render_branches(t, ui, &key),
                 GitSubMenu::History => render_history(t, ui, &key),
                 GitSubMenu::Review => render_review(t, ui, &key),
+                GitSubMenu::Files => render_files(t, ui, &key),
             }
         });
 }
@@ -609,6 +610,11 @@ fn render_sub_nav(t: &mut Tabular, ui: &mut egui::Ui, key: &str) {
             key: "Review",
             icon: i::ICON_SOURCE_PULL.codepoint,
             label: "Review",
+        },
+        style::NavSegment {
+            key: "Files",
+            icon: i::ICON_FOLDER.codepoint,
+            label: "Files",
         },
     ];
     let current = t.git.ui_mut(key).sub;
@@ -1576,6 +1582,188 @@ pub(crate) fn render_dialogs(t: &mut Tabular, ctx: &egui::Context) {
             t.git.clone_dialog = Some(dlg);
         }
     }
+}
+
+// ─── Files ───────────────────────────────────────────────────────────────────
+
+/// Pohon file working tree repository; klik file membuka File Viewer.
+fn render_files(t: &mut Tabular, ui: &mut egui::Ui, key: &str) {
+    let Some(root) = t.git.path_of(key) else {
+        return;
+    };
+    let mut refresh = false;
+    ui.horizontal(|ui| {
+        let loading = t.git.ui_mut(key).files_loading;
+        if icon_button(ui, i::ICON_REFRESH.codepoint, "Reload file list", !loading) {
+            refresh = true;
+        }
+        git_view::filter_field(ui, &mut t.git.ui_mut(key).files_filter, "Find file");
+    });
+    if refresh {
+        git_jobs::refresh_files(t, key);
+    }
+    let (files, tree, loading, error, query, open) = {
+        let u = t.git.ui_mut(key);
+        (
+            u.files.clone(),
+            u.file_tree.clone(),
+            u.files_loading,
+            u.files_error.clone(),
+            u.files_filter.clone(),
+            u.files_open.clone(),
+        )
+    };
+    if let Some(err) = error {
+        ui.label(
+            egui::RichText::new(err)
+                .size(11.5)
+                .color(style::theme_warning(ui.ctx())),
+        );
+    }
+    let Some(files) = files else {
+        if loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new("Listing files…").size(11.5));
+            });
+        } else if t.git.ui_mut(key).files_error.is_none() {
+            git_jobs::refresh_files(t, key);
+        }
+        return;
+    };
+    let mut clicked: Option<String> = None;
+    let mut toggles: Vec<String> = Vec::new();
+    egui::ScrollArea::vertical()
+        .id_salt(("git_files_scroll", key))
+        .max_height(LIST_MAX_H * 1.5)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            if !query.trim().is_empty() {
+                let hits = crate::git::files::filter(&files, &query);
+                if hits.is_empty() {
+                    ui.label(egui::RichText::new("No files match").size(11.5).color(muted(ui)));
+                }
+                for p in &hits {
+                    let resp = git_view::file_row(ui, p, "", muted(ui), false);
+                    if resp.clicked() {
+                        clicked = Some(p.clone());
+                    }
+                    file_context_menu(&resp, p, &mut clicked);
+                }
+            } else if let Some(tree) = &tree {
+                file_tree_rows(ui, tree, "", 0, &open, &mut toggles, &mut clicked);
+            }
+        });
+    ui.label(
+        egui::RichText::new(format!("{} files", files.len()))
+            .size(10.5)
+            .color(muted(ui)),
+    );
+    if !toggles.is_empty() {
+        let u = t.git.ui_mut(key);
+        for d in toggles {
+            if !u.files_open.remove(&d) {
+                u.files_open.insert(d);
+            }
+        }
+    }
+    if let Some(rel) = clicked {
+        super::file_viewer_ui::open_path(t, &root.join(rel));
+    }
+}
+
+fn file_context_menu(resp: &egui::Response, path: &str, clicked: &mut Option<String>) {
+    resp.context_menu(|ui| {
+        if ui.button("Open").clicked() {
+            *clicked = Some(path.to_string());
+            ui.close();
+        }
+        if ui.button("Copy path").clicked() {
+            ui.ctx().copy_text(path.to_string());
+            ui.close();
+        }
+    });
+}
+
+fn file_tree_rows(
+    ui: &mut egui::Ui,
+    node: &crate::git::files::FileTree,
+    prefix: &str,
+    depth: usize,
+    open: &std::collections::HashSet<String>,
+    toggles: &mut Vec<String>,
+    clicked: &mut Option<String>,
+) {
+    let indent = depth as f32 * 12.0;
+    for (name, child) in &node.dirs {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let is_open = open.contains(&path);
+        let chevron = if is_open {
+            i::ICON_EXPAND_MORE.codepoint
+        } else {
+            i::ICON_CHEVRON_RIGHT.codepoint
+        };
+        if tree_row(ui, indent, chevron, i::ICON_FOLDER.codepoint, name).clicked() {
+            toggles.push(path.clone());
+        }
+        if is_open {
+            file_tree_rows(ui, child, &path, depth + 1, open, toggles, clicked);
+        }
+    }
+    for f in &node.files {
+        let name = crate::git::files::file_name(f);
+        let kind = crate::file_viewer::classify(std::path::Path::new(name), b"");
+        let resp = tree_row(ui, indent, "", super::file_viewer_ui::kind_icon(kind), name);
+        if resp.clicked() {
+            *clicked = Some(f.clone());
+        }
+        file_context_menu(&resp, f, clicked);
+    }
+}
+
+/// Satu baris pohon: chevron (folder), ikon, lalu nama.
+fn tree_row(ui: &mut egui::Ui, indent: f32, chevron: &str, icon: &str, label: &str) -> egui::Response {
+    let h = 22.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let ctx = ui.ctx().clone();
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 3.0, style::nav_track(&ctx));
+        }
+        let painter = ui.painter().with_clip_rect(rect);
+        let muted = style::nav_text_muted(&ctx);
+        let x = rect.left() + 4.0 + indent;
+        let y = rect.center().y;
+        if !chevron.is_empty() {
+            painter.text(
+                egui::pos2(x, y),
+                egui::Align2::LEFT_CENTER,
+                chevron,
+                egui::FontId::proportional(13.0),
+                muted,
+            );
+        }
+        painter.text(
+            egui::pos2(x + 15.0, y),
+            egui::Align2::LEFT_CENTER,
+            icon,
+            egui::FontId::proportional(13.0),
+            muted,
+        );
+        painter.text(
+            egui::pos2(x + 34.0, y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(12.5),
+            style::nav_text_strong(&ctx),
+        );
+    }
+    resp
 }
 
 fn describe_paths(p: &[String]) -> String {

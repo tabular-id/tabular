@@ -565,7 +565,7 @@ impl EndpointPick {
 }
 
 /// File yang ekstensinya dikenal pembaca Data Files.
-fn is_data_file(path: &std::path::Path) -> bool {
+pub(crate) fn is_data_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| {

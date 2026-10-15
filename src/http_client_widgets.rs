@@ -228,6 +228,8 @@ pub enum Syntax {
     Xml,
     GraphQl,
     Plain,
+    /// Source code / konfigurasi (File Viewer), lewat highlighter `syntax_ts`.
+    Code(crate::file_viewer::CodeLang),
 }
 
 /// Highlighter yang di-cache per frame: teks yang sama tidak di-highlight
@@ -247,6 +249,18 @@ impl<'a> egui::cache::ComputerMut<HighlightKey<'a>, egui::text::LayoutJob> for H
             Syntax::Json => crate::http_client::highlight_body_json(text, dark, font_id),
             Syntax::Xml => crate::http_client::highlight_body_xml(text, dark, font_id),
             Syntax::GraphQl => crate::http_client::highlight_body_graphql(text, dark, font_id),
+            Syntax::Code(lang) => {
+                let mut j = crate::syntax_ts::highlight_text(
+                    text,
+                    crate::syntax_ts::LanguageKind::Code(lang),
+                    dark,
+                );
+                // Highlighter editor tidak menyetel font; samakan dengan gutter.
+                for section in &mut j.sections {
+                    section.format.font_id = font_id.clone();
+                }
+                j
+            }
             Syntax::Plain => {
                 let color = if dark {
                     egui::Color32::from_rgb(220, 220, 220)
@@ -294,6 +308,17 @@ pub fn render_code_view(
     ui: &mut egui::Ui,
     text: &mut dyn egui::TextBuffer,
     opts: CodeView<'_>,
+) -> egui::Response {
+    render_code_view_scrolled(ui, text, opts, None)
+}
+
+/// Seperti [`render_code_view`], tetapi menggulir agar karakter ke-`scroll_to_char`
+/// (indeks karakter, bukan byte) terlihat di tengah, mis. hasil pencarian.
+pub fn render_code_view_scrolled(
+    ui: &mut egui::Ui,
+    text: &mut dyn egui::TextBuffer,
+    opts: CodeView<'_>,
+    scroll_to_char: Option<usize>,
 ) -> egui::Response {
     let ctx = ui.ctx().clone();
     let dark = ui.visuals().dark_mode;
@@ -368,6 +393,13 @@ pub fn render_code_view(
                         .show(ui);
 
                     paint_gutter(ui, &out, gutter_w, &num_font, muted);
+                    if let Some(index) = scroll_to_char {
+                        let rect = out
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(index))
+                            .translate(out.galley_pos.to_vec2());
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                    }
                     out.response.response
                 })
                 .inner

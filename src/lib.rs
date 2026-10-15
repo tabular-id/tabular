@@ -75,6 +75,7 @@ pub mod editor_selection;
 pub mod editor_state_adapter;
 pub mod export;
 pub mod export_import_all;
+pub mod file_viewer;
 pub mod flexurio_import;
 pub mod geo_map;
 pub mod git;

@@ -8,6 +8,7 @@
 pub mod branch;
 pub mod cli;
 pub mod diff;
+pub mod files;
 pub mod graph;
 pub mod history;
 pub mod history_ops;

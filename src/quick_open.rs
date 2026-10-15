@@ -989,6 +989,11 @@ pub fn load_all_quick_open_items(tabular: &mut Tabular) -> Vec<QuickOpenItem> {
             "⌘O",
         ),
         (
+            "File: Open File...",
+            "View an image, PDF, Markdown, CSV/XLSX, or source code file",
+            "",
+        ),
+        (
             "Editor: Go to Definition",
             "Navigate to symbol / table in tree",
             "F12",

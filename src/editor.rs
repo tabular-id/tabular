@@ -94,6 +94,7 @@ pub(crate) fn create_new_tab(
         git_state: None,
         compare_state: None,
         integration_test_state: None,
+        file_viewer_state: None,
         tx_mode: false,
         tx_active: false,
         session: None,
@@ -296,6 +297,7 @@ pub(crate) fn close_tab(tabular: &mut window_egui::Tabular, tab_index: usize) {
             tab.has_executed_query = false;
             tab.dba_special_mode = None;
             tab.object_ddl = None;
+            tab.file_viewer_state = None;
         }
         tabular.editor.set_text(String::new());
         tabular.highlight_cache.clear();
@@ -675,6 +677,7 @@ pub(crate) fn find_unsaved_query_tab_for_connection(
             && tab.http_client_state.is_none()
             && tab.redis_browser_state.is_none()
             && tab.dba_monitor_state.is_none()
+            && tab.file_viewer_state.is_none()
     })
 }
 
@@ -823,6 +826,14 @@ pub(crate) fn switch_to_tab(tabular: &mut window_egui::Tabular, tab_index: usize
 }
 
 pub(crate) fn save_current_tab(tabular: &mut window_egui::Tabular) -> Result<(), String> {
+    // Tab File Viewer menyimpan file aslinya apa adanya (tanpa header `-- tabular:`).
+    if tabular
+        .query_tabs
+        .get(tabular.active_tab_index)
+        .is_some_and(|t| t.file_viewer_state.is_some())
+    {
+        return window_egui::file_viewer_ui::save_active(tabular);
+    }
     // HTTP API tabs: save or update state directly, or trigger save dialog if brand new request
     if let Some(tab) = tabular.query_tabs.get_mut(tabular.active_tab_index)
         && tab.http_client_state.is_some()
@@ -9069,6 +9080,9 @@ pub(crate) fn execute_command(tabular: &mut window_egui::Tabular, command: &str)
         }
         "Query: Open SQL File..." => {
             crate::sidebar_query::prompt_open_sql_file(tabular, None);
+        }
+        "File: Open File..." => {
+            window_egui::file_viewer_ui::open_dialog(tabular);
         }
         "Editor: Go to Definition" => {
             go_to_definition(tabular);

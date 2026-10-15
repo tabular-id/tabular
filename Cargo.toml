@@ -35,6 +35,10 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui_icons = "0.0.1"
 image = "0.25"
+# File viewer: rasterisasi SVG (versi sama dengan yang dibawa egui_extras).
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+# File viewer: render PDF pure-Rust (tanpa toolchain C), di balik fitur `pdf`.
+hayro = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 sqlx = { version = "0.9", features = [
        "runtime-tokio",
@@ -274,7 +278,7 @@ keyring = "4"
 keyring = { version = "4", optional = true }
 
 [features]
-default = ["tree_sitter_sequel", "query_ast"]
+default = ["tree_sitter_sequel", "query_ast", "pdf"]
 
 # Linux only: store secrets in the freedesktop Secret Service instead of the
 # encrypted file (requires libdbus at build/run time).
@@ -286,6 +290,9 @@ tree_sitter_sequel = ["tree-sitter", "tree-sitter-sequel", "anyhow"]
 # Enable experimental logical query AST parsing + emission (phase 1: simple SELECT)
 query_ast = ["sqlparser"]
 sqlparser = ["dep:sqlparser"]
+
+# Render PDF di File Viewer (hayro, pure Rust).
+pdf = ["dep:hayro"]
 
 # Enable realtime collaborative editing (CRDT rooms + WebSocket).
 # Vault/E2E crypto and REST sync are always compiled in — see the

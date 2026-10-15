@@ -25,6 +25,7 @@ fn tab_uses_db_context(t: &Tabular) -> bool {
                 && tab.git_state.is_none()
                 && tab.compare_state.is_none()
                 && tab.integration_test_state.is_none()
+                && tab.file_viewer_state.is_none()
         })
 }
 

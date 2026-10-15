@@ -23,6 +23,8 @@ pub mod device_profile;
 pub mod diagram;
 pub mod diagram_db_sync;
 pub mod diagram_flow_jobs;
+pub mod file_viewer_jobs;
+pub mod file_viewer_ui;
 pub(crate) mod diagram_merge_dialog;
 pub mod git_avatar;
 pub mod git_diff_view;

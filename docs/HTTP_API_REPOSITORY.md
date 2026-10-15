@@ -265,28 +265,51 @@ them from their context menu, and assign a step to a group in its details.
 Select a group and click **Run Purchasing** to test only that group. Steps the
 group depends on run too, even when they belong to another group. For example,
 *Plant* needs the purchase order that *Purchasing* creates, so that step runs
-as well. These steps are shown in italics. Cleanup runs for every step that
-created data.
+as well. These steps are shown in italics under their own heading. Cleanup
+runs for every step that created data.
+
+The step list is split into blocks in execution order: **Setup**, **Tests**
+per group and **Cleanup**. Each row shows the method, the step name with its
+URL, the last result and the response time. Untick the box at the start of a
+row to skip that step. The row menu, or a right-click, opens the step in the
+HTTP client, moves it within its block, adds a cleanup step for it or deletes
+it.
 
 ### Data flow between steps
 
-A step passes values to later steps with **Extract**, for example
-`po_id = json:$.id`. Later steps use the value as `{{po_id}}` in the URL,
-headers, body or auth. The **Data flow** column shows where each step's input
-comes from and which steps use its output.
+A step passes values to later steps with **Save values for later steps**, for
+example `po_id` taken from `json:$.id`. Later steps use the value as
+`{{po_id}}` in the URL, headers, body or auth. A link icon next to a step name
+shows where its input comes from and which steps use its output. The
+**Data flow** section of the step details says the same in full sentences.
 
-The **Checks** panel lists problems before you run:
+**Suite checks** below the step list lists problems before you run. Click it
+to open the list, and click a step name to select that step:
 
 - A step uses a variable that only a later step provides, or that nothing provides.
 - A step creates data but no cleanup step removes it.
-- Cleanup steps remove data in the wrong order. **Auto-order cleanup** removes
-  dependent data first, in reverse order of creation.
+- Cleanup steps remove data in the wrong order. **Auto-order cleanup** in the
+  **Settings** menu removes dependent data first, in reverse order of creation.
 - A step has no assertions.
 
 ### Editing a step
 
-Click a step to edit its phase, group, extract variables, assertions and the
-requirement it verifies. Double-click it, or use **Edit request in HTTP
+Click a step to open its details on the right. They are ordered from what you
+need most to what you need least:
+
+1. **Request**: the method and URL, with **Edit request in HTTP client**.
+2. **Last run**: the result, and for a failed step what was expected and what
+   came back, the saved values and the response body.
+3. **Expected result**: the checks, each as field, condition and value, for
+   example `status` *equals* `200`. **Use last response** creates checks from
+   the last answer.
+4. **Save values for later steps**: the extract rules.
+5. **Data flow**: which values the step needs and passes on.
+6. **Settings**: phase, group, the step a cleanup step removes data of,
+   whether the step runs, and the requirement it verifies.
+
+With no step selected, the right column shows the suite description, the last
+run and a short guide. Double-click a step, or use **Edit request in HTTP
 client**, to open the request in a new HTTP client tab. Variables are filled
 from the suite, the project environment and the last run, so you can send the
 request from there. **Save** in that tab writes the request back to the step.
@@ -297,7 +320,7 @@ replaced by variables such as `{{token}}`.
 
 ### Generating steps with AI
 
-Open **AI** in the tab toolbar and describe the flow, for example
+Click **Generate with AI** in the tab toolbar and describe the flow, for example
 *"Purchasing: create vendor, create PO, approve, receive goods"*.
 
 - **Add steps** appends steps to the suite, in the selected group. The AI
@@ -404,7 +427,7 @@ server to start.
 - Steps run strictly in order. A step whose variables are missing, because
   the step that provides them failed, is **Blocked** and not sent.
 - A failing Setup step blocks the remaining tests. **Stop after first failure**
-  in the menu does the same for test steps.
+  in the **Settings** menu does the same for test steps.
 - **Cleanup always runs**, also when tests fail or you press **Stop**. A
   cleanup step only runs when the data it removes was actually created. Network
   errors are retried once. Only **Abort** skips cleanup.
@@ -418,9 +441,21 @@ Background Tasks panel.
 
 ### Report and validation evidence
 
-The **Report** view shows the verdict and statistics of the last run. The
-**History** view lists earlier runs. Statistics use ISTQB terms and follow the
-ISO/IEC/IEEE 29119-3 test completion report:
+Switch between **Steps**, **Report** and **History** at the top right of the
+tab. The **Report** view shows the last run from top to bottom:
+
+1. The verdict with a one-sentence summary, and **Open full report** and
+   **Export**.
+2. Four numbers: passed, failed, not sent (blocked) and the pass rate against
+   the pass criterion. **More statistics** opens the rest.
+3. **Needs attention**: one card per failed or blocked step, with expected
+   versus actual values. Click the step name to open it.
+4. **All steps**, **By group**, **Test data cleanup**, **Endpoint coverage**
+   and **Unstable steps**.
+
+The **History** view lists earlier runs; **Open report** shows one of them.
+Statistics use ISTQB terms and follow the ISO/IEC/IEEE 29119-3 test completion
+report:
 
 | Item | Meaning |
 |---|---|
@@ -428,7 +463,7 @@ ISO/IEC/IEEE 29119-3 test completion report:
 | Passed, Failed, Error, Blocked, Skipped | Failed means assertions failed; Error means no response |
 | Pass rate | Passed divided by executed steps |
 | Execution rate | Executed steps divided by planned steps, without disabled steps |
-| Pass criterion | Minimum pass rate, 100% unless changed in the menu |
+| Pass criterion | Minimum pass rate, 100% unless changed in the **Settings** menu |
 | Per group | The same counts for each group |
 | Response time | Minimum, average, p50, p90, p95 and maximum |
 | Endpoint coverage | API endpoints of the project that a step exercises, and the ones without a test |
