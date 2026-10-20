@@ -91,7 +91,11 @@ impl super::Tabular {
                                     ui.spacing_mut().item_spacing.x = 6.0;
 
                                     if self.query_message_is_error {
-                                        ui.label(egui::RichText::new("❌").size(12.0));
+                                        ui.label(
+                                            egui::RichText::new(egui_icons::icons::ICON_ERROR.codepoint)
+                                                .color(super::style::theme_danger(ctx))
+                                                .size(13.0),
+                                        );
                                         let badge_bg = super::style::theme_danger(ctx).linear_multiply(0.2);
                                         let badge_fg = super::style::theme_danger(ctx);
                                         egui::Frame::new()
@@ -107,7 +111,7 @@ impl super::Tabular {
                                                 );
                                             });
                                     } else {
-                                        ui.label(egui::RichText::new("⚡").size(12.0));
+                                        ui.label(egui::RichText::new(egui_icons::icons::ICON_BOLT.codepoint).size(13.0));
                                         let badge_bg = super::style::theme_accent(ctx).linear_multiply(0.2);
                                         let badge_fg = super::style::theme_accent(ctx);
                                         egui::Frame::new()
@@ -125,7 +129,8 @@ impl super::Tabular {
 
                                         if self.last_execution_duration_ms > 0 {
                                             let dur_text = format!(
-                                                "⏱ {}",
+                                                "{} {}",
+                                                egui_icons::icons::ICON_TIMER.codepoint,
                                                 super::query_jobs::format_duration_human(
                                                     self.last_execution_duration_ms
                                                 )
@@ -136,13 +141,7 @@ impl super::Tabular {
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.spacing_mut().item_spacing.x = 2.0;
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("✕").size(10.0).weak(),
-                                                )
-                                                .frame(false),
-                                            )
+                                        if super::style::render_close_icon_button(ui)
                                             .on_hover_text("Close")
                                             .clicked()
                                         {
@@ -172,7 +171,11 @@ impl super::Tabular {
                                             && ui
                                                 .add(
                                                     egui::Button::new(
-                                                        egui::RichText::new("↪ Go to error").size(11.0),
+                                                        egui::RichText::new(format!(
+                                                            "{} Go to error",
+                                                            egui_icons::icons::ICON_MY_LOCATION.codepoint
+                                                        ))
+                                                        .size(11.0),
                                                     )
                                                     .frame(false),
                                                 )
@@ -186,7 +189,9 @@ impl super::Tabular {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("📋").size(11.0).weak(),
+                                                    egui::RichText::new(egui_icons::icons::ICON_CONTENT_COPY.codepoint)
+                                                        .size(12.0)
+                                                        .weak(),
                                                 )
                                                 .frame(false),
                                             )
@@ -299,8 +304,10 @@ impl super::Tabular {
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "⚠ Lint Detail{} ({})",
-                                            plural, count
+                                            "{} Lint Detail{} ({})",
+                                            egui_icons::icons::ICON_WARNING.codepoint,
+                                            plural,
+                                            count
                                         ))
                                         .color(warning_color)
                                         .strong(),
@@ -324,7 +331,13 @@ impl super::Tabular {
                                 // Actions bar inside toast
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut self.auto_format_on_execute, "Auto-format");
-                                    if ui.button("✨ Format now").clicked() {
+                                    if ui
+                                        .button(format!(
+                                            "{} Format now",
+                                            egui_icons::icons::ICON_AUTO_AWESOME.codepoint
+                                        ))
+                                        .clicked()
+                                    {
                                         format_clicked = true;
                                     }
                                 });
@@ -337,15 +350,18 @@ impl super::Tabular {
                                     .show(ui, |ui| {
                                         for msg in &self.lint_messages {
                                             let (icon, color) = match msg.severity {
-                                                query_tools::LintSeverity::Info => {
-                                                    ("ℹ", super::style::theme_info(ui.ctx()))
-                                                }
-                                                query_tools::LintSeverity::Warning => {
-                                                    ("⚠", super::style::theme_warning(ui.ctx()))
-                                                }
-                                                query_tools::LintSeverity::Error => {
-                                                    ("⛔", super::style::theme_danger(ui.ctx()))
-                                                }
+                                                query_tools::LintSeverity::Info => (
+                                                    egui_icons::icons::ICON_INFO.codepoint,
+                                                    super::style::theme_info(ui.ctx()),
+                                                ),
+                                                query_tools::LintSeverity::Warning => (
+                                                    egui_icons::icons::ICON_WARNING.codepoint,
+                                                    super::style::theme_warning(ui.ctx()),
+                                                ),
+                                                query_tools::LintSeverity::Error => (
+                                                    egui_icons::icons::ICON_BLOCK.codepoint,
+                                                    super::style::theme_danger(ui.ctx()),
+                                                ),
                                             };
 
                                             ui.horizontal(|ui| {

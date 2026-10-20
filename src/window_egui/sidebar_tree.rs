@@ -1902,7 +1902,7 @@ impl super::Tabular {
             } else if (4000..5000).contains(&context_id) {
                 // ID 4000-4999 means cancel an in-flight connect
                 let connection_id = context_id - 4000;
-                debug!("✕ Cancel connect for connection: {}", connection_id);
+                debug!("Cancel connect for connection: {}", connection_id);
                 connection::cancel_connection_attempt(self, connection_id);
                 // Mark for repaint so status updates immediately
                 ui.ctx().request_repaint();
@@ -2878,7 +2878,7 @@ impl super::Tabular {
                         // Only offered while a connect is actually in flight.
                         if let Some(conn_id) = node.connection_id
                             && params.pending_connection_pools.contains(&conn_id)
-                            && ui.button("✕ Cancel Connecting").clicked()
+                            && ui.button(format!("{} Cancel Connecting", egui_icons::icons::ICON_CLOSE.codepoint)).clicked()
                         {
                             // Use +4000 range to indicate cancel (handled in render_tree handler)
                             context_menu_request = Some(conn_id + 4000);

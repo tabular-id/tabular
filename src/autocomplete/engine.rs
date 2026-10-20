@@ -28,6 +28,10 @@ pub trait Catalog {
     /// Kolom tabel (urutan ordinal), `None` bila belum ter-cache.
     fn columns(&self, table: &str) -> Option<&[ColumnMeta]>;
     fn foreign_keys(&self) -> &[ForeignKey];
+    /// Database lain di koneksi aktif (untuk `USE` dan qualifier `db.tabel`).
+    fn databases(&self) -> &[String] {
+        &[]
+    }
     /// Berapa kali label ini pernah dipilih (untuk ranking).
     fn usage(&self, _label: &str) -> u32 {
         0
@@ -76,6 +80,7 @@ const TIER_STEP: i32 = 100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
+    Database,
     Table,
     Cte,
     Column,
@@ -711,6 +716,27 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Kandidat nama database koneksi aktif.
+    fn databases(&mut self, boost: i32) {
+        let dbs: Vec<String> = self.cat.databases().to_vec();
+        for d in dbs {
+            let insert = self.ident(&d);
+            self.push(
+                d.clone(),
+                insert,
+                &d,
+                ItemKind::Database,
+                Some("database".into()),
+                boost,
+            );
+        }
+    }
+
+    /// Dialek yang bisa merujuk tabel database lain lewat `db.tabel`.
+    fn cross_database(&self) -> bool {
+        matches!(self.o.dialect, Dialect::MySql | Dialect::MsSql)
+    }
+
     /// `alias.|` / `tabel.|` / `schema.|`.
     fn member(&mut self) {
         let q = self.a.qualifier.last().cloned().unwrap_or_default();
@@ -901,6 +927,10 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
+        }
+        if self.cross_database() {
+            // Di bawah tabel: database hanya menonjol bila namanya cocok dengan yang diketik
+            self.databases(200);
         }
         let tables: Vec<String> = self.cat.tables().to_vec();
         for t in tables {
@@ -1731,6 +1761,7 @@ impl<'a> Builder<'a> {
             }
             Expect::Keywords(list) => self.keywords(list, 450),
             Expect::Generic => self.generic(),
+            Expect::Database => self.databases(400),
         }
         let mut out = self.out;
         // Prefix >= 3 karakter: buang subsequence longgar bila ada yang lebih tepat
@@ -2350,5 +2381,66 @@ mod tests {
         );
         assert!(items.iter().any(|i| i.insert == "`Order Details`"));
         assert!(items.iter().any(|i| i.insert == "Users"));
+    }
+
+    /// Katalog `mock()` plus daftar database.
+    struct WithDbs(Mock, Vec<String>);
+
+    impl Catalog for WithDbs {
+        fn databases(&self) -> &[String] {
+            &self.1
+        }
+        fn tables(&self) -> &[String] {
+            self.0.tables()
+        }
+        fn columns(&self, table: &str) -> Option<&[ColumnMeta]> {
+            self.0.columns(table)
+        }
+        fn foreign_keys(&self) -> &[ForeignKey] {
+            self.0.foreign_keys()
+        }
+    }
+
+    fn run_dbs(sql_with_cursor: &str, dialect: Dialect) -> Vec<CompletionItem> {
+        let cat = WithDbs(mock(), vec!["shop".into(), "ski_archive".into()]);
+        let cursor = sql_with_cursor.find('|').unwrap();
+        let sql = sql_with_cursor.replacen('|', "", 1);
+        let a = analyze(&sql, cursor, dialect);
+        complete(
+            &a,
+            &cat,
+            Options {
+                dialect,
+                casing: KeywordCasing::Upper,
+            },
+        )
+    }
+
+    #[test]
+    fn from_offers_databases_below_tables_on_mysql() {
+        let items = run_dbs("SELECT * FROM |", Dialect::MySql);
+        let l = labels(&items);
+        let db = l.iter().position(|x| x == "shop").expect("database shown");
+        let tbl = l.iter().position(|x| x == "users").unwrap();
+        assert!(tbl < db, "{l:?}");
+        let it = items.iter().find(|i| i.label == "shop").unwrap();
+        assert_eq!(it.kind, ItemKind::Database);
+        // Prefix yang cocok dengan nama database tetap memunculkannya
+        let l = labels(&run_dbs("SELECT * FROM sk|", Dialect::MsSql));
+        assert!(l.contains(&"ski_archive".to_string()), "{l:?}");
+    }
+
+    #[test]
+    fn from_skips_databases_without_cross_db_qualifier() {
+        let l = labels(&run_dbs("SELECT * FROM |", Dialect::Postgres));
+        assert!(!l.contains(&"shop".to_string()), "{l:?}");
+    }
+
+    #[test]
+    fn use_statement_lists_only_databases() {
+        let l = labels(&run_dbs("USE |", Dialect::MySql));
+        assert_eq!(l, vec!["shop".to_string(), "ski_archive".to_string()]);
+        let l = labels(&run_dbs("SELECT 1;\nuse sh|", Dialect::MsSql));
+        assert_eq!(l.first().map(String::as_str), Some("shop"), "{l:?}");
     }
 }

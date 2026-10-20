@@ -2113,7 +2113,7 @@ impl Tabular {
                                                 }
                                                 ui.separator();
                                                 let show_close_menu = cur_tabs_len > 1 || !active;
-                                                if ui.add_enabled(show_close_menu, egui::Button::new("✕ Close Tab")).clicked() {
+                                                if ui.add_enabled(show_close_menu, egui::Button::new(format!("{} Close Tab", egui_icons::icons::ICON_CLOSE.codepoint))).clicked() {
                                                     log::debug!("[TabAction] Context menu 'Close Tab' clicked: tab #{} ('{}')", i, tab.title);
                                                     to_close = Some(i);
                                                     ui.close();

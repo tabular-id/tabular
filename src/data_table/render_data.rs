@@ -2477,7 +2477,7 @@ fn render_executing_query_state(tabular: &mut window_egui::Tabular, ui: &mut egu
                 ui.add_space(14.0);
                 if ui
                     .add(egui::Button::new(
-                        egui::RichText::new("✕ Cancel Query")
+                        egui::RichText::new(format!("{} Cancel Query", egui_icons::icons::ICON_CLOSE.codepoint))
                             .color(crate::window_egui::style::theme_danger(ui.ctx()))
                             .size(12.0),
                     ))

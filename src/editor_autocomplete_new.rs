@@ -98,6 +98,35 @@ fn collect_columns_from_tree(
     }
 }
 
+/// Daftar database koneksi dari memori: `database_cache`, lalu node sidebar.
+fn get_cached_databases(app: &Tabular, cid: i64) -> Vec<String> {
+    if let Some(dbs) = app.database_cache.get(&cid)
+        && !dbs.is_empty()
+    {
+        return dbs.clone();
+    }
+    let mut out = Vec::new();
+    collect_databases_from_tree(&app.items_tree, cid, &mut out);
+    out
+}
+
+fn collect_databases_from_tree(
+    nodes: &[crate::models::structs::TreeNode],
+    cid: i64,
+    out: &mut Vec<String>,
+) {
+    for node in nodes {
+        if node.node_type == crate::models::enums::NodeType::Database
+            && node.connection_id == Some(cid)
+            && !node.name.is_empty()
+            && !out.contains(&node.name)
+        {
+            out.push(node.name.clone());
+        }
+        collect_databases_from_tree(&node.children, cid, out);
+    }
+}
+
 fn get_cached_tables(app: &Tabular, cid: i64, db: &str) -> Option<Vec<String>> {
     // 1. In-memory check first (0ms, non-blocking)
     if let Some(tbls) = app.autocomplete_tables_mem.get(&(cid, db.to_string())) {
@@ -488,6 +517,7 @@ fn collect_loaded_fks(app: &mut Tabular) -> Vec<crate::models::structs::ForeignK
 
 /// Katalog metadata dari cache `Tabular` untuk satu kali pemanggilan engine.
 struct AppCatalog {
+    databases: Vec<String>,
     tables: Vec<String>,
     /// Key: nama tabel lowercase.
     columns: HashMap<String, Vec<ColumnMeta>>,
@@ -498,6 +528,10 @@ struct AppCatalog {
 }
 
 impl Catalog for AppCatalog {
+    fn databases(&self) -> &[String] {
+        &self.databases
+    }
+
     fn tables(&self) -> &[String] {
         &self.tables
     }
@@ -921,6 +955,9 @@ fn build_catalog(
     };
     let indexes = cid.and_then(|c| index_map(app, c, db));
     AppCatalog {
+        databases: cid
+            .map(|c| get_cached_databases(app, c))
+            .unwrap_or_default(),
         tables,
         columns,
         fks,
@@ -932,6 +969,7 @@ fn build_catalog(
 
 fn map_kind(kind: ItemKind) -> AutocompleteKind {
     match kind {
+        ItemKind::Database => AutocompleteKind::Database,
         ItemKind::Table | ItemKind::Cte => AutocompleteKind::Table,
         ItemKind::Column => AutocompleteKind::Column,
         ItemKind::Alias => AutocompleteKind::Alias,
@@ -945,6 +983,7 @@ fn map_kind(kind: ItemKind) -> AutocompleteKind {
 
 fn kind_icon(kind: Option<AutocompleteKind>) -> &'static str {
     match kind {
+        Some(AutocompleteKind::Database) => egui_icons::icons::MDI_DATABASE.codepoint,
         Some(AutocompleteKind::Table) => "📦",
         Some(AutocompleteKind::Column) => "🏷️",
         Some(AutocompleteKind::Syntax) => "⚡",

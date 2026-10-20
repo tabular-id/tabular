@@ -398,6 +398,7 @@ impl DatabaseType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AutocompleteKind {
+    Database,
     Table,
     Column,
     Syntax,

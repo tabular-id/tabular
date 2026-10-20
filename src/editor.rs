@@ -7691,7 +7691,7 @@ mod ai_panel_tests {
                                 ui.horizontal(|ui| {
                                     ui.label("✨ AI Assistant");
                                     ui.with_layout(eframe::egui::Layout::right_to_left(eframe::egui::Align::Center), |ui| {
-                                        let _ = ui.small_button("✕");
+                                        let _ = ui.small_button(egui_icons::icons::ICON_CLOSE.codepoint);
                                     });
                                 });
 

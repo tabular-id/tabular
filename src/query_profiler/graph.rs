@@ -360,7 +360,14 @@ fn render_graph_canvas_and_inspector(
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if state.selected_node_id.is_some() && ui.button("✕ Close Inspector").clicked() {
+            if state.selected_node_id.is_some()
+                && ui
+                    .button(format!(
+                        "{} Close Inspector",
+                        egui_icons::icons::ICON_CLOSE.codepoint
+                    ))
+                    .clicked()
+            {
                 state.selected_node_id = None;
             }
         });

@@ -62,6 +62,8 @@ pub enum Expect {
     Keywords(&'static [&'static str]),
     /// Konteks tidak dikenali: campuran keyword + tabel + kolom.
     Generic,
+    /// Nama database (setelah `USE`).
+    Database,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1319,6 +1321,14 @@ pub fn analyze(sql: &str, cursor: usize, dialect: Dialect) -> Analysis {
     {
         qualifier.insert(0, toks[chain_start - 2].text.clone());
         chain_start -= 2;
+    }
+    // `USE |`: hanya nama database yang valid
+    if qualifier.is_empty() && chain_start == 1 && toks[0].is_kw("USE") {
+        let mut a = Analysis::none();
+        a.expect = Expect::Database;
+        a.partial = partial;
+        a.cursor_tok = chain_start;
+        return a;
     }
     let skip_end = anchor + usize::from(has_partial);
     let close = match_parens(&toks);
