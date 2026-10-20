@@ -254,7 +254,9 @@ Open it from the sidebar: **DBs** > **Comp** > **+**. A comparison has:
 **Save** stores the comparison in the local `connections.db`. The **Comp** sidebar lists every
 saved comparison with its number of queries, connections and variables, and the statistics of
 the last run: rows read, keys compared and keys that differ. Click one to open it in a tab;
-right-click to run it in the background, duplicate it or delete it.
+the play button on a row or the right-click menu runs it in the background, and the menu also
+duplicates or deletes it. **Run all** at the top of the list starts every listed comparison
+that is not already running; comparisons run concurrently, each as its own background job.
 
 ### Matching rows and columns
 
@@ -296,6 +298,21 @@ column once per query (`total @ MySQL`, `total @ MSSQL`, ...). Differing values 
 and absent rows show *missing*. Filter by missing or changed rows, or by text. The tab draws the
 first 500 rows; **Export** writes all of them as CSV, JSON, Excel, Parquet, SQL and the other
 export formats.
+
+The **Variables** row stays visible above the result, also when the setup is collapsed, so a
+value such as a period can be changed and the comparison run again with **PROCESS** or by
+pressing Enter in the value field.
+
+Below the summary, the chips **Differences**, **Side by side** and one per source switch the
+table. **Side by side** lists every key, identical ones included, with the full row from each
+source in its own block next to the others, so the values can be read across. Values that
+differ are highlighted, a key absent from a source shows *missing* in that block, key columns
+carry the source colour and columns that are not compared are dimmed. A source chip
+shows every row that query returned, in the order the database sent it, with key columns in the
+source colour and rows that differ from the other sources marked. Filter by text or show only
+the differing rows; **Export** in that view writes the rows of that source alone. The rows are
+kept in memory with the result and are not stored, so reopening a saved comparison shows them
+only until the application is closed.
 
 Rows past the row limit are not read, so they can show up as missing; the result warns when a
 limit was reached. Each query is held in memory while comparing.

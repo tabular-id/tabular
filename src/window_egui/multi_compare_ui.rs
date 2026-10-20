@@ -2,6 +2,7 @@
 //! Logika pembanding ada di `crate::data_transfer::multi_compare`; job
 //! background di `multi_compare_jobs`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use eframe::egui;
@@ -94,6 +95,23 @@ pub struct MultiCompareTabState {
     result_filter: String,
     /// Form definisi terlihat; diciutkan setelah hasil keluar.
     setup_open: bool,
+    /// Bagian hasil yang dilihat: daftar selisih atau data satu sumber.
+    result_view: ResultView,
+    /// Hanya baris yang berbeda saat melihat data satu sumber.
+    source_only_diffs: bool,
+    /// Enter di nilai variabel: jalankan ulang pada frame berikutnya.
+    run_requested: bool,
+}
+
+/// Tampilan di bagian hasil.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ResultView {
+    #[default]
+    Differences,
+    /// Semua kunci, dengan baris lengkap tiap sumber berjajar.
+    SideBySide,
+    /// Data mentah sumber ke-n (indeks di `MultiCompareResult::labels`).
+    Source(usize),
 }
 
 impl std::fmt::Debug for MultiCompareTabState {
@@ -141,6 +159,9 @@ impl MultiCompareTabState {
             show_missing: true,
             show_changed: true,
             result_filter: String::new(),
+            result_view: ResultView::Differences,
+            source_only_diffs: false,
+            run_requested: false,
         }
     }
 
@@ -191,6 +212,11 @@ impl MultiCompareTabState {
     pub fn set_result(&mut self, result: Result<Arc<MultiCompareResult>, String>) {
         match result {
             Ok(r) => {
+                if let ResultView::Source(k) = self.result_view
+                    && k >= r.labels.len()
+                {
+                    self.result_view = ResultView::Differences;
+                }
                 self.result = Some(r);
                 self.result_error = None;
                 self.setup_open = false;
@@ -1102,7 +1128,7 @@ fn apply_toolbar(
             Err(e) => st.error = Some(e),
         }
     }
-    if a.process {
+    if a.process || std::mem::take(&mut st.run_requested) {
         // Comparison tersimpan disimpan ulang dulu supaya statistik sidebar
         // sesuai dengan definisi yang dijalankan.
         let spec = if st.saved_id.is_some() && st.unsaved() {
@@ -1130,9 +1156,11 @@ fn apply_toolbar(
 }
 
 fn render_body(t: &mut Tabular, ui: &mut egui::Ui, tab_id: usize, st: &mut MultiCompareTabState) {
+    // Variabel selalu terlihat supaya nilainya bisa diganti dan dijalankan
+    // ulang tanpa membuka seluruh form.
+    render_variables(ui, st);
+    ui.add_space(14.0);
     if st.setup_open {
-        render_variables(ui, st);
-        ui.add_space(14.0);
         render_sources(t, ui, tab_id, st);
         ui.add_space(4.0);
         render_options(ui, st);
@@ -1141,7 +1169,26 @@ fn render_body(t: &mut Tabular, ui: &mut egui::Ui, tab_id: usize, st: &mut Multi
         render_setup_summary(ui, st);
         ui.add_space(12.0);
     }
-    render_results(ui, st);
+    if let Some(action) = render_results(ui, st) {
+        match action {
+            ResultAction::ExportSource(k) => {
+                if let Some(result) = &st.result
+                    && let (Some(data), Some(label)) =
+                        (result.source_data.get(k), result.labels.get(k))
+                {
+                    let caption = format!("{}_{}", export_caption(&st.name), source_letter(k));
+                    t.toasts
+                        .info(format!("Exporting the rows read from {label}"));
+                    t.open_export_dialog_for(data.clone(), caption, None);
+                }
+            }
+        }
+    }
+}
+
+/// Aksi dari bagian hasil yang butuh `Tabular`.
+enum ResultAction {
+    ExportSource(usize),
 }
 
 /// Ringkasan satu baris saat form disembunyikan.
@@ -1160,34 +1207,33 @@ fn render_setup_summary(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
                     ui.label(egui::RichText::new(label).strong());
                     ui.add_space(8.0);
                 }
-                if !st.variables.is_empty() {
-                    let vars: Vec<String> = st
-                        .variables
-                        .iter()
-                        .map(|v| format!("{}={}", v.name.trim(), clip(&v.value)))
-                        .collect();
-                    ui.label(
-                        egui::RichText::new(vars.join("  "))
-                            .family(egui::FontFamily::Monospace)
-                            .size(11.5)
-                            .color(style::nav_text_muted(&ctx)),
-                    );
-                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} sources · {} key columns",
+                        st.entries.len(),
+                        st.entries
+                            .first()
+                            .map(|e| multi_compare::parse_list(&e.key_columns).len())
+                            .unwrap_or(0)
+                    ))
+                    .size(11.5)
+                    .color(style::nav_text_muted(&ctx)),
+                );
             });
         });
 }
 
 fn render_variables(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
     let ctx = ui.ctx().clone();
-    step_header(
-        ui,
-        1,
-        "Variables",
-        "Optional. Define a value once and use it in every query as ${name}.",
-        |_| {},
-    );
+    let hint = if st.setup_open {
+        "Optional. Define a value once and use it in every query as ${name}."
+    } else {
+        "Change a value and press PROCESS (or Enter) to run again."
+    };
+    step_header(ui, 1, "Variables", hint, |_| {});
     let mut remove = None;
     let mut add = false;
+    let mut run = false;
     let muted = style::nav_text_muted(&ctx);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
@@ -1219,10 +1265,13 @@ fn render_variables(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
                                 .font(egui::TextStyle::Monospace),
                         );
                         ui.label(mono("} ="));
-                        ui.add_sized(
+                        let value = ui.add_sized(
                             [160.0, h],
                             egui::TextEdit::singleline(&mut var.value).hint_text("value"),
                         );
+                        if value.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            run = true;
+                        }
                         if icon_button(ui, i::ICON_CLOSE.codepoint, "Remove variable", true) {
                             remove = Some(k);
                         }
@@ -1242,6 +1291,9 @@ fn render_variables(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
             name: format!("var{}", st.variables.len() + 1),
             value: String::new(),
         });
+    }
+    if run {
+        st.run_requested = true;
     }
 }
 
@@ -1380,19 +1432,38 @@ fn stat_tile(ui: &mut egui::Ui, label: &str, value: usize, color: egui::Color32)
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
+fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) -> Option<ResultAction> {
     let ctx = ui.ctx().clone();
     let dark = ctx.global_style().visuals.dark_mode;
     let result = st.result.clone();
     let counts = result.as_ref().map(|r| r.counts()).unwrap_or_default();
-    let show_filters = result.as_ref().is_some_and(|r| !r.diffs.is_empty());
-    step_header(
-        ui,
-        4,
-        "Differences",
-        "Only keys that are missing somewhere or have different values.",
-        |ui| {
-            if show_filters {
+    let has_diffs = result.as_ref().is_some_and(|r| !r.diffs.is_empty());
+    let view = st.result_view;
+    let (title, hint) = match view {
+        ResultView::Differences => (
+            "Differences".to_string(),
+            "Only keys that are missing somewhere or have different values.",
+        ),
+        ResultView::SideBySide => (
+            "Side by side".to_string(),
+            "One row per key with the full row from every source next to each other.",
+        ),
+        ResultView::Source(k) => (
+            format!(
+                "Rows read from {}",
+                result
+                    .as_ref()
+                    .and_then(|r| r.labels.get(k))
+                    .map(String::as_str)
+                    .unwrap_or("source")
+            ),
+            "Every row the query returned, in the order the database sent it.",
+        ),
+    };
+    let mut action = None;
+    step_header(ui, 4, &title, hint, |ui| match view {
+        ResultView::Differences => {
+            if has_diffs {
                 style::render_search_field(ui, &mut st.result_filter, "Filter rows…", 200.0);
                 ui.checkbox(
                     &mut st.show_changed,
@@ -1403,8 +1474,27 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
                     format!("Missing ({})", fmt_count(counts.0 as u64)),
                 );
             }
-        },
-    );
+        }
+        ResultView::SideBySide => {
+            style::render_search_field(ui, &mut st.result_filter, "Filter rows…", 200.0);
+            ui.checkbox(&mut st.source_only_diffs, "Only differing rows")
+                .on_hover_text("Hide keys that are identical in every source");
+        }
+        ResultView::Source(k) => {
+            let btn =
+                style::btn_field_action(ui, format!("{} Export", i::ICON_FILE_DOWNLOAD.codepoint));
+            if ui
+                .add(btn)
+                .on_hover_text("Export the rows read from this source")
+                .clicked()
+            {
+                action = Some(ResultAction::ExportSource(k));
+            }
+            style::render_search_field(ui, &mut st.result_filter, "Filter rows…", 200.0);
+            ui.checkbox(&mut st.source_only_diffs, "Only differing rows")
+                .on_hover_text("Rows whose key is missing elsewhere or whose values differ");
+        }
+    });
     if let Some(e) = &st.result_error {
         style::theme_alert_frame(&ctx, true).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -1416,6 +1506,7 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
         ui.add_space(6.0);
     }
     let Some(result) = result else {
+        st.result_view = ResultView::Differences;
         if st.result_error.is_none() {
             egui::Frame::new()
                 .fill(style::nav_track(&ctx))
@@ -1438,7 +1529,7 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
                     });
                 });
         }
-        return;
+        return None;
     };
     let (missing, changed) = counts;
 
@@ -1470,48 +1561,98 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
     });
     ui.add_space(8.0);
 
-    // Ringkasan per sumber.
+    // Pemilih tampilan: selisih, atau data mentah tiap sumber.
+    let accent = style::theme_accent(&ctx);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        let selected = st.result_view == ResultView::Differences;
+        let chip = view_chip(ui, selected, accent, |ui| {
+            ui.label(
+                egui::RichText::new(i::ICON_DIFFERENCE.codepoint)
+                    .size(14.0)
+                    .color(accent),
+            );
+            ui.label(egui::RichText::new("Differences").strong());
+            ui.label(
+                egui::RichText::new(format!("{} rows", fmt_count(result.diffs.len() as u64)))
+                    .size(11.5)
+                    .color(style::nav_text_muted(&ctx)),
+            );
+        });
+        if chip.clicked() {
+            st.result_view = ResultView::Differences;
+        }
+        let selected = st.result_view == ResultView::SideBySide;
+        let chip = view_chip(ui, selected, accent, |ui| {
+            ui.label(
+                egui::RichText::new(i::ICON_VIEW_COLUMN.codepoint)
+                    .size(14.0)
+                    .color(accent),
+            );
+            ui.label(egui::RichText::new("Side by side").strong());
+            ui.label(
+                egui::RichText::new(format!("{} keys", fmt_count(result.total_keys as u64)))
+                    .size(11.5)
+                    .color(style::nav_text_muted(&ctx)),
+            );
+        })
+        .on_hover_text("Every key with the full row from each source next to each other");
+        if chip.clicked() {
+            st.result_view = ResultView::SideBySide;
+        }
         for (k, s) in result.sources.iter().enumerate() {
-            egui::Frame::new()
-                .fill(style::nav_track(&ctx))
-                .corner_radius(6.0)
-                .inner_margin(egui::Margin::symmetric(8, 4))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        source_badge(ui, k, 16.0);
-                        ui.label(egui::RichText::new(&s.label).strong());
-                        let mut text = format!(
-                            "{} rows · {} missing",
-                            fmt_count(s.rows as u64),
-                            fmt_count(s.missing as u64)
-                        );
-                        if s.duplicate_keys > 0 {
-                            text.push_str(&format!(
-                                " · {} duplicate keys",
-                                fmt_count(s.duplicate_keys as u64)
-                            ));
-                        }
+            let selected = st.result_view == ResultView::Source(k);
+            let chip = view_chip(ui, selected, accent, |ui| {
+                ui.horizontal(|ui| {
+                    source_badge(ui, k, 16.0);
+                    ui.label(egui::RichText::new(&s.label).strong());
+                    let mut text = format!(
+                        "{} rows · {} missing",
+                        fmt_count(s.rows as u64),
+                        fmt_count(s.missing as u64)
+                    );
+                    if s.duplicate_keys > 0 {
+                        text.push_str(&format!(
+                            " · {} duplicate keys",
+                            fmt_count(s.duplicate_keys as u64)
+                        ));
+                    }
+                    ui.label(
+                        egui::RichText::new(text)
+                            .size(11.5)
+                            .color(style::nav_text_muted(&ctx)),
+                    );
+                    if s.truncated {
                         ui.label(
-                            egui::RichText::new(text)
-                                .size(11.5)
-                                .color(style::nav_text_muted(&ctx)),
+                            egui::RichText::new(format!(
+                                "{} limit reached",
+                                i::ICON_WARNING.codepoint
+                            ))
+                            .size(11.5)
+                            .color(style::theme_warning(&ctx)),
                         );
-                        if s.truncated {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} limit reached",
-                                    i::ICON_WARNING.codepoint
-                                ))
-                                .size(11.5)
-                                .color(style::theme_warning(&ctx)),
-                            );
-                        }
-                    });
+                    }
                 });
+            })
+            .on_hover_text("Show every row read from this source");
+            if chip.clicked() {
+                st.result_view = ResultView::Source(k);
+            }
         }
     });
+    match st.result_view {
+        ResultView::Source(k) => {
+            ui.add_space(8.0);
+            render_source_rows(ui, st, &result, k);
+            return action;
+        }
+        ResultView::SideBySide => {
+            ui.add_space(8.0);
+            render_side_by_side(ui, st, &result);
+            return action;
+        }
+        ResultView::Differences => {}
+    }
     if result.truncated() {
         warning_label(
             ui,
@@ -1546,7 +1687,7 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
                 .color(style::theme_success(&ctx)),
             );
         });
-        return;
+        return action;
     }
 
     let needle = st.result_filter.trim().to_lowercase();
@@ -1669,6 +1810,427 @@ fn render_results(ui: &mut egui::Ui, st: &mut MultiCompareTabState) {
             ),
         );
     }
+    action
+}
+
+/// Chip pemilih tampilan hasil; yang terpilih diberi bingkai aksen.
+fn view_chip(
+    ui: &mut egui::Ui,
+    selected: bool,
+    accent: egui::Color32,
+    content: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let ctx = ui.ctx().clone();
+    let stroke = if selected {
+        egui::Stroke::new(1.5, accent)
+    } else {
+        egui::Stroke::new(1.0, style::nav_border(&ctx))
+    };
+    let fill = if selected {
+        accent.gamma_multiply(0.14)
+    } else {
+        style::nav_track(&ctx)
+    };
+    let frame = egui::Frame::new()
+        .fill(fill)
+        .stroke(stroke)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| ui.horizontal(content));
+    let response = ui.interact(
+        frame.response.rect,
+        frame.response.id.with("view_chip"),
+        egui::Sense::click(),
+    );
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            frame.response.rect,
+            6.0,
+            egui::Stroke::new(1.0, accent),
+            egui::StrokeKind::Inside,
+        );
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// Tabel berdampingan: satu baris per kunci, lalu blok kolom lengkap tiap
+/// sumber. Sel yang nilainya berbeda antar sumber diberi warna peringatan,
+/// baris yang hilang di suatu sumber ditulis *missing* di blok sumber itu.
+#[allow(clippy::too_many_lines)]
+fn render_side_by_side(
+    ui: &mut egui::Ui,
+    st: &mut MultiCompareTabState,
+    result: &MultiCompareResult,
+) {
+    let ctx = ui.ctx().clone();
+    if result.source_data.len() != result.labels.len() {
+        muted_label(
+            ui,
+            "The rows of this run are no longer available. Press PROCESS to read them again.",
+        );
+        return;
+    }
+    let sources = result.labels.len();
+    let needle = st.result_filter.trim().to_lowercase();
+    let visible: Vec<(usize, &multi_compare::KeyRow)> = result
+        .key_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, kr)| !st.source_only_diffs || kr.diff.is_some())
+        .filter(|(_, kr)| {
+            needle.is_empty()
+                || kr.rows.iter().enumerate().any(|(s, row)| {
+                    row.and_then(|r| result.source_data[s].rows.get(r))
+                        .is_some_and(|cells| {
+                            cells.iter().any(|c| c.to_lowercase().contains(&needle))
+                        })
+                })
+        })
+        .collect();
+    let danger = style::theme_danger(&ctx);
+    let warn = style::theme_warning(&ctx);
+    let success = style::theme_success(&ctx);
+    let muted = style::nav_text_muted(&ctx);
+    let dark = ctx.global_style().visuals.dark_mode;
+    let mono = egui::FontFamily::Monospace;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} of {} keys shown · {} identical · {} differ",
+                fmt_count(visible.len() as u64),
+                fmt_count(result.key_rows.len() as u64),
+                fmt_count(result.identical as u64),
+                fmt_count(result.diffs.len() as u64)
+            ))
+            .size(12.0)
+            .color(muted),
+        );
+    });
+    ui.add_space(6.0);
+    if visible.is_empty() {
+        muted_label(ui, "No row matches the filter.");
+        return;
+    }
+    // Pemisah vertikal antar blok sumber.
+    let separator = |ui: &mut egui::Ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 16.0), egui::Sense::hover());
+        ui.painter().vline(
+            rect.center().x,
+            ui.max_rect().y_range(),
+            egui::Stroke::new(1.0, style::nav_border(&ctx)),
+        );
+    };
+    style::modal_card_frame(&ctx)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt("cmp_sbs_scroll")
+                .show(ui, |ui| {
+                    egui::Grid::new("cmp_sbs_grid")
+                        .striped(true)
+                        .spacing([14.0, 5.0])
+                        .show(ui, |ui| {
+                            // Baris header pertama: nama sumber di atas bloknya.
+                            ui.label(egui::RichText::new("Status").strong().size(12.0));
+                            for s in 0..sources {
+                                separator(ui);
+                                let width = result.source_data[s].headers.len().max(1);
+                                ui.horizontal(|ui| {
+                                    source_badge(ui, s, 16.0);
+                                    ui.label(
+                                        egui::RichText::new(&result.labels[s])
+                                            .strong()
+                                            .color(source_color(s, dark)),
+                                    );
+                                });
+                                for _ in 1..width {
+                                    ui.label("");
+                                }
+                            }
+                            ui.end_row();
+                            // Baris header kedua: nama kolom tiap sumber.
+                            ui.label("");
+                            for s in 0..sources {
+                                separator(ui);
+                                let data = &result.source_data[s];
+                                if data.headers.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(no columns)").size(12.0).color(muted),
+                                    );
+                                }
+                                for (c, h) in data.headers.iter().enumerate() {
+                                    let is_key =
+                                        result.key_index.get(s).is_some_and(|k| k.contains(&c));
+                                    let compared =
+                                        result.column_index.get(s).is_some_and(|k| k.contains(&c));
+                                    let mut text = egui::RichText::new(h).strong().size(12.0);
+                                    if is_key {
+                                        text = text.color(source_color(s, dark));
+                                    } else if !compared {
+                                        text = text.color(muted);
+                                    }
+                                    let response = ui.label(text);
+                                    if is_key {
+                                        response.on_hover_text("Key column");
+                                    } else if !compared {
+                                        response.on_hover_text(
+                                            "Not compared: this column is not in every source",
+                                        );
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                            for (_, kr) in visible.iter().take(MAX_ROWS_SHOWN) {
+                                let diff = kr.diff.and_then(|d| result.diffs.get(d));
+                                match diff {
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} identical",
+                                                i::ICON_CHECK.codepoint
+                                            ))
+                                            .size(12.0)
+                                            .color(success),
+                                        );
+                                    }
+                                    Some(d) => {
+                                        let status = d.status(&result.labels, &result.columns);
+                                        ui.label(
+                                            egui::RichText::new(status)
+                                                .size(12.0)
+                                                .color(if d.is_missing() { danger } else { warn }),
+                                        );
+                                    }
+                                }
+                                for s in 0..sources {
+                                    separator(ui);
+                                    let data = &result.source_data[s];
+                                    let width = data.headers.len().max(1);
+                                    let Some(row) = kr.rows.get(s).copied().flatten() else {
+                                        ui.label(
+                                            egui::RichText::new("missing")
+                                                .italics()
+                                                .size(12.0)
+                                                .color(danger),
+                                        );
+                                        for _ in 1..width {
+                                            ui.label("");
+                                        }
+                                        continue;
+                                    };
+                                    // Kolom sumber yang nilainya berbeda pada kunci ini.
+                                    let changed_cols: Vec<usize> = diff
+                                        .map(|d| {
+                                            d.changed
+                                                .iter()
+                                                .filter_map(|c| {
+                                                    result
+                                                        .column_index
+                                                        .get(s)
+                                                        .and_then(|k| k.get(*c))
+                                                        .copied()
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default();
+                                    if data.headers.is_empty() {
+                                        ui.label("");
+                                    }
+                                    for c in 0..data.headers.len() {
+                                        let is_key =
+                                            result.key_index.get(s).is_some_and(|k| k.contains(&c));
+                                        let value = data.value(row, c);
+                                        let mut text = match value {
+                                            Some(v) => {
+                                                egui::RichText::new(clip(v)).family(mono.clone())
+                                            }
+                                            None => {
+                                                egui::RichText::new("NULL").italics().color(muted)
+                                            }
+                                        };
+                                        if is_key {
+                                            text = text.strong();
+                                        }
+                                        if changed_cols.contains(&c) {
+                                            text = text.color(warn).strong();
+                                        }
+                                        let response = ui.label(text);
+                                        if let Some(v) = value
+                                            && v.chars().count() > MAX_CELL_CHARS
+                                        {
+                                            response.on_hover_text(v.to_string());
+                                        }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if visible.len() > MAX_ROWS_SHOWN {
+        muted_label(
+            ui,
+            format!(
+                "Showing the first {} of {} keys. Use the filter or Only differing rows to narrow it down.",
+                fmt_count(MAX_ROWS_SHOWN as u64),
+                fmt_count(visible.len() as u64)
+            ),
+        );
+    }
+}
+
+/// Tabel data mentah satu sumber. Baris yang ikut berbeda ditandai; kolom
+/// kunci ditebalkan.
+fn render_source_rows(
+    ui: &mut egui::Ui,
+    st: &mut MultiCompareTabState,
+    result: &MultiCompareResult,
+    k: usize,
+) {
+    let ctx = ui.ctx().clone();
+    let (Some(data), Some(summary)) = (result.source_data.get(k), result.sources.get(k)) else {
+        muted_label(
+            ui,
+            "The rows of this run are no longer available. Press PROCESS to read them again.",
+        );
+        return;
+    };
+    let differing: HashSet<usize> = summary.differing_rows.iter().copied().collect();
+    let needle = st.result_filter.trim().to_lowercase();
+    let rows: Vec<usize> = (0..data.rows.len())
+        .filter(|r| !st.source_only_diffs || differing.contains(r))
+        .filter(|r| {
+            needle.is_empty()
+                || data.rows[*r]
+                    .iter()
+                    .any(|cell| cell.to_lowercase().contains(&needle))
+        })
+        .collect();
+    let key_cols: HashSet<usize> = data
+        .headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| {
+            result
+                .key_columns
+                .iter()
+                .any(|kc| kc.eq_ignore_ascii_case(h))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let warn = style::theme_warning(&ctx);
+    let muted = style::nav_text_muted(&ctx);
+    let dark = ctx.global_style().visuals.dark_mode;
+    let mono = egui::FontFamily::Monospace;
+
+    ui.horizontal_wrapped(|ui| {
+        source_badge(ui, k, 16.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "{} of {} rows shown · {} differ from the other sources",
+                fmt_count(rows.len() as u64),
+                fmt_count(data.rows.len() as u64),
+                fmt_count(differing.len() as u64)
+            ))
+            .size(12.0)
+            .color(muted),
+        );
+        if summary.truncated {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} the row limit was reached; later rows were not read",
+                    i::ICON_WARNING.codepoint
+                ))
+                .size(12.0)
+                .color(warn),
+            );
+        }
+    });
+    ui.add_space(6.0);
+    if data.headers.is_empty() {
+        muted_label(ui, "The query returned no columns.");
+        return;
+    }
+    if rows.is_empty() {
+        muted_label(ui, "No row matches the filter.");
+        return;
+    }
+    style::modal_card_frame(&ctx)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt(("cmp_source_scroll", k))
+                .show(ui, |ui| {
+                    egui::Grid::new(("cmp_source_grid", k))
+                        .striped(true)
+                        .spacing([16.0, 5.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("#").strong().size(12.0).color(muted));
+                            for (c, h) in data.headers.iter().enumerate() {
+                                let mut text = egui::RichText::new(h).strong().size(12.0);
+                                if key_cols.contains(&c) {
+                                    text = text.color(source_color(k, dark));
+                                }
+                                let response = ui.label(text);
+                                if key_cols.contains(&c) {
+                                    response.on_hover_text("Key column");
+                                }
+                            }
+                            ui.end_row();
+                            for &r in rows.iter().take(MAX_ROWS_SHOWN) {
+                                let differs = differing.contains(&r);
+                                let mut number = egui::RichText::new((r + 1).to_string())
+                                    .size(11.5)
+                                    .color(muted);
+                                if differs {
+                                    number = number.color(warn).strong();
+                                }
+                                let response = ui.label(number);
+                                if differs {
+                                    response.on_hover_text(
+                                        "This row is missing elsewhere or its values differ",
+                                    );
+                                }
+                                for c in 0..data.headers.len() {
+                                    let value = data.value(r, c);
+                                    let mut text = match value {
+                                        Some(v) => {
+                                            egui::RichText::new(clip(v)).family(mono.clone())
+                                        }
+                                        None => egui::RichText::new("NULL").italics().color(muted),
+                                    };
+                                    if key_cols.contains(&c) {
+                                        text = text.strong();
+                                    }
+                                    if differs {
+                                        text = text.color(warn);
+                                    }
+                                    let response = ui.label(text);
+                                    if let Some(v) = value
+                                        && v.chars().count() > MAX_CELL_CHARS
+                                    {
+                                        response.on_hover_text(v.to_string());
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if rows.len() > MAX_ROWS_SHOWN {
+        muted_label(
+            ui,
+            format!(
+                "Showing the first {} of {} rows. Export to get all of them.",
+                fmt_count(MAX_ROWS_SHOWN as u64),
+                fmt_count(rows.len() as u64)
+            ),
+        );
+    }
 }
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -1745,8 +2307,15 @@ fn delete(t: &mut Tabular, id: i64) {
 enum SidebarAction {
     Open(i64),
     Run(i64),
+    /// Jalankan semua comparison yang terlihat dan belum berjalan.
+    RunAll,
     Duplicate(i64),
     Delete(i64, String),
+}
+
+/// Mulai comparison tersimpan di background (tanpa tab).
+fn run_saved(t: &mut Tabular, ctx: &egui::Context, item: &SavedMultiCompare) -> Result<(), String> {
+    jobs::start(t, ctx, None, Some(item.id), &item.spec)
 }
 
 /// Daftar comparison tersimpan di sidebar DBs > Comp. `filter` = teks
@@ -1777,6 +2346,33 @@ pub fn render_sidebar(t: &mut Tabular, ui: &mut egui::Ui, filter: &str) {
         }
     }
     let mut action = None;
+    let idle: Vec<i64> = items
+        .iter()
+        .filter(|s| t.multi_compare.running_for_saved(s.id).is_none())
+        .map(|s| s.id)
+        .collect();
+    let running_count = items.len() - idle.len();
+    if items.len() > 1 || running_count > 0 {
+        ui.horizontal(|ui| {
+            let btn = style::btn_field_action(
+                ui,
+                format!("{} Run all ({})", i::ICON_PLAY_ARROW.codepoint, idle.len()),
+            );
+            if ui
+                .add_enabled(!idle.is_empty(), btn)
+                .on_hover_text("Run every listed comparison in the background at the same time")
+                .on_disabled_hover_text("Every listed comparison is already running")
+                .clicked()
+            {
+                action = Some(SidebarAction::RunAll);
+            }
+            if running_count > 0 {
+                ui.add(egui::Spinner::new().size(12.0));
+                muted_label(ui, format!("{running_count} running"));
+            }
+        });
+        ui.add_space(4.0);
+    }
     for item in &items {
         let running = t
             .multi_compare
@@ -1793,6 +2389,10 @@ pub fn render_sidebar(t: &mut Tabular, ui: &mut egui::Ui, filter: &str) {
                             .color(style::theme_accent(&ctx)),
                     );
                     ui.label(egui::RichText::new(&item.spec.name).strong());
+                    // Ruang untuk tombol Run yang digambar di atas kartu.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.allocate_exact_size(egui::vec2(22.0, 18.0), egui::Sense::hover());
+                    });
                 });
                 muted_label(
                     ui,
@@ -1834,6 +2434,24 @@ pub fn render_sidebar(t: &mut Tabular, ui: &mut egui::Ui, filter: &str) {
         if response.clicked() {
             action = Some(SidebarAction::Open(item.id));
         }
+        // Tombol Run digambar setelah area klik kartu supaya berada di atasnya.
+        if running.is_none() {
+            let rect = egui::Rect::from_min_size(
+                frame.response.rect.right_top() + egui::vec2(-30.0, 6.0),
+                egui::vec2(22.0, 18.0),
+            );
+            let run_btn = ui.put(
+                rect,
+                egui::Button::new(
+                    egui::RichText::new(i::ICON_PLAY_ARROW.codepoint)
+                        .color(style::theme_accent(&ctx)),
+                )
+                .frame(false),
+            );
+            if run_btn.on_hover_text("Run in background").clicked() {
+                action = Some(SidebarAction::Run(item.id));
+            }
+        }
         response.context_menu(|ui| {
             if ui.button("Open").clicked() {
                 action = Some(SidebarAction::Open(item.id));
@@ -1862,14 +2480,31 @@ pub fn render_sidebar(t: &mut Tabular, ui: &mut egui::Ui, filter: &str) {
     match action {
         Some(SidebarAction::Open(id)) => open_saved(t, id),
         Some(SidebarAction::Run(id)) => {
-            let spec = items.iter().find(|s| s.id == id).map(|s| s.spec.clone());
-            if let Some(spec) = spec {
-                match jobs::start(t, &ctx, None, Some(id), &spec) {
-                    Ok(()) => t
-                        .toasts
-                        .info(format!("Comparing \"{}\" in the background", spec.name)),
+            if let Some(item) = items.iter().find(|s| s.id == id) {
+                match run_saved(t, &ctx, item) {
+                    Ok(()) => t.toasts.info(format!(
+                        "Comparing \"{}\" in the background",
+                        item.spec.name
+                    )),
                     Err(e) => t.toasts.error(e),
                 }
+            }
+        }
+        Some(SidebarAction::RunAll) => {
+            let mut started = 0usize;
+            let mut errors = Vec::new();
+            for item in items.iter().filter(|s| idle.contains(&s.id)) {
+                match run_saved(t, &ctx, item) {
+                    Ok(()) => started += 1,
+                    Err(e) => errors.push(format!("{}: {e}", item.spec.name)),
+                }
+            }
+            if started > 0 {
+                t.toasts
+                    .info(format!("Comparing {started} comparisons in the background"));
+            }
+            for e in errors {
+                t.toasts.error(e);
             }
         }
         Some(SidebarAction::Duplicate(id)) => match duplicate(t, id) {

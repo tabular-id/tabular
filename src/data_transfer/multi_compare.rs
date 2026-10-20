@@ -299,6 +299,19 @@ pub struct SourceSummary {
     /// Kunci yang ada di sumber lain tetapi tidak di sini.
     pub missing: usize,
     pub truncated: bool,
+    /// Indeks baris (di [`MultiCompareResult::source_data`]) yang ikut
+    /// berbeda: nilainya berubah atau kuncinya hilang di sumber lain.
+    pub differing_rows: Vec<usize>,
+}
+
+/// Satu kunci gabungan dengan baris sumbernya, untuk tampilan berdampingan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyRow {
+    /// Per sumber: indeks baris di [`MultiCompareResult::source_data`];
+    /// `None` = kunci tidak ada di sumber itu.
+    pub rows: Vec<Option<usize>>,
+    /// Indeks di [`MultiCompareResult::diffs`] bila kunci ini berbeda.
+    pub diff: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -315,6 +328,16 @@ pub struct MultiCompareResult {
     pub identical: usize,
     /// Kunci berbeda dari gabungan semua sumber.
     pub total_keys: usize,
+    /// Data mentah tiap sumber (urutan sama dengan `labels`), untuk ditinjau
+    /// di tab hasil. Diisi oleh [`run`]; [`diff_sources`] membiarkannya kosong.
+    pub source_data: Vec<TableData>,
+    /// Semua kunci gabungan (termasuk yang identik) urut kemunculan, dengan
+    /// baris tiap sumber.
+    pub key_rows: Vec<KeyRow>,
+    /// Per sumber: indeks kolom kunci di header `source_data`.
+    pub key_index: Vec<Vec<usize>>,
+    /// Per sumber: indeks kolom di header `source_data` untuk tiap `columns`.
+    pub column_index: Vec<Vec<usize>>,
 }
 
 impl MultiCompareResult {
@@ -518,11 +541,13 @@ pub fn diff_sources(
             duplicate_keys: duplicates,
             missing: 0,
             truncated: source.truncated,
+            differing_rows: Vec::new(),
         });
     }
     drop(seen);
 
     let mut diffs = Vec::new();
+    let mut key_rows = Vec::with_capacity(order.len());
     let mut identical = 0usize;
     for key in &order {
         let rows: Vec<Option<usize>> = index.iter().map(|m| m.get(key).copied()).collect();
@@ -540,11 +565,17 @@ pub fn diff_sources(
         let all_present = rows.iter().all(Option::is_some);
         if all_present && changed.is_empty() {
             identical += 1;
+            key_rows.push(KeyRow { rows, diff: None });
             continue;
         }
+        key_rows.push(KeyRow {
+            rows: rows.clone(),
+            diff: Some(diffs.len()),
+        });
         for (s, row) in rows.iter().enumerate() {
-            if row.is_none() {
-                summaries[s].missing += 1;
+            match row {
+                None => summaries[s].missing += 1,
+                Some(r) => summaries[s].differing_rows.push(*r),
             }
         }
         let (first_s, first_row) = rows
@@ -591,6 +622,10 @@ pub fn diff_sources(
         diffs,
         identical,
         total_keys: order.len(),
+        source_data: Vec::new(),
+        key_rows,
+        key_index: keys,
+        column_index: col_idx,
     })
 }
 
@@ -708,9 +743,13 @@ pub async fn run(
     with_progress(&progress, |p| {
         p.current_table = "Comparing rows".to_string()
     });
-    let result = tokio::task::spawn_blocking(move || diff_sources(&sources, &opts))
-        .await
-        .map_err(|e| format!("Comparison stopped: {e}"))??;
+    // Data mentah ikut dikembalikan supaya tab hasil bisa menampilkan baris
+    // tiap sumber tanpa membaca ulang.
+    let (mut result, sources) =
+        tokio::task::spawn_blocking(move || diff_sources(&sources, &opts).map(|r| (r, sources)))
+            .await
+            .map_err(|e| format!("Comparison stopped: {e}"))??;
+    result.source_data = sources.into_iter().map(|s| s.data).collect();
     with_progress(&progress, |p| p.tables_done += 1);
     Ok(result)
 }
@@ -841,6 +880,27 @@ mod tests {
         assert_eq!(r.sources[2].missing, 1);
         assert_eq!(r.sources[0].missing, 1);
         assert_eq!(r.counts(), (2, 1));
+        // Baris sumber yang ikut berbeda (untuk tampilan data per sumber):
+        // MySQL baris 2 dan 3 (kunci 2 berubah, kunci 3 hilang di Mongo),
+        // Mongo baris 2 dan 3 (kunci 2 berubah, kunci 4 hanya di sana).
+        assert_eq!(r.sources[0].differing_rows, vec![1, 2]);
+        assert_eq!(r.sources[1].differing_rows, vec![1, 2]);
+        assert_eq!(r.sources[2].differing_rows, vec![1, 2]);
+        assert!(
+            r.source_data.is_empty(),
+            "diff_sources leaves raw data to run()"
+        );
+        // Pemetaan berdampingan: semua kunci urut kemunculan, termasuk yang
+        // identik (kunci 1), dengan indeks baris tiap sumber.
+        assert_eq!(r.key_rows.len(), 4);
+        assert_eq!(r.key_rows[0].rows, vec![Some(0), Some(0), Some(0)]);
+        assert_eq!(r.key_rows[0].diff, None);
+        assert_eq!(r.key_rows[2].rows, vec![Some(2), Some(2), None]);
+        assert_eq!(r.key_rows[2].diff, Some(1));
+        assert_eq!(r.key_rows[3].rows, vec![None, None, Some(2)]);
+        assert_eq!(r.key_index[2], vec![0]);
+        // Kolom "amount" di Mongo adalah "total" (indeks 1) lewat alias.
+        assert_eq!(r.column_index[2], vec![1, 2]);
 
         let table = r.to_table_data();
         assert_eq!(
@@ -977,6 +1037,14 @@ mod tests {
         assert_eq!(r.diffs[0].changed, vec![1]);
         assert_eq!(r.diffs[1].present, vec![true, false]);
         assert_eq!(r.diffs[2].values[1][0], None);
+        // Data mentah tiap sumber ikut kembali, urut seperti `labels`.
+        assert_eq!(r.source_data.len(), 2);
+        assert_eq!(r.source_data[0].headers.len(), 3);
+        assert_eq!(
+            r.source_data[0].rows.len(),
+            r.sources[0].rows,
+            "rows read must match the summary"
+        );
         let p = progress.lock().unwrap();
         assert_eq!(p.tables_done, p.tables_total);
     }
