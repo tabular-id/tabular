@@ -679,6 +679,7 @@ impl super::Tabular {
             ai_inline_receiver: None,
             toasts: crate::window_egui::notifications::ToastManager::default(),
             background_tasks: Default::default(),
+            db_jobs: Default::default(),
             git: crate::window_egui::git_jobs::GitUiState::new(),
             repo_setup: Default::default(),
             multi_compare: Default::default(),
@@ -1084,6 +1085,8 @@ impl super::Tabular {
         let shared_db_pool = self.shared_db_pool.clone();
         let shared_pools = self.shared_connection_pools.clone();
         let shared_runtime = self.runtime.clone();
+        // Job database dicatat di sini supaya tampil di panel Background Processes.
+        let db_jobs = self.db_jobs.clone();
 
         fn get_cache_pool(
             shared: &std::sync::Arc<std::sync::RwLock<Option<Arc<sqlx::SqlitePool>>>>,
@@ -1116,12 +1119,13 @@ impl super::Tabular {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_pools_thread = shared_pools.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Loading databases", DbJobTarget::Connection(connection_id), "Reading the database list");
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::ConnectionFailed {
                             connection_id,
                             error_message: TASK_PANIC_MESSAGE.to_string(),
                         });
-                        spawn_named_task("fetch-databases", &result_sender, on_panic, move || {
+                        spawn_named_task("fetch-databases", &result_sender, on_panic, Some(job), move || {
                             debug!("[FETCH-DB] FetchDatabases id={} STARTED", connection_id);
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
@@ -1172,12 +1176,13 @@ impl super::Tabular {
                         // and running it inline stalled every other queued task
                         // behind it — the app looked frozen even though the UI
                         // thread itself was fine.
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Testing connection", DbJobTarget::Named(connection.display_name()), "Checking that the server accepts the connection");
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::TestConnectionComplete {
                             success: false,
                             message: TASK_PANIC_MESSAGE.to_string(),
                         });
-                        spawn_named_task("test-connection", &result_sender, on_panic, move || {
+                        spawn_named_task("test-connection", &result_sender, on_panic, Some(job), move || {
                             let (success, message) =
                                 crate::connection::test_database_connection(&connection);
                             let _ = result_sender_thread.send(
@@ -1197,13 +1202,14 @@ impl super::Tabular {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_pools_thread = shared_pools.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Loading Redis keys", DbJobTarget::Connection(connection_id), format!("Database {database_name}"));
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::RedisKeysFetched {
                             connection_id,
                             database_name: database_name.clone(),
                             keys: Vec::new(),
                         });
-                        spawn_named_task("fetch-redis-keys", &result_sender, on_panic, move || {
+                        spawn_named_task("fetch-redis-keys", &result_sender, on_panic, Some(job), move || {
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
@@ -1286,7 +1292,8 @@ impl super::Tabular {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_pools_thread = shared_pools.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Loading Redis browser", DbJobTarget::Connection(connection_id), database_name.clone().map(|d| format!("Database {d}")).unwrap_or_default());
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::RedisBrowserStateFetched {
                             connection_id,
                             state: models::structs::RedisBrowserState {
@@ -1294,7 +1301,7 @@ impl super::Tabular {
                                 ..Default::default()
                             },
                         });
-                        spawn_named_task("fetch-redis-browser", &result_sender, on_panic, move || {
+                        spawn_named_task("fetch-redis-browser", &result_sender, on_panic, Some(job), move || {
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
@@ -1384,7 +1391,7 @@ impl super::Tabular {
                             search_text: search_text.clone(),
                             keys: Vec::new(),
                         });
-                        spawn_named_task("search-redis-keys", &result_sender, on_panic, move || {
+                        spawn_named_task("search-redis-keys", &result_sender, on_panic, None, move || {
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
@@ -1437,13 +1444,14 @@ impl super::Tabular {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_pools_thread = shared_pools.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Refreshing", DbJobTarget::Connection(connection_id), "Reloading databases, tables and columns");
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::RefreshComplete {
                             connection_id,
                             success: false,
                             databases: Vec::new(),
                         });
-                        spawn_named_task("refresh-connection", &result_sender, on_panic, move || {
+                        spawn_named_task("refresh-connection", &result_sender, on_panic, Some(job), move || {
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
@@ -1487,12 +1495,13 @@ impl super::Tabular {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_pools_thread = shared_pools.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Connecting", DbJobTarget::Connection(connection_id), "Opening the connection pool");
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::ConnectionFailed {
                             connection_id,
                             error_message: TASK_PANIC_MESSAGE.to_string(),
                         });
-                        spawn_named_task("ensure-pool", &result_sender, on_panic, move || {
+                        spawn_named_task("ensure-pool", &result_sender, on_panic, Some(job), move || {
                             debug!("[POOL] EnsureConnectionPool id={} STARTED", connection_id);
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
@@ -1561,7 +1570,8 @@ impl super::Tabular {
                     } => {
                         let shared_db_pool_thread = shared_db_pool.clone();
                         let shared_runtime_thread = shared_runtime.clone();
-                        let result_sender_thread = result_sender.clone();
+                        let job = db_jobs.start("Loading table structure", DbJobTarget::Connection(connection_id), format!("{database_name}.{table_name}"));
+                        let result_sender_thread = job.sender(&result_sender);
                         let on_panic = Some(models::enums::BackgroundResult::TableStructureFetched {
                             connection_id,
                             database_name: database_name.clone(),
@@ -1571,7 +1581,7 @@ impl super::Tabular {
                             indexes: None,
                             partitions: None,
                         });
-                        spawn_named_task("fetch-table-structure", &result_sender, on_panic, move || {
+                        spawn_named_task("fetch-table-structure", &result_sender, on_panic, Some(job), move || {
                             let cache_pool_thread = get_cache_pool(&shared_db_pool_thread);
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
@@ -1679,7 +1689,7 @@ impl super::Tabular {
                         let on_panic = Some(models::enums::BackgroundResult::UpdateCheckComplete {
                             result: Err(TASK_PANIC_MESSAGE.to_string()),
                         });
-                        spawn_named_task("check-updates", &result_sender, on_panic, move || {
+                        spawn_named_task("check-updates", &result_sender, on_panic, None, move || {
                             let rt_opt = shared_runtime_thread
                                 .or_else(|| tokio::runtime::Runtime::new().ok().map(Arc::new));
                             // Perform update check on shared runtime (if required by async API)
@@ -1716,7 +1726,7 @@ impl super::Tabular {
                         // as long as the file dialog stayed on screen.
                         let result_sender_thread = result_sender.clone();
                         let on_panic = None;
-                        spawn_named_task("pick-sqlite-path", &result_sender, on_panic, move || {
+                        spawn_named_task("pick-sqlite-path", &result_sender, on_panic, None, move || {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_title("Select SQLite Database File")
                                 .add_filter(
@@ -1743,6 +1753,8 @@ impl super::Tabular {
     }
 }
 
+use crate::window_egui::db_jobs::{DbJobHandle, DbJobTarget};
+
 /// Pesan untuk UI bila task latar berhenti karena panik.
 const TASK_PANIC_MESSAGE: &str =
     "Background task failed unexpectedly (internal error). Please try again.";
@@ -1766,6 +1778,7 @@ fn spawn_named_task(
     name: &str,
     result_sender: &Sender<models::enums::BackgroundResult>,
     on_panic_result: Option<models::enums::BackgroundResult>,
+    job: Option<DbJobHandle>,
     task: impl FnOnce() + Send + 'static,
 ) {
     let thread_name = format!("tabular-bg-{name}");
@@ -1775,12 +1788,17 @@ fn spawn_named_task(
     let spawned = std::thread::Builder::new()
         .name(thread_name.clone())
         .spawn(move || {
+            // Job selesai saat `job` dibuang di akhir thread ini.
+            let job = job;
             if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
                 error!(
                     "[WORKER] task latar '{}' panik: {}",
                     name_in_thread,
                     panic_payload_message(payload.as_ref())
                 );
+                if let Some(job) = &job {
+                    job.fail(TASK_PANIC_MESSAGE);
+                }
                 if let Some(result) = failure {
                     let _ = sender.send(result);
                 }

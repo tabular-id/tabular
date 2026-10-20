@@ -743,12 +743,14 @@ async fn create_connection_pool_for_config_inner(
                 }
             };
 
+            let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(connection);
             let client_config = crate::driver_mssql::mssql_config(
                 &target_host,
                 target_port.parse::<u16>().unwrap_or(1433),
                 &connection.username,
                 &connection.password,
                 Some(&connection.database),
+                mssql_opts,
             );
 
             match tokio::time::timeout(
@@ -760,10 +762,23 @@ async fn create_connection_pool_for_config_inner(
             )
             .await
             {
-                Ok(Ok(pool)) => Ok(models::enums::DatabasePool::MsSQL(Arc::new(pool))),
+                Ok(Ok(pool)) => {
+                    // Versi server menentukan sintaks paginasi (OFFSET/FETCH baru
+                    // ada di SQL Server 2012).
+                    if let Some(id) = connection.id
+                        && let Some(major) = crate::driver_mssql::detect_server_major(&pool).await
+                    {
+                        log::info!("[MSSQL] connection {id}: server major version {major}");
+                        crate::driver_mssql::remember_server_major(id, major);
+                    }
+                    Ok(models::enums::DatabasePool::MsSQL(Arc::new(pool)))
+                }
                 Ok(Err(e)) => {
                     debug!("MsSQL pool creation failed: {}", e);
-                    Err(format!("MsSQL connection failed: {}", e))
+                    Err(format!(
+                        "MsSQL connection failed: {}",
+                        crate::driver_mssql::explain_connect_error(&e.to_string(), mssql_opts)
+                    ))
                 }
                 Err(_) => {
                     let msg = format!(
@@ -1393,7 +1408,7 @@ pub(crate) async fn load_connection_by_id(
         replication_master_id: None,
     };
     if let Some(cid) = id
-        && connection.connection_type.plugin_id().is_some()
+        && connection.connection_type.has_stored_options()
     {
         connection.plugin_options =
             crate::driver_api::connect::load_plugin_options(cache_pool, cid).await;
@@ -1537,7 +1552,7 @@ pub(crate) async fn create_connection_pool_by_id(
         custom_views: Vec::new(),
         replication_master_id: None,
     };
-    if connection.connection_type.plugin_id().is_some() {
+    if connection.connection_type.has_stored_options() {
         connection.plugin_options =
             crate::driver_api::connect::load_plugin_options(cache_pool, id).await;
     }

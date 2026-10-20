@@ -423,27 +423,58 @@ pub fn select_page_sql(
     limit: u64,
     offset: u64,
 ) -> String {
+    if matches!(db, DatabaseType::MsSQL) {
+        return mssql_select_page_sql(
+            table_sql,
+            select_list,
+            where_clause,
+            order_by,
+            limit,
+            offset,
+        );
+    }
     let mut sql = format!("SELECT {} FROM {}", select_list.join(", "), table_sql);
     sql.push_str(&where_sql(where_clause));
-    match db {
-        DatabaseType::MsSQL => {
-            let order = if order_by.is_empty() {
-                "(SELECT NULL)".to_string()
-            } else {
-                order_by.join(", ")
-            };
-            sql.push_str(&format!(
-                " ORDER BY {order} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
-            ));
-        }
-        _ => {
-            if !order_by.is_empty() {
-                sql.push_str(&format!(" ORDER BY {}", order_by.join(", ")));
-            }
-            sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
-        }
+    if !order_by.is_empty() {
+        sql.push_str(&format!(" ORDER BY {}", order_by.join(", ")));
     }
+    sql.push_str(&format!(" LIMIT {limit} OFFSET {offset}"));
     sql
+}
+
+/// Halaman MsSQL tanpa `OFFSET/FETCH` supaya juga jalan di SQL Server
+/// 2005-2008 R2: halaman pertama `TOP`, berikutnya `ROW_NUMBER()`. Kolom nomor
+/// baris dibuang oleh driver sebelum baris sampai ke pemanggil.
+fn mssql_select_page_sql(
+    table_sql: &str,
+    select_list: &[String],
+    where_clause: Option<&str>,
+    order_by: &[String],
+    limit: u64,
+    offset: u64,
+) -> String {
+    let list = select_list.join(", ");
+    let filter = where_sql(where_clause);
+    if offset == 0 {
+        let order = if order_by.is_empty() {
+            String::new()
+        } else {
+            format!(" ORDER BY {}", order_by.join(", "))
+        };
+        return format!("SELECT TOP ({limit}) {list} FROM {table_sql}{filter}{order}");
+    }
+    let order = if order_by.is_empty() {
+        "(SELECT NULL)".to_string()
+    } else {
+        order_by.join(", ")
+    };
+    let rn = crate::driver_mssql::ROW_NUMBER_COLUMN;
+    format!(
+        "SELECT * FROM (SELECT ROW_NUMBER() OVER (ORDER BY {order}) AS [{rn}], {list} \
+         FROM {table_sql}{filter}) AS [__tabular_p] WHERE [{rn}] BETWEEN {} AND {} ORDER BY [{rn}]",
+        offset + 1,
+        offset + limit
+    )
 }
 
 /// `SELECT` terurut tanpa `OFFSET`. `limit = None` berarti semua baris (tanpa
@@ -906,7 +937,22 @@ mod tests {
         );
         assert_eq!(
             select_page_sql(&DatabaseType::MsSQL, "[t]", &cols, None, &[], 50, 0),
-            "SELECT \"a\", \"b\" FROM [t] ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY"
+            "SELECT TOP (50) \"a\", \"b\" FROM [t]"
+        );
+        // Halaman berikutnya tanpa OFFSET/FETCH supaya jalan di SQL Server < 2012.
+        assert_eq!(
+            select_page_sql(
+                &DatabaseType::MsSQL,
+                "[t]",
+                &cols,
+                Some("a > 1"),
+                &["[a]".to_string()],
+                50,
+                100
+            ),
+            "SELECT * FROM (SELECT ROW_NUMBER() OVER (ORDER BY [a]) AS [__tabular_rn], \"a\", \"b\" \
+             FROM [t] WHERE a > 1) AS [__tabular_p] WHERE [__tabular_rn] BETWEEN 101 AND 150 \
+             ORDER BY [__tabular_rn]"
         );
     }
 
@@ -1070,10 +1116,7 @@ mod tests {
 
         // SQL Server: `text` tidak bisa diurutkan; MySQL mengurutkan semuanya.
         let ms = TablePager::new(&DatabaseType::MsSQL, "[t]", &columns, &columns, None);
-        assert!(
-            ms.next_sql(10)
-                .ends_with("ORDER BY [a] OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY")
-        );
+        assert!(ms.next_sql(10).ends_with("FROM [t] ORDER BY [a]"));
         let my = TablePager::new(&DatabaseType::MySQL, "`t`", &columns, &columns, None);
         assert!(
             my.next_sql(10)

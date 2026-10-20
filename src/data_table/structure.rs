@@ -566,10 +566,12 @@ pub async fn fetch_column_details_standalone_async(
             let port: u16 = connection.port.parse().unwrap_or(1433);
             let user = connection.username.clone();
             let pass = connection.password.clone();
+            let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(connection);
             let db = database_name.to_string();
             let tbl = table_name.to_string();
             if let Ok(mut client) =
-                crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db)).await
+                crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts)
+                    .await
             {
                 let parse = |name: &str| -> (Option<String>, String) {
                     if let Some((s, t)) = name.split_once('.') {
@@ -622,18 +624,20 @@ pub async fn fetch_column_details_standalone_async(
                     if let Ok(records) = stream.collect_all().await {
                         let mut list = Vec::new();
                         for r in records {
-                            let name = r.get_string(0).unwrap_or_default();
+                            let name = crate::driver_mssql::cell_string(&r, 0).unwrap_or_default();
                             if name.is_empty() {
                                 continue;
                             }
-                            let data_type = r
-                                .get_string(1)
+                            let data_type = crate::driver_mssql::cell_string(&r, 1)
                                 .unwrap_or_else(|| "nvarchar(255)".to_string());
-                            let is_null_str = r.get_string(2).unwrap_or_default();
+                            let is_null_str =
+                                crate::driver_mssql::cell_string(&r, 2).unwrap_or_default();
                             let nullable = Some(is_null_str == "YES");
-                            let default_val = r.get_string(3);
-                            let extra = r.get_string(4).filter(|s| !s.is_empty());
-                            let comment = r.get_string(5).filter(|s| !s.trim().is_empty());
+                            let default_val = crate::driver_mssql::cell_string(&r, 3);
+                            let extra =
+                                crate::driver_mssql::cell_string(&r, 4).filter(|s| !s.is_empty());
+                            let comment = crate::driver_mssql::cell_string(&r, 5)
+                                .filter(|s| !s.trim().is_empty());
                             list.push(models::structs::ColumnStructInfo {
                                 name,
                                 data_type,
@@ -1070,10 +1074,12 @@ pub async fn fetch_index_details_standalone_async(
             let port: u16 = connection.port.parse().unwrap_or(1433);
             let user = connection.username.clone();
             let pass = connection.password.clone();
+            let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(connection);
             let db = database_name.to_string();
             let tbl = table_name.to_string();
             if let Ok(mut client) =
-                crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db)).await
+                crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts)
+                    .await
             {
                 let parse = |name: &str| -> (Option<String>, String) {
                     if let Some((s, t)) = name.split_once('.') {
@@ -1094,10 +1100,10 @@ pub async fn fetch_index_details_standalone_async(
                     if let Ok(records) = stream.collect_all().await {
                         let mut list = Vec::new();
                         for r in records {
-                            let name = r.get_string(0);
+                            let name = crate::driver_mssql::cell_string(&r, 0);
                             let is_unique: Option<bool> = r.try_get(1).ok().flatten();
-                            let type_desc = r.get_string(2);
-                            let cols = r.get_string(3);
+                            let type_desc = crate::driver_mssql::cell_string(&r, 2);
+                            let cols = crate::driver_mssql::cell_string(&r, 3);
                             if let Some(nm) = name {
                                 list.push(models::structs::IndexStructInfo {
                                     name: nm,

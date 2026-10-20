@@ -153,7 +153,7 @@ pub async fn fetch_schema_snapshot(req: SchemaFetchRequest) -> Result<SchemaSnap
                 Some((names, HashMap::new()))
             }
             DatabasePool::MsSQL(p) => {
-                let names = crate::driver_mssql::list_mssql_tables(p, "table").await?;
+                let names = crate::driver_mssql::list_mssql_tables(p, db, "table").await?;
                 Some((names, HashMap::new()))
             }
             _ => None,

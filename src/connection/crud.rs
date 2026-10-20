@@ -101,6 +101,11 @@ pub(crate) fn update_connection_in_database(
                 // berikutnya konek dengan pengaturan baru. Tunnel SSH lama
                 // ikut dimatikan di sini.
                 super::pool::cleanup_connection_pool(tabular, id);
+                // Daftar database/tabel lama berasal dari pengaturan sebelumnya
+                // (bisa juga daftar dari percobaan yang gagal): muat ulang.
+                rt.block_on(clear_connection_cache_sqlite(id, pool_clone.as_ref()));
+                tabular.database_cache.remove(&id);
+                tabular.database_cache_time.remove(&id);
             }
 
             result.is_ok()
@@ -405,6 +410,7 @@ pub(crate) fn test_database_connection(
                             &user,
                             &pass,
                             Some(&db),
+                            crate::driver_mssql::MssqlOptions::from_connection(connection),
                         )
                         .await?;
                         client
@@ -717,7 +723,7 @@ pub(crate) async fn refresh_connection_background_async(
                 custom_views: Vec::new(),
                 replication_master_id: None,
             };
-            if connection.connection_type.plugin_id().is_some() {
+            if connection.connection_type.has_stored_options() {
                 connection.plugin_options =
                     crate::driver_api::connect::load_plugin_options(cache_pool_arc.as_ref(), id)
                         .await;
@@ -816,7 +822,6 @@ pub(crate) async fn refresh_connection_background_async(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) async fn clear_connection_cache_sqlite(connection_id: i64, cache_pool: &SqlitePool) {
     debug!(
         "[refresh_connection] clearing SQLite cache rows for connection {} after successful pool creation",

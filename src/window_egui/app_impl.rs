@@ -1090,6 +1090,7 @@ impl Tabular {
                 )
                 .show(root_ui, |ui| {
                     // Panel proses background: dasar sidebar, sama di semua tab.
+                    crate::window_egui::db_jobs::sync_db_jobs(self);
                     crate::window_egui::background_dock::render_background_dock(&mut self.background_tasks, ui);
                     ui.vertical(|ui| {
                         // Top bar for sidebar tabs matching query tab bar height and alignment

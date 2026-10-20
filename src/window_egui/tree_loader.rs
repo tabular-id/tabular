@@ -2665,10 +2665,11 @@ impl super::Tabular {
                 let port: u16 = connection.port.parse().unwrap_or(1433);
                 let user = connection.username.clone();
                 let pass = connection.password.clone();
+                let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(connection);
                 let db = database_name.to_string();
                 let tbl = table_name.to_string();
                 let rt_res = self.get_runtime().block_on(with_metadata_timeout(async move {
-                    let mut client = crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db)).await?;
+                    let mut client = crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts).await?;
                     // Parse schema-qualified name
                     let parse = |name: &str| -> (Option<String>, String) {
                         if name.starts_with('[') && name.contains("].[") && name.ends_with(']') {
@@ -2685,7 +2686,7 @@ impl super::Tabular {
                     q.push_str(" ORDER BY i.name");
                     let stream = client.query(&q, &[]).await.map_err(|e| e.to_string())?;
                     let mut list = Vec::new();
-                    for r in stream.collect_all().await.map_err(|e| e.to_string())? { if let Some(nm) = r.get_string(0) { list.push(nm); } }
+                    for r in stream.collect_all().await.map_err(|e| e.to_string())? { if let Some(nm) = crate::driver_mssql::cell_string(&r, 0) { list.push(nm); } }
                     Ok::<_, String>(list)
                 }));
                 rt_res.and_then(|r| r)
@@ -2811,10 +2812,11 @@ impl super::Tabular {
                 let port: u16 = connection.port.parse().unwrap_or(1433);
                 let user = connection.username.clone();
                 let pass = connection.password.clone();
+                let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(connection);
                 let db = database_name.to_string();
                 let tbl = table_name.to_string();
                 let rt_res = self.get_runtime().block_on(with_metadata_timeout(async move {
-                    let mut client = crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db)).await?;
+                    let mut client = crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts).await?;
                     // Parse schema-qualified name
                     let parse = |name: &str| -> (Option<String>, String) {
                         if name.starts_with('[') && name.contains("].[") && name.ends_with(']') {
@@ -2832,7 +2834,7 @@ impl super::Tabular {
                     q.push_str(" ORDER BY ic.key_ordinal");
                     let stream = client.query(&q, &[]).await.map_err(|e| e.to_string())?;
                     let mut list = Vec::new();
-                    for r in stream.collect_all().await.map_err(|e| e.to_string())? { if let Some(nm) = r.get_string(0) { list.push(nm); } }
+                    for r in stream.collect_all().await.map_err(|e| e.to_string())? { if let Some(nm) = crate::driver_mssql::cell_string(&r, 0) { list.push(nm); } }
                     Ok::<_, String>(list)
                 }));
                 rt_res.and_then(|r| r)

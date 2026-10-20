@@ -236,6 +236,12 @@ Lightweight REST/HTTP testing panel available as a tab alongside SQL results.
 
 Notes:
 - Microsoft SQL Server uses `mssql-client` (TDS over TLS)
+- Older SQL Server versions (2005 – 2008 R2, or unpatched 2012/2014) only speak TLS 1.0/1.1, which
+  Tabular refuses. Set **Encryption → Disabled (legacy server)** in the connection form (the same as
+  jTDS with its default `ssl=off`); login and data then travel unencrypted, so use it on a trusted
+  network or through the SSH tunnel. **TDS Version** can be pinned (7.1 – 7.4) when auto negotiation
+  fails. Grid paging and table export switch from `OFFSET/FETCH` to `TOP`/`ROW_NUMBER()` automatically
+  on servers older than 2012. SQL Server 2000 is not supported (no `sys.*` catalog views).
 - Redis uses pooled async connection managers
 - SQLite runs in‑process (bundled `libsqlite3-sys` file mode)
 

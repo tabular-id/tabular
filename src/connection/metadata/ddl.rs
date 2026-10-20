@@ -231,6 +231,7 @@ pub(crate) fn fetch_view_definition(
                 let port: u16 = connection_clone.port.parse().unwrap_or(1433);
                 let user = connection_clone.username.clone();
                 let pass = connection_clone.password.clone();
+                let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(&connection_clone);
                 let db = if db_name.is_empty() {
                     connection_clone.database.clone()
                 } else {
@@ -239,7 +240,7 @@ pub(crate) fn fetch_view_definition(
 
                 let rt_res: Result<Option<String>, String> = async {
                     let mut client =
-                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db))
+                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts)
                             .await?;
 
                     let parse_qualified = |name: &str| -> (Option<String>, String) {
@@ -283,8 +284,8 @@ pub(crate) fn fetch_view_definition(
                     .map_err(|e| e.to_string())?;
 
                     for row in stream.collect_all().await.map_err(|e| e.to_string())? {
-                        let schema = row.get_string(0);
-                        let definition = row.get_string(1);
+                        let schema = crate::driver_mssql::cell_string(&row, 0);
+                        let definition = crate::driver_mssql::cell_string(&row, 1);
                         if let Some(def) = definition {
                             let schema_name = schema
                                 .or(schema_opt.clone())
@@ -425,6 +426,7 @@ pub(crate) fn fetch_procedure_definition(
                 let port: u16 = connection_clone.port.parse().unwrap_or(1433);
                 let user = connection_clone.username.clone();
                 let pass = connection_clone.password.clone();
+                let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(&connection_clone);
                 let db = if db_name.is_empty() {
                     connection_clone.database.clone()
                 } else {
@@ -433,7 +435,7 @@ pub(crate) fn fetch_procedure_definition(
 
                 let rt_res: Result<Option<String>, String> = async {
                     let mut client =
-                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db))
+                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts)
                             .await?;
 
                     let parse_qualified = |name: &str| -> (Option<String>, String) {
@@ -475,7 +477,7 @@ pub(crate) fn fetch_procedure_definition(
                     .map_err(|e| e.to_string())?;
 
                     for row in stream.collect_all().await.map_err(|e| e.to_string())? {
-                        if let Some(create_stmt) = row.get_string(0) {
+                        if let Some(create_stmt) = crate::driver_mssql::cell_string(&row, 0) {
                             return Ok(Some(create_stmt));
                         }
                     }
@@ -550,6 +552,7 @@ pub(crate) async fn fetch_mssql_foreign_keys(
         &conn.username,
         &conn.password,
         Some(&db),
+        crate::driver_mssql::MssqlOptions::from_connection(conn),
     )
     .await
     {
@@ -577,7 +580,9 @@ pub(crate) async fn fetch_mssql_foreign_keys(
         && let Ok(rows) = stream.collect_all().await
     {
         for row in rows {
-            let get = |i: usize| -> String { row.get_string(i).unwrap_or_default() };
+            let get = |i: usize| -> String {
+                crate::driver_mssql::cell_string(&row, i).unwrap_or_default()
+            };
             keys.push(models::structs::ForeignKey {
                 constraint_name: get(0),
                 table_name: get(1),
@@ -865,6 +870,7 @@ async fn generate_mssql_ddl(
         &conn.username,
         &conn.password,
         Some(db_name),
+        crate::driver_mssql::MssqlOptions::from_connection(conn),
     )
     .await
     {
@@ -890,13 +896,13 @@ async fn generate_mssql_ddl(
         && let Ok(rows) = stream.collect_all().await
     {
         for row in rows {
-            let col: String = row.get_string(0).unwrap_or_default();
-            let typename: String = row.get_string(1).unwrap_or_default();
+            let col: String = crate::driver_mssql::cell_string(&row, 0).unwrap_or_default();
+            let typename: String = crate::driver_mssql::cell_string(&row, 1).unwrap_or_default();
             let max_len: i16 = row.try_get::<i16>(2).ok().flatten().unwrap_or(0);
             let prec: u8 = row.try_get::<u8>(3).ok().flatten().unwrap_or(0);
             let scale: u8 = row.try_get::<u8>(4).ok().flatten().unwrap_or(0);
             let nullable: bool = row.try_get::<bool>(5).ok().flatten().unwrap_or(true);
-            let default: Option<String> = row.get_string(6);
+            let default: Option<String> = crate::driver_mssql::cell_string(&row, 6);
             let identity: bool = row.try_get::<bool>(7).ok().flatten().unwrap_or(false);
 
             let full_type = match typename.to_lowercase().as_str() {
@@ -944,7 +950,7 @@ async fn generate_mssql_ddl(
         && let Ok(rows) = stream.collect_all().await
     {
         for row in rows {
-            if let Some(n) = row.get_string(0) {
+            if let Some(n) = crate::driver_mssql::cell_string(&row, 0) {
                 pk_cols.push(format!("[{}]", n));
             }
         }

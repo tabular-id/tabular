@@ -125,7 +125,9 @@ pub async fn load_plugin_options(
 /// Isi `plugin_options` untuk semua koneksi plugin di daftar.
 pub async fn fill_plugin_options(pool: &sqlx::SqlitePool, connections: &mut [ConnectionConfig]) {
     for conn in connections.iter_mut() {
-        if let (Some(id), Some(_)) = (conn.id, conn.connection_type.plugin_id()) {
+        if let Some(id) = conn.id
+            && conn.connection_type.has_stored_options()
+        {
             conn.plugin_options = load_plugin_options(pool, id).await;
         }
     }
@@ -137,10 +139,16 @@ pub async fn save_plugin_options(
     connection: &ConnectionConfig,
     connection_id: i64,
 ) -> Result<(), sqlx::Error> {
-    let Some(engine_id) = connection.connection_type.plugin_id() else {
+    if !connection.connection_type.has_stored_options() {
         return Ok(());
+    }
+    // Engine builtin (MsSQL) tidak punya opsi rahasia: disimpan apa adanya.
+    let stored = match connection.connection_type.plugin_id() {
+        Some(engine_id) => {
+            protect_secret_options(connection_id, engine_id, &connection.plugin_options)
+        }
+        None => connection.plugin_options.clone(),
     };
-    let stored = protect_secret_options(connection_id, engine_id, &connection.plugin_options);
     sqlx::query("UPDATE connections SET plugin_options = ? WHERE id = ?")
         .bind(options_json(&stored))
         .bind(connection_id)

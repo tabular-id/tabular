@@ -176,6 +176,9 @@ fn parse_connection_url(input: &str) -> Option<ParsedUrl> {
     })
 }
 
+/// Lebar tetap dialog Add/Edit Connection (isi window, tanpa margin frame).
+const CONNECTION_DIALOG_WIDTH: f32 = 460.0;
+
 pub(crate) fn render_connection_dialog(
     tabular: &mut window_egui::Tabular,
     ctx: &egui::Context,
@@ -229,10 +232,16 @@ pub(crate) fn render_connection_dialog(
         .title_bar(false)
         .frame(crate::window_egui::style::modal_window_frame(ctx))
         .resizable(false)
-        .default_width(420.0)
+        // Lebar dikunci: header dan baris tombol memakai layout right-to-left
+        // yang melebar ke seluruh area tersedia, sehingga tanpa batas atas
+        // window ikut melar selebar layar.
+        .default_width(CONNECTION_DIALOG_WIDTH)
+        .min_width(CONNECTION_DIALOG_WIDTH)
+        .max_width(CONNECTION_DIALOG_WIDTH)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .collapsible(false)
         .show(ctx, |ui| {
+            ui.set_width(CONNECTION_DIALOG_WIDTH);
             let mut close_dialog = false;
             crate::window_egui::style::render_modal_header(ui, title, &mut close_dialog);
             if close_dialog {
@@ -672,6 +681,10 @@ pub(crate) fn render_connection_dialog(
                                 );
                                 ui.end_row();
                             }
+                        }
+
+                        if connection_data.connection_type == models::enums::DatabaseType::MsSQL {
+                            mssql_options_ui(ui, &mut connection_data);
                         }
                     });
                 });
@@ -3727,6 +3740,80 @@ pub async fn save_table_group_config(
     .await?;
 
     Ok(())
+}
+
+
+/// Baris form khusus MsSQL: mode enkripsi dan versi TDS (untuk server lama).
+/// Nilai disimpan di `plugin_options`; nilai bawaan tidak ditulis supaya
+/// koneksi lama tetap identik.
+fn mssql_options_ui(ui: &mut egui::Ui, connection_data: &mut models::structs::ConnectionConfig) {
+    use crate::driver_mssql::{
+        MssqlEncryption, MssqlOptions, OPT_ENCRYPTION, OPT_TDS_VERSION, TDS_VERSION_CHOICES,
+    };
+
+    let current = MssqlOptions::from_connection(connection_data);
+    let mut encryption = current.encryption;
+    ui.label("Encryption:");
+    egui::ComboBox::from_id_salt("mssql_encryption_combo")
+        .selected_text(encryption.label())
+        .show_ui(ui, |ui| {
+            for mode in MssqlEncryption::ALL {
+                ui.selectable_value(&mut encryption, mode, mode.label());
+            }
+        });
+    ui.end_row();
+    if encryption != current.encryption {
+        if encryption == MssqlEncryption::Tls {
+            connection_data.plugin_options.remove(OPT_ENCRYPTION);
+        } else {
+            connection_data
+                .plugin_options
+                .insert(OPT_ENCRYPTION.to_string(), encryption.as_key().to_string());
+        }
+    }
+    if encryption == MssqlEncryption::Disabled {
+        ui.label("");
+        ui.label(
+            egui::RichText::new(
+                "No TLS: login and data are sent unencrypted (like jTDS ssl=off). \
+                 Needed for SQL Server 2008 R2 and older, which only support TLS 1.0/1.1. \
+                 Use only on a trusted network or through an SSH tunnel.",
+            )
+            .small()
+            .color(ui.visuals().warn_fg_color),
+        );
+        ui.end_row();
+    }
+
+    let mut tds = connection_data
+        .plugin_options
+        .get(OPT_TDS_VERSION)
+        .cloned()
+        .unwrap_or_default();
+    let tds_before = tds.clone();
+    let selected = TDS_VERSION_CHOICES
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(&tds))
+        .map(|(_, label)| *label)
+        .unwrap_or("Auto");
+    ui.label("TDS Version:");
+    egui::ComboBox::from_id_salt("mssql_tds_version_combo")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (key, label) in TDS_VERSION_CHOICES {
+                ui.selectable_value(&mut tds, key.to_string(), label);
+            }
+        });
+    ui.end_row();
+    if tds != tds_before {
+        if tds.is_empty() {
+            connection_data.plugin_options.remove(OPT_TDS_VERSION);
+        } else {
+            connection_data
+                .plugin_options
+                .insert(OPT_TDS_VERSION.to_string(), tds);
+        }
+    }
 }
 
 #[cfg(test)]

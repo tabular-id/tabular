@@ -191,12 +191,28 @@ impl super::Tabular {
                 // OFFSET/FETCH butuh ORDER BY; tanpa PK yang diketahui pakai
                 // `ORDER BY 1` (kolom pertama).
                 let select_part = driver_mssql::sanitize_mssql_select_for_pagination(&select_part);
+                let effective_limit = if limit == 0 { 100 } else { limit };
+                if connection_id.is_some_and(driver_mssql::is_legacy_server) {
+                    // SQL Server < 2012: tanpa OFFSET/FETCH.
+                    let extra_order = if has_order_by { None } else { order_by };
+                    let final_query = format!(
+                        "{}{}",
+                        prefix,
+                        driver_mssql::legacy_paginate(
+                            &select_part,
+                            extra_order.as_deref(),
+                            offset,
+                            effective_limit,
+                        )
+                    );
+                    debug!("MsSQL legacy paginated query: {}", final_query);
+                    return final_query;
+                }
                 let order = if has_order_by {
                     String::new()
                 } else {
                     order_by.unwrap_or_else(|| " ORDER BY 1".to_string())
                 };
-                let effective_limit = if limit == 0 { 100 } else { limit };
                 let final_query = format!(
                     "{}{}{} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
                     prefix, select_part, order, offset, effective_limit

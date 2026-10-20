@@ -18,6 +18,7 @@ pub mod app_impl;
 pub mod background_dock;
 pub mod background_tasks;
 pub mod connection_mgr;
+pub mod db_jobs;
 pub mod db_context_bar;
 pub mod device_profile;
 pub mod diagram;
@@ -809,8 +810,11 @@ pub struct Tabular {
     )>,
     // Centralized, non-blocking toast/notification surface (see notifications.rs)
     pub toasts: notifications::ToastManager,
-    /// Proses AI yang berjalan di background (panel bawah sidebar).
+    /// Proses yang berjalan di background (panel bawah sidebar).
     pub background_tasks: background_tasks::BackgroundTasks,
+    /// Job database dari worker latar (refresh, daftar database, pool, …);
+    /// dicerminkan ke `background_tasks` oleh `db_jobs::sync_db_jobs`.
+    pub db_jobs: db_jobs::DbJobs,
     /// State tab Git (repository, status, job latar, Merge Review).
     pub git: git_jobs::GitUiState,
     /// Repository setup otomatis (koneksi, API, diagram dari folder git) dan

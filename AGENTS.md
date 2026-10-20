@@ -64,7 +64,12 @@ enforced on the whole tree; format only the files you touch.
 
 - `libsqlite3-sys` is pinned to 0.37 with `bundled`; `sqlite-vec` links against it. Do not
   add a second SQLite.
-- `mssql-client` is pre-1.0 and pinned to 0.20.x.
+- `mssql-client` is pre-1.0 and pinned to 0.20.x. Its TLS is rustls (TLS 1.2+ only), so legacy
+  SQL Server needs `MssqlEncryption::Disabled` (`no_tls`). MsSQL options live in `plugin_options`
+  (`DatabaseType::has_stored_options`); every `connect_mssql`/`mssql_config` call must pass
+  `MssqlOptions::from_connection`. Do not emit `OFFSET/FETCH` for MsSQL without checking
+  `driver_mssql::is_legacy_server` (or use `TOP`/`ROW_NUMBER()`; the `__tabular_rn` column is
+  stripped by the driver).
 - iOS builds the crate as a `staticlib`; gate anything that needs stdio, processes or
   file dialogs with `#[cfg(not(target_os = "ios"))]`.
 - The GUI and `tabular mcp` may run concurrently against the same `connections.db` (WAL).

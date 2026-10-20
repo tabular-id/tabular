@@ -223,12 +223,13 @@ fn render_task_row(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if task.is_running() {
-                if ui
-                    .add_enabled_ui(!task.cancelling, |ui| {
-                        style::ai_icon_button(ui, i::ICON_STOP.codepoint, "Cancel this process")
-                    })
-                    .inner
-                    .clicked()
+                if task.owner.can_cancel()
+                    && ui
+                        .add_enabled_ui(!task.cancelling, |ui| {
+                            style::ai_icon_button(ui, i::ICON_STOP.codepoint, "Cancel this process")
+                        })
+                        .inner
+                        .clicked()
                 {
                     actions.push(DockAction::Cancel(task.id));
                 }
@@ -242,7 +243,9 @@ fn render_task_row(
             } else {
                 "Show the result"
             };
-            if style::ai_icon_button(ui, i::ICON_OPEN_IN_NEW.codepoint, show_tip).clicked() {
+            if task.owner.can_show()
+                && style::ai_icon_button(ui, i::ICON_OPEN_IN_NEW.codepoint, show_tip).clicked()
+            {
                 actions.push(DockAction::Show(task.id));
             }
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {

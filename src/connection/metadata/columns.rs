@@ -311,11 +311,12 @@ pub(crate) fn fetch_columns_from_database(
                 let port: u16 = target_port.parse().unwrap_or(1433);
                 let user = connection_clone.username.clone();
                 let pass = connection_clone.password.clone();
+                let mssql_opts = crate::driver_mssql::MssqlOptions::from_connection(&connection_clone);
                 let db = database_name.clone();
                 let table = table_name.clone();
                 let rt_res = async move {
                     let mut client =
-                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db))
+                        crate::driver_mssql::connect_mssql(&host, port, &user, &pass, Some(&db), mssql_opts)
                             .await?;
 
                     let parse_qualified = |name: &str| -> (Option<String>, String) {
@@ -352,8 +353,8 @@ pub(crate) fn fetch_columns_from_database(
                         .map_err(|e| e.to_string())?;
                     let mut cols = Vec::new();
                     for row in stream.collect_all().await.map_err(|e| e.to_string())? {
-                        let name = row.get_string(0);
-                        let dt = row.get_string(1);
+                        let name = crate::driver_mssql::cell_string(&row, 0);
+                        let dt = crate::driver_mssql::cell_string(&row, 1);
                         if let (Some(n), Some(d)) = (name, dt) {
                             cols.push((n, d));
                         }

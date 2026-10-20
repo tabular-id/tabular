@@ -313,6 +313,12 @@ impl DatabaseType {
         }
     }
 
+    /// Engine yang menyimpan opsi tambahan di kolom `plugin_options`: semua
+    /// engine plugin, plus MsSQL (mode enkripsi / versi TDS untuk server lama).
+    pub fn has_stored_options(&self) -> bool {
+        self.plugin_id().is_some() || matches!(self, DatabaseType::MsSQL)
+    }
+
     /// Nama engine untuk UI. Engine plugin memakai nama dari registry, atau
     /// id-nya bila driver belum terpasang.
     pub fn display_name(&self) -> String {

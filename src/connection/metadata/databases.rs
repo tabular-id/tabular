@@ -132,55 +132,13 @@ pub(crate) fn fetch_databases_from_connection_blocking(
                 Some(databases)
             }
             models::enums::DatabasePool::MsSQL(pool) => {
-                let rt_res = async move {
-                    let mut dbs = Vec::new();
-                    for row in crate::driver_mssql::pooled_query(
-                        &pool,
-                        "SELECT name FROM sys.databases ORDER BY name",
-                    )
-                    .await?
-                    {
-                        if let Some(n) = row.get_string(0) {
-                            dbs.push(n);
-                        }
-                    }
-                    Ok::<_, String>(dbs)
-                }
-                .await;
-
-                match rt_res {
-                    Ok(mut list) => {
-                        if list.is_empty() {
-                            debug!("MsSQL database list is empty; returning current database only");
-                            Some(vec!["master".to_string()])
-                        } else {
-                            let system = ["master", "model", "msdb", "tempdb"];
-                            list.sort();
-                            let mut user_dbs: Vec<String> = list
-                                .iter()
-                                .filter(|d| !system.contains(&d.as_str()))
-                                .cloned()
-                                .collect();
-                            let mut sys_dbs: Vec<String> = list
-                                .into_iter()
-                                .filter(|d| system.contains(&d.as_str()))
-                                .collect();
-                            // Database sistem hanya tampil bila diminta (atau bila tidak ada
-                            // database user sama sekali, agar koneksi tetap bisa dipakai).
-                            if crate::schema_objects::show_system_objects() || user_dbs.is_empty() {
-                                user_dbs.append(&mut sys_dbs);
-                            }
-                            Some(user_dbs)
-                        }
-                    }
+                match crate::driver_mssql::list_mssql_databases(&pool).await {
+                    Ok(list) => Some(list),
                     Err(e) => {
-                        debug!("Failed to fetch MsSQL databases: {}", e);
-                        Some(vec![
-                            "master".to_string(),
-                            "tempdb".to_string(),
-                            "model".to_string(),
-                            "msdb".to_string(),
-                        ])
+                        // Jangan isi daftar palsu: daftar itu akan tersimpan di cache dan
+                        // menutupi database asli.
+                        warn!("[MSSQL] failed to list databases: {}", e);
+                        None
                     }
                 }
             }
@@ -411,53 +369,13 @@ pub(crate) async fn fetch_databases_from_connection_async(
             Some(databases)
         }
         models::enums::DatabasePool::MsSQL(pool) => {
-            let rt_res = async move {
-                let mut dbs = Vec::new();
-                for row in crate::driver_mssql::pooled_query(
-                    &pool,
-                    "SELECT name FROM sys.databases ORDER BY name",
-                )
-                .await?
-                {
-                    if let Some(n) = row.get_string(0) {
-                        dbs.push(n);
-                    }
-                }
-                Ok::<_, String>(dbs)
-            }
-            .await;
-            match rt_res {
-                Ok(mut list) => {
-                    if list.is_empty() {
-                        Some(vec!["master".to_string()])
-                    } else {
-                        let system = ["master", "model", "msdb", "tempdb"];
-                        list.sort();
-                        let mut user_dbs: Vec<String> = list
-                            .iter()
-                            .filter(|d| !system.contains(&d.as_str()))
-                            .cloned()
-                            .collect();
-                        let mut sys_dbs: Vec<String> = list
-                            .into_iter()
-                            .filter(|d| system.contains(&d.as_str()))
-                            .collect();
-                        // Database sistem hanya tampil bila diminta (atau bila tidak ada
-                        // database user sama sekali, agar koneksi tetap bisa dipakai).
-                        if crate::schema_objects::show_system_objects() || user_dbs.is_empty() {
-                            user_dbs.append(&mut sys_dbs);
-                        }
-                        Some(user_dbs)
-                    }
-                }
+            match crate::driver_mssql::list_mssql_databases(&pool).await {
+                Ok(list) => Some(list),
                 Err(e) => {
-                    debug!("Failed to fetch MsSQL databases: {}", e);
-                    Some(vec![
-                        "master".to_string(),
-                        "tempdb".to_string(),
-                        "model".to_string(),
-                        "msdb".to_string(),
-                    ])
+                    // Jangan isi daftar palsu: daftar itu akan tersimpan di cache dan
+                    // menutupi database asli.
+                    warn!("[MSSQL] failed to list databases: {}", e);
+                    None
                 }
             }
         }
@@ -603,7 +521,7 @@ pub async fn fetch_databases_background_task(
     };
 
     let mut connection = connection;
-    if connection.connection_type.plugin_id().is_some() {
+    if connection.connection_type.has_stored_options() {
         connection.plugin_options =
             crate::driver_api::connect::load_plugin_options(cache_pool, connection_id).await;
     }
@@ -798,53 +716,13 @@ pub async fn fetch_databases_background_task(
             Some(databases)
         }
         models::enums::DatabasePool::MsSQL(pool) => {
-            let rt_res = async move {
-                let mut dbs = Vec::new();
-                for row in crate::driver_mssql::pooled_query(
-                    &pool,
-                    "SELECT name FROM sys.databases ORDER BY name",
-                )
-                .await?
-                {
-                    if let Some(n) = row.get_string(0) {
-                        dbs.push(n);
-                    }
-                }
-                Ok::<_, String>(dbs)
-            }
-            .await;
-            match rt_res {
-                Ok(mut list) => {
-                    if list.is_empty() {
-                        Some(vec!["master".to_string()])
-                    } else {
-                        let system = ["master", "model", "msdb", "tempdb"];
-                        list.sort();
-                        let mut user_dbs: Vec<String> = list
-                            .iter()
-                            .filter(|d| !system.contains(&d.as_str()))
-                            .cloned()
-                            .collect();
-                        let mut sys_dbs: Vec<String> = list
-                            .into_iter()
-                            .filter(|d| system.contains(&d.as_str()))
-                            .collect();
-                        // Database sistem hanya tampil bila diminta (atau bila tidak ada
-                        // database user sama sekali, agar koneksi tetap bisa dipakai).
-                        if crate::schema_objects::show_system_objects() || user_dbs.is_empty() {
-                            user_dbs.append(&mut sys_dbs);
-                        }
-                        Some(user_dbs)
-                    }
-                }
+            match crate::driver_mssql::list_mssql_databases(&pool).await {
+                Ok(list) => Some(list),
                 Err(e) => {
-                    debug!("Failed to fetch MsSQL databases: {}", e);
-                    Some(vec![
-                        "master".to_string(),
-                        "tempdb".to_string(),
-                        "model".to_string(),
-                        "msdb".to_string(),
-                    ])
+                    // Jangan isi daftar palsu: daftar itu akan tersimpan di cache dan
+                    // menutupi database asli.
+                    warn!("[MSSQL] failed to list databases: {}", e);
+                    None
                 }
             }
         }

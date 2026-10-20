@@ -1,4 +1,4 @@
-//! Daftar proses AI yang berjalan di background, ditampilkan di panel bawah
+//! Daftar proses yang berjalan di background, ditampilkan di panel bawah
 //! sidebar (`background_dock`).
 //!
 //! Registry ini hanya *cermin*: tiap jendela progress tetap memegang state
@@ -25,6 +25,27 @@ pub enum TaskOwner {
     RepoSetup,
     Compare,
     IntegrationTest,
+    /// Job database dari worker latar (`db_jobs`): tanpa jendela progress
+    /// dan tidak bisa dibatalkan dari panel.
+    Database,
+}
+
+impl TaskOwner {
+    /// Task punya jendela/tab yang bisa ditampilkan dari panel.
+    pub fn can_show(self) -> bool {
+        self != TaskOwner::Database
+    }
+
+    /// Task bisa dibatalkan dari panel.
+    pub fn can_cancel(self) -> bool {
+        self != TaskOwner::Database
+    }
+
+    /// Task baru membuka panel yang sedang dilipat. Job database sering dan
+    /// singkat, jadi tidak ikut membuka panel.
+    fn expands_dock(self) -> bool {
+        self != TaskOwner::Database
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +230,7 @@ impl BackgroundTasks {
         out.show = std::mem::take(&mut task.show_requested);
         out.cancel = std::mem::take(&mut task.cancel_requested);
         let hidden = snap.hidden && !out.show;
-        if hidden && !task.detached {
+        if hidden && !task.detached && task.owner.expands_dock() {
             self.expand_requested = true;
         }
         task.detached = hidden;
@@ -447,6 +468,23 @@ mod tests {
         }
         assert_eq!(tasks.running_count(), 1);
         assert_eq!(tasks.tasks().len(), MAX_FINISHED + 1);
+    }
+
+    #[test]
+    fn database_jobs_do_not_open_the_dock() {
+        let mut tasks = BackgroundTasks::default();
+        let mut slot = None;
+        tasks.mirror(
+            &mut slot,
+            Snapshot {
+                owner: TaskOwner::Database,
+                ..snap(&[], true, None)
+            },
+        );
+        assert_eq!(tasks.running_count(), 1);
+        assert!(!tasks.take_expand_request());
+        assert!(!TaskOwner::Database.can_show());
+        assert!(!TaskOwner::Database.can_cancel());
     }
 
     #[test]
