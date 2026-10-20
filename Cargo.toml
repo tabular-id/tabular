@@ -1,6 +1,6 @@
 [package]
 name = "tabular"
-version = "1.5.1"
+version = "1.6.0"
 edition = "2024"
 
 [lib]
@@ -128,7 +128,7 @@ flate2 = "1.1"
 tar = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
-tree-sitter = { version = "0.27.0", optional = true }
+tree-sitter = { version = "0.27.1", optional = true }
 tree-sitter-sequel = { version = "0.3.11", optional = true }
 tree-sitter-json = "0.24.8"
 tree-sitter-javascript = "0.25.0"
@@ -201,7 +201,7 @@ rfd = "0.17"
 # sering mengubah API antar rilis. `elicitation`: konfirmasi statement tulis
 # lewat klien bila GUI tidak berjalan (K1). `client` + `transport-child-process`:
 # chat AI memanggil server MCP eksternal (K5).
-rmcp = { version = "3.5", features = [
+rmcp = { version = "3.6", features = [
        "transport-io",
        "elicitation",
        "client",
@@ -215,7 +215,7 @@ keyring = "4"
 # OAuth sign-in URL has to go through -[UIApplication openURL:options:...].
 # Pinned to the versions winit already pulls in (see patches/winit/Cargo.toml) so
 # the iOS build does not end up compiling two objc2 trees.
-objc2 = "0.5.2"
+objc2 = "0.5.3"
 # Fitur tambahan (NSRunLoop/NSDate/NSThread/dispatch, UIDocumentPicker, UIAlert,
 # UTType) dipakai src/platform_ios_dialogs.rs: pengganti `rfd` di iPadOS.
 objc2-foundation = { version = "0.2.2", features = [
