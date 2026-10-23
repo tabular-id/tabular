@@ -187,7 +187,7 @@ pkg-macos-store: bundle-macos
 	@if [ -z "$$APPLE_IDENTITY" ]; then echo "❌ APPLE_IDENTITY required (Installer identity)"; exit 1; fi
 	@if [ -z "$$APPLE_BUNDLE_ID" ]; then echo "❌ APPLE_BUNDLE_ID required"; exit 1; fi
 	APP_PATH=$(MACOS_DIR)/$(APP_NAME).app; \
-	APP_IDENTITY="3rd Party Mac Developer Application: PT. VNEU TEKNOLOGI INDONESIA (YD4J5Z6A4G)"; \
+	APP_IDENTITY="$${APPLE_MAS_IDENTITY:-3rd Party Mac Developer Application: PT. VNEU TEKNOLOGI INDONESIA (YD4J5Z6A4G)}"; \
 	if [ -n "$$PROVISIONING_PROFILE" ] && [ -f "$$PROVISIONING_PROFILE" ]; then \
 		echo "🔗 Embed provisioning profile"; cp "$$PROVISIONING_PROFILE" $$APP_PATH/Contents/embedded.provisionprofile; \
 	else echo "ℹ️  No provisioning profile (set PROVISIONING_PROFILE)"; fi; \

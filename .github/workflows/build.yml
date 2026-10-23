@@ -234,7 +234,10 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
       run: |
+        # Release bisa sudah/sedang dibuat oleh build_apple.sh (upload macOS lokal);
+        # jika create gagal karena balapan, cukup pastikan release-nya ada.
         if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --verify-tag \
+            || gh release view "$RELEASE_TAG" >/dev/null
         fi
         find dist -type f -print0 | xargs -0 gh release upload "$RELEASE_TAG" --clobber
