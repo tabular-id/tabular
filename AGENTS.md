@@ -33,8 +33,8 @@ enforced on the whole tree; format only the files you touch.
 | Drivers | `src/driver_*.rs` | Per-database metadata fetching |
 | Local cache | `connections.db` (SQLite) via `src/sidebar_database.rs`, `src/cache_data.rs` | Tables: `connections`, `table_cache`, `column_cache`, `foreign_key_cache`, `query_history` |
 | Secrets | `src/secrets.rs` | OS keychain, encrypted-file fallback |
-| AI assistant (in-app) | `src/ai_assistant.rs`, `src/vector_index.rs` | Local feature-hash embeddings via sqlite-vec |
-| Agent / MCP layer | `src/agent/` | Headless; must never depend on `window_egui` |
+| AI assistant (in-app) | `src/ai_assistant.rs`, `src/vector_index.rs`, `src/window_egui/ai_context_jobs.rs` | Local feature-hash embeddings via sqlite-vec. Each chat turn adds a context bundle (FKs/indexes, API endpoints, business processes, notes, code + git, past queries) built in a background thread by `agent::context`; see `docs/MCP.md` "Context sent with each question", ADR 0008 |
+| Agent / MCP layer | `src/agent/` | Headless; must never depend on `window_egui`. `context.rs` = `table_context` tool and the chat context bundle |
 | Sync / collab | `src/sync/` | E2E encrypted vault; `collab` feature is optional |
 | Plugins | `src/plugin_runtime/` | Wasm plugins via `wasmi` |
 | Import / export / transfer | `src/data_transfer/` (headless), `src/window_egui/transfer_*.rs` (UI) | File formats, encrypted exports, Data Files workspace (SQLite, `data_files.sqlite`), table transfer, data compare; see `docs/DATA_TRANSFER.md` |

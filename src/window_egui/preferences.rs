@@ -1646,6 +1646,7 @@ impl Tabular {
         self.render_ai_default_target(ui);
         self.render_ai_inline_suggestions_pref(ui);
         self.render_ai_memory_settings(ui);
+        self.render_ai_context_settings(ui);
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -97,6 +97,9 @@ impl super::Tabular {
         self.ai_obsidian_vault_path = prefs.ai_obsidian_vault_path.clone();
         self.ai_obsidian_enabled = prefs.ai_obsidian_enabled;
         self.ai_obsidian_allow_write = prefs.ai_obsidian_allow_write;
+        self.ai_context_api = prefs.ai_context_api;
+        self.ai_context_git = prefs.ai_context_git;
+        self.ai_context_history = prefs.ai_context_history;
         if let Some(url) = prefs.sync_server_url.clone()
             && !url.trim().is_empty()
         {
@@ -670,6 +673,10 @@ impl super::Tabular {
             ai_obsidian_vault_path: String::new(),
             ai_obsidian_enabled: false,
             ai_obsidian_allow_write: false,
+            ai_context_job: None,
+            ai_context_api: true,
+            ai_context_git: true,
+            ai_context_history: true,
             ai_obsidian_index: None,
             ai_obsidian_index_receiver: None,
             ai_obsidian_save_message: None,

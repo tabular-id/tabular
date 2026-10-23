@@ -4461,6 +4461,9 @@ impl Tabular {
                     ai_obsidian_vault_path: self.ai_obsidian_vault_path.clone(),
                     ai_obsidian_enabled: self.ai_obsidian_enabled,
                     ai_obsidian_allow_write: self.ai_obsidian_allow_write,
+                    ai_context_api: self.ai_context_api,
+                    ai_context_git: self.ai_context_git,
+                    ai_context_history: self.ai_context_history,
                     ai_inline_suggestions: self.ai_inline_suggestions,
                     redis_browser_auto_refresh_seconds: self
                         .redis_browser_auto_refresh_default_seconds

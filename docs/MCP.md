@@ -72,6 +72,7 @@ installed `tabular` executable. The server speaks MCP over stdio; it opens no ne
 | `analyze_query` | Explain one statement without running it: tables, joins, filter, output columns and their sources, optimization hints, and join or filter columns that no cached index starts with. |
 | `search_query_history` | Queries you already ran that are similar to a question, found with the local vector index. Passwords are masked. Queries run by agents are left out unless asked for. |
 | `find_table_usages` | Search the code repository linked to a diagram group for the files and lines that use a table. |
+| `table_context` | One call for everything around a few tables: foreign keys and indexes, the API endpoints and business processes that touch them (with the integration tests covering them), diagram notes, where the linked code uses them with the latest commits and uncommitted changes, and similar past queries. Pass `tables`, or only `question` and Tabular picks the tables. The same bundle is added to every AI Assistant request (see [Context sent with each question](#context-sent-with-each-question)). |
 | `check_sql_safety` | Classify each statement (read / write / ddl / admin), flag `UPDATE`/`DELETE` without `WHERE`, and lint, without executing. |
 | `format_sql` | Format SQL with Tabular's formatter. |
 | `search_notes` | Search your Obsidian vault for notes about tables, business rules and conventions. |
@@ -108,9 +109,11 @@ The agent reads what Tabular already stores. Nothing is copied into Markdown fil
 |---|---|---|
 | Schema, indexes, partitions | `connections.db` cache | `describe_schema`, `schema_diagram`, `analyze_query` |
 | Groups, virtual relations, sticky notes | The diagram file in `<data dir>/diagrams/`, or the shared `diagram_by_tabular` table when there is no local file | `describe_diagram`, and as a summary in `describe_schema` |
-| Repository per group | Git URL in the diagram, local folder in `diagram_repo_paths.json` | `describe_diagram`, `find_table_usages` |
-| Business processes (API cards and their steps) | The diagram, generated with **Generate Business Process (AI)** | `describe_diagram` |
-| Query history | `connections.db` | `search_query_history` |
+| Repository per group | Git URL in the diagram, local folder in `diagram_repo_paths.json` | `describe_diagram`, `find_table_usages`, `table_context` |
+| Business processes (API cards and their steps) | The diagram, generated with **Generate Business Process (AI)** | `describe_diagram`, `table_context` |
+| Endpoints that read or write a table | HTTP collections (`tables` of each saved request) and the diagram's endpoint links | `table_context` |
+| Integration tests per endpoint | `<data dir>/http_tests/` | `table_context` |
+| Query history | `connections.db` | `search_query_history`, `table_context` |
 | Your own notes | Obsidian vault | `search_notes`, `read_note`, `save_note` |
 | Projects and project memory | `<data dir>/projects/<id>/project.json` and `<data dir>/projects/<id>/memory/*.md` | `list_projects`, `project_context`, `save_project_memory` |
 
@@ -312,6 +315,41 @@ CI machine with its own connections.
 - `get_table_ddl` for PostgreSQL and SQL Server is reconstructed from the cache and omits
   defaults, check constraints and storage options.
 - On iOS the server is not compiled (no stdio, not permitted by the App Store).
+
+## Context sent with each question
+
+The AI Assistant used to see only the cached schema of the active database. Now every
+request also carries what Tabular knows about the tables the question is about, whether the
+backend is an HTTP API provider or a CLI agent. The same bundle is available to outside
+agents as the `table_context` tool.
+
+1. **Focus tables.** Tables named in the question or in the SQL of the active tab come
+   first; then the local vector index adds the tables most similar to the question, up to
+   eight in total. Only tables cached for the active connection count.
+2. **Sections.** Each one is skipped when there is nothing to show and capped in size:
+
+   | Section | Source | Cap |
+   |---|---|---|
+   | Relationships and indexes | `foreign_key_cache` (both directions), `index_cache` | 3 KB |
+   | API endpoints touching these tables | Diagram endpoint links, saved HTTP requests with `tables`, integration test suites of the active project | 25 endpoints, 6 KB |
+   | Business processes | Diagram flow cards whose steps touch the tables | 8 processes, 6 KB |
+   | Diagram notes | Notes on the tables, on their groups, or linking to them with `[[table]]` | 8 notes, 3 KB |
+   | Code using these tables | Repositories linked to the diagram groups, to the API folders whose requests touch the tables, or set up by Repository Setup for this connection or project; at most 3, greps as `find_table_usages` does | 5 KB |
+   | Recent commits and uncommitted changes | `git log -- <files>` and `git status` for the files found above | 10 commits, 3 KB |
+   | Similar queries the user ran before | Local vector index over `query_history`, agent runs excluded, passwords masked | 3 queries |
+
+3. **Privacy.** Everything is read from this computer; nothing is cloned or fetched. Code
+   snippets go to API providers with credentials masked and are left out for CLI agents,
+   which get `path:line` and can read the file themselves. Commit bodies and diffs are never
+   sent, only the subject line.
+4. **Control.** Settings → AI Assistant → *Context sent with each question* turns the API,
+   code/git and history parts on or off; the **API**, **Git** and **History** chips above the
+   chat input do the same without leaving the chat. Under each answer, a *Context:* line
+   says what was added (for example `2 tables · 5 endpoints · 1 repo · 10 commits`).
+5. **Timing.** The bundle is assembled in a background thread while the transcript shows
+   *Gathering context…*; the request is sent as soon as it is ready. Stop cancels the turn
+   before anything reaches the backend. A repository scan gives up after 60 seconds and the
+   request is sent without that part.
 
 ## Using a CLI agent inside Tabular
 

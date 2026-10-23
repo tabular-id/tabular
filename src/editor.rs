@@ -5507,6 +5507,7 @@ fn ai_finish_turn(tabular: &mut window_egui::Tabular) {
     }
     tabular.ai_live_edit_active = None;
     tabular.ai_cancel = None;
+    tabular.ai_context_job = None;
     tabular.ai_stream_receiver = None;
     tabular.ai_is_loading = false;
     if let Some(msg) = tabular.ai_chat.last_mut() {
@@ -5560,7 +5561,8 @@ fn ai_send_message(tabular: &mut window_egui::Tabular) {
     use crate::models::structs::{AiChatMessage, AiChatRole};
 
     let text = tabular.ai_input.trim().to_string();
-    if text.is_empty() || tabular.ai_stream_receiver.is_some() {
+    if text.is_empty() || tabular.ai_stream_receiver.is_some() || tabular.ai_context_job.is_some()
+    {
         return;
     }
     let target = tabular.effective_chat_target();
@@ -5572,8 +5574,8 @@ fn ai_send_message(tabular: &mut window_egui::Tabular) {
     let cfg = crate::ai_assistant::chat_backend_for(tabular, target);
     let native_session = crate::ai_assistant::session_for(tabular.ai_session.as_ref(), target);
     let has_native_session = native_session.is_some();
-    let (system, user) =
-        crate::ai_assistant::build_chat_prompts(tabular, &cfg, &text, has_native_session);
+    let parts =
+        crate::ai_assistant::build_chat_prompt_parts(tabular, &cfg, &text, has_native_session);
     let agent_label = crate::ai_assistant::backend_label_for(tabular, target);
 
     let initial_step = match cfg.backend {
@@ -5610,23 +5612,9 @@ fn ai_send_message(tabular: &mut window_egui::Tabular) {
     tabular.ai_turn_target = Some(target);
 
     let session_id = native_session.map(|s| s.to_string());
-    match crate::window_egui::ai_mcp_ui::start_chat_turn(tabular, &cfg, system, user, session_id) {
-        Ok((rx, cancel)) => {
-            tabular.ai_stream_receiver = Some(rx);
-            tabular.ai_cancel = cancel;
-            tabular.ai_is_loading = true;
-            tabular.ai_live_edit_parser = Some(crate::agent::live_edit::LiveEditParser::default());
-            tabular.ai_live_edit_active = None;
-        }
-        Err(e) => {
-            tabular.ai_turn_target = None;
-            log::warn!("[AGENT] failed to start chat turn: {e}");
-            if let Some(msg) = tabular.ai_chat.last_mut() {
-                msg.streaming = false;
-                msg.error = Some(e);
-            }
-        }
-    }
+    // Konteks tambahan (relasi, API, kode, git, history) dirakit di thread
+    // latar; giliran dikirim begitu konteks siap.
+    crate::window_egui::ai_context_jobs::start(tabular, cfg, parts, session_id);
 }
 
 /// "Review with AI" (K8): kirim SQL terpilih (atau statement di kursor, atau
@@ -5659,6 +5647,16 @@ pub(crate) fn ai_review_sql(tabular: &mut window_egui::Tabular, selected: String
 }
 
 fn ai_stop_turn(tabular: &mut window_egui::Tabular) {
+    if crate::window_egui::ai_context_jobs::cancel(tabular) {
+        // Konteks masih dirakit; giliran belum sampai ke backend.
+        if let Some(msg) = tabular.ai_chat.last_mut()
+            && msg.streaming
+        {
+            msg.error = Some("Stopped by user.".to_string());
+        }
+        ai_finish_turn(tabular);
+        return;
+    }
     if let Some(cancel) = &tabular.ai_cancel {
         // Thread pembaca akan mengirim Error("Stopped by user.") lalu selesai.
         cancel.cancel();
@@ -7025,6 +7023,19 @@ fn ai_render_assistant_message(
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(usage).size(10.0).color(muted));
             }
+            if let Some(summary) = &msg.context_summary {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("Context: {summary}"))
+                        .size(10.0)
+                        .color(muted),
+                )
+                .on_hover_text(
+                    "What Tabular added to this request besides the schema: relationships, API \
+                     endpoints, business processes, notes, code and git history, past queries. \
+                     Toggle the API / Git / History chips above the input to change it.",
+                );
+            }
         });
     }
 }
@@ -7168,6 +7179,49 @@ fn ai_render_context_row(tabular: &mut window_egui::Tabular, ui: &mut egui::Ui) 
         )
         .response
         .on_hover_text("Attach another SQL tab as context");
+
+        // Chip konteks tambahan: cepat mematikan satu bagian untuk pertanyaan
+        // berikutnya tanpa membuka Settings (nilainya tetap dipersist).
+        let accent = style::theme_accent(ui.ctx());
+        let mut changed = false;
+        for (flag, label, icon, hint) in [
+            (
+                &mut tabular.ai_context_api,
+                "API",
+                icons::ICON_API.codepoint,
+                "Endpoints, business processes and integration tests that touch the tables you ask about",
+            ),
+            (
+                &mut tabular.ai_context_git,
+                "Git",
+                icons::ICON_CODE.codepoint,
+                "Where the linked code uses the tables, with recent commits and uncommitted changes",
+            ),
+            (
+                &mut tabular.ai_context_history,
+                "History",
+                icons::ICON_HISTORY.codepoint,
+                "Similar queries you ran before on this connection",
+            ),
+        ] {
+            let color = if *flag { accent } else { muted };
+            let chip = style::ai_chip(
+                ui,
+                egui::RichText::new(format!("{icon} {label}")).color(color),
+                egui::Sense::click(),
+            )
+            .on_hover_text(format!(
+                "{hint}\nClick to turn {} for the next questions",
+                if *flag { "off" } else { "on" }
+            ));
+            if chip.clicked() {
+                *flag = !*flag;
+                changed = true;
+            }
+        }
+        if changed {
+            tabular.save_ai_prefs();
+        }
     });
 
     if let Some(id) = remove {
@@ -7305,6 +7359,7 @@ pub(crate) fn render_ai_panel(tabular: &mut window_egui::Tabular, ui: &mut egui:
     ui.take_available_width();
 
     let target = tabular.effective_chat_target();
+    crate::window_egui::ai_context_jobs::poll(tabular, ui.ctx());
     ai_poll_stream(tabular, ui.ctx());
     if let ChatTarget::Cli(kind) = target {
         tabular.ensure_ai_mcp_check(kind);
@@ -7312,7 +7367,7 @@ pub(crate) fn render_ai_panel(tabular: &mut window_egui::Tabular, ui: &mut egui:
     tabular.poll_ai_cli_background(ui.ctx());
 
     let ready = crate::ai_assistant::backend_ready_for(tabular, target);
-    let busy = tabular.ai_stream_receiver.is_some();
+    let busy = tabular.ai_stream_receiver.is_some() || tabular.ai_context_job.is_some();
     let mut actions: Vec<AiPanelAction> = Vec::new();
 
     egui::Frame::new()

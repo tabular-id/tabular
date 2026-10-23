@@ -20,6 +20,15 @@ export APPLE_BUNDLE_ID ?= id.tabular.database
 MACOS_X86_TARGET = x86_64-apple-darwin
 MACOS_ARM_TARGET = aarch64-apple-darwin
 MACOS_UNIVERSAL_TARGET = universal-apple-darwin
+# Target untuk `cargo bundle` (hanya struktur .app). Binary di dalam .app
+# diganti dengan hasil lipo universal (aarch64 + x86_64) dari build-macos.
+# Default mengikuti arsitektur host supaya di Intel Mac tidak cross-compile ulang.
+HOST_ARCH := $(shell uname -m)
+ifeq ($(HOST_ARCH),x86_64)
+MACOS_BUNDLE_TARGET ?= $(MACOS_X86_TARGET)
+else
+MACOS_BUNDLE_TARGET ?= $(MACOS_ARM_TARGET)
+endif
 LINUX_X86_TARGET = x86_64-unknown-linux-gnu
 LINUX_ARM_TARGET = aarch64-unknown-linux-gnu
 WINDOWS_X86_TARGET = x86_64-pc-windows-gnu
@@ -122,9 +131,9 @@ build-windows: create-dirs
 
 bundle-macos: build-macos
 	@echo "📱 Create macOS .app bundle"
-	cargo bundle --release --target $(MACOS_ARM_TARGET)
-	chmod 755 $(BUILD_DIR)/$(MACOS_ARM_TARGET)/release/bundle/osx/$(APP_NAME).app/Contents/MacOS/Tabular
-	cp -R $(BUILD_DIR)/$(MACOS_ARM_TARGET)/release/bundle/osx/$(APP_NAME).app $(MACOS_DIR)/
+	cargo bundle --release --target $(MACOS_BUNDLE_TARGET)
+	chmod 755 $(BUILD_DIR)/$(MACOS_BUNDLE_TARGET)/release/bundle/osx/$(APP_NAME).app/Contents/MacOS/Tabular
+	cp -R $(BUILD_DIR)/$(MACOS_BUNDLE_TARGET)/release/bundle/osx/$(APP_NAME).app $(MACOS_DIR)/
 	cp $(BUILD_DIR)/$(MACOS_UNIVERSAL_TARGET)/release/tabular $(MACOS_DIR)/$(APP_NAME).app/Contents/MacOS/tabular
 	xattr -cr $(MACOS_DIR)/$(APP_NAME).app
 	find $(MACOS_DIR)/$(APP_NAME).app -name ".DS_Store" -delete

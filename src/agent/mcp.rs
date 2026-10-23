@@ -361,6 +361,43 @@ pub struct FindTableUsagesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TableContextArgs {
+    /// Connection id from list_connections.
+    pub connection_id: i64,
+    /// Database / schema name. Defaults to the connection's default database.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Tables to describe. Leave empty and pass `question` to let Tabular pick
+    /// the tables the question is about (mentioned names first, then the most
+    /// similar ones from the local vector index).
+    #[serde(default)]
+    pub tables: Vec<String>,
+    /// The user's question; used to pick tables and to rank past queries.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// Include API endpoints, business processes and integration tests (default true).
+    #[serde(default = "default_true")]
+    pub include_api: bool,
+    /// Include code usages and git history of the linked repositories (default true).
+    #[serde(default = "default_true")]
+    pub include_code: bool,
+    /// Include similar queries from the user's history (default true).
+    #[serde(default = "default_true")]
+    pub include_history: bool,
+    /// Include code snippets, not only `path:line` (default false: read the
+    /// files yourself when you need more).
+    #[serde(default)]
+    pub code_snippets: bool,
+    /// Project id whose integration test suites are checked (see list_projects).
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RunQueryArgs {
     /// Connection id from list_connections.
     pub connection_id: i64,
@@ -1586,6 +1623,39 @@ impl TabularMcp {
     }
 
     #[tool(
+        title = "Table context",
+        description = "Everything Tabular knows around one or more tables, in one call: foreign keys and indexes, the API endpoints and business processes that read or write them (with the integration tests that cover them), the user's diagram notes, where the linked code repositories use them with the latest commits and uncommitted changes on those files, and similar queries from the user's history. Pass `tables`, or only `question` to let Tabular pick the tables. Returns Markdown ready to reason over plus counts and hints. Read-only; reads only data already on this computer.",
+        annotations(title = "Table context", read_only_hint = true, open_world_hint = false),
+        output_schema = out::<super::context::ContextBundle>()
+    )]
+    async fn table_context(
+        &self,
+        Parameters(p): Parameters<TableContextArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = super::context::ContextRequest {
+            connection_id: p.connection_id,
+            database: p.database,
+            question: p.question.unwrap_or_default(),
+            editor_text: String::new(),
+            tables: p.tables,
+            options: super::context::ContextOptions {
+                api: p.include_api,
+                git: p.include_code,
+                history: p.include_history,
+                code_snippets: p.code_snippets,
+                project_id: p.project_id,
+            },
+        };
+        self.guard(
+            "table_context",
+            Some(req.connection_id),
+            None,
+            self.session.table_context(&req),
+        )
+        .await
+    }
+
+    #[tool(
         title = "Find table usages in code",
         description = "Find where application code uses tables: greps the code repository the user linked to a diagram group (local folder, or a clone Tabular already made) and returns file:line evidence per table. Read-only; never runs git and reads no other folders.",
         annotations(title = "Find table usages in code", read_only_hint = true, open_world_hint = false),
@@ -2320,6 +2390,7 @@ mod tests {
                 "schema_diagram",
                 "search_notes",
                 "search_query_history",
+                "table_context",
             ]
         );
         for tool in router.list_all() {
@@ -2535,7 +2606,7 @@ mod tests {
 
         // tools/list
         let tools = client.list_all_tools().await.expect("tools/list");
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 30);
         let tool = |name: &str| {
             tools
                 .iter()

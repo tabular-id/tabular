@@ -658,6 +658,55 @@ impl Tabular {
     }
 
     /// Bagian "Memory" di Settings → AI Assistant; berlaku untuk semua backend.
+    /// Bagian konteks tambahan yang dikirim bersama tiap pertanyaan chat
+    /// (selain skema): endpoint API, kode + git, query history.
+    pub(crate) fn render_ai_context_settings(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Context sent with each question", |ui| {
+            hint(
+                ui,
+                "Besides the cached schema, Tabular looks up what it knows about the tables you ask \
+                 about and adds it to the request. Each part can be turned off here or with the chips \
+                 above the chat input. Everything is read from this computer; nothing is cloned or \
+                 fetched.",
+            );
+            if toggle_row(
+                ui,
+                &mut self.ai_context_api,
+                "API endpoints and business processes",
+                Some(
+                    "Endpoints from your HTTP collections and diagram links that read or write the \
+                     tables, their business process steps, and the integration tests covering them.",
+                ),
+            ) {
+                self.save_ai_prefs();
+            }
+            if toggle_row(
+                ui,
+                &mut self.ai_context_git,
+                "Code and git history",
+                Some(
+                    "Where the repositories linked to the diagram, API folders or repository setup use \
+                     the tables, plus the latest commits and uncommitted changes on those files. Code \
+                     snippets are sent to API providers with credentials masked; CLI agents only get \
+                     file locations.",
+                ),
+            ) {
+                self.save_ai_prefs();
+            }
+            if toggle_row(
+                ui,
+                &mut self.ai_context_history,
+                "Similar past queries",
+                Some(
+                    "Up to three queries you already ran on the connection that resemble the question, \
+                     found with the local vector index. Passwords are masked.",
+                ),
+            ) {
+                self.save_ai_prefs();
+            }
+        });
+    }
+
     pub(crate) fn render_ai_memory_settings(&mut self, ui: &mut egui::Ui) {
         if IS_MOBILE {
             return;

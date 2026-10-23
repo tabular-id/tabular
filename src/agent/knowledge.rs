@@ -300,7 +300,7 @@ fn origin_label(origin: &RelationOrigin) -> &'static str {
 }
 
 /// Nama tabel yang tampil untuk node.
-fn node_name(node: &DiagramNode) -> &str {
+pub(super) fn node_name(node: &DiagramNode) -> &str {
     if node.title.trim().is_empty() {
         &node.id
     } else {
@@ -312,11 +312,11 @@ fn short_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
-fn node_in_group(node: &DiagramNode, gid: &str) -> bool {
+pub(super) fn node_in_group(node: &DiagramNode, gid: &str) -> bool {
     node.group_ids.iter().any(|g| g == gid) || node.group_id.as_deref() == Some(gid)
 }
 
-fn clip_chars(text: &str, max: usize) -> (String, bool) {
+pub(super) fn clip_chars(text: &str, max: usize) -> (String, bool) {
     match text.char_indices().nth(max) {
         Some((cut, _)) => (format!("{}…", &text[..cut]), true),
         None => (text.to_string(), false),
@@ -330,7 +330,7 @@ fn is_zero(n: &usize) -> bool {
 /// Proses bisnis yang menyentuh tabel dalam cakupan (`None` = semua), urut
 /// path lalu method. Id node tabel diganti nama tabelnya; `request_id`,
 /// posisi dan kunci repository tidak ikut karena hanya berarti di GUI.
-fn flow_infos(
+pub(super) fn flow_infos(
     state: &DiagramState,
     scope_tables: Option<&HashSet<String>>,
     name_of: &dyn Fn(&str) -> String,
@@ -539,7 +539,7 @@ impl DiagramContext {
 
 /// Folder repository lokal per group, dibaca ulang tiap panggilan karena GUI
 /// bisa mengubahnya selama proses MCP berjalan.
-fn local_repo_paths(app_dir: &Path) -> crate::diagram_repo_paths::RepoPathStore {
+pub(super) fn local_repo_paths(app_dir: &Path) -> crate::diagram_repo_paths::RepoPathStore {
     crate::diagram_repo_paths::RepoPathStore::load(
         app_dir.join(crate::diagram_repo_paths::FILE_NAME),
     )
@@ -569,7 +569,7 @@ impl HeadlessSession {
     /// Diagram lokal, atau bila belum ada, diagram bersama dari tabel
     /// `diagram_by_tabular` di database target. Mengembalikan catatan bila
     /// diagram bersama gagal dimuat.
-    async fn load_any_diagram(
+    pub(super) async fn load_any_diagram(
         &self,
         id: i64,
         db: &str,

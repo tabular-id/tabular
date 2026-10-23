@@ -2013,6 +2013,9 @@ pub struct AiChatMessage {
     pub agent_label: Option<String>,
     /// Pemanggilan tool MCP luar pada giliran ini (chat HTTP API, K5).
     pub tool_calls: Vec<crate::ai_tool_calling::ToolCallRecord>,
+    /// Ringkasan konteks yang dikirim bersama giliran ini, mis.
+    /// "2 tables · 5 endpoints · 1 repo · 10 commits" (hanya role Assistant).
+    pub context_summary: Option<String>,
 }
 
 /// Sesi CLI aktif untuk melanjutkan percakapan (agy --conversation / claude --resume).

@@ -924,6 +924,7 @@ fn is_tabular_tool(name: &str) -> bool {
             | "search_query_history"
             | "analyze_query"
             | "find_table_usages"
+            | "table_context"
     )
 }
 
@@ -1030,6 +1031,26 @@ fn format_tabular_mcp_tool(
             "Analyze query".to_string(),
             args_ref.get("sql").and_then(clean_arg_str),
         ),
+        "table_context" => {
+            let tables = args_ref
+                .get("tables")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|s| !s.is_empty())
+                .or_else(|| args_ref.get("question").and_then(clean_arg_str));
+            (
+                tables
+                    .as_ref()
+                    .map(|t| format!("Gather context around {t}"))
+                    .unwrap_or_else(|| "Gather table context".to_string()),
+                tables,
+            )
+        }
         "find_table_usages" => {
             let tables = args_ref
                 .get("tables")

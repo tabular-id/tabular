@@ -22,6 +22,7 @@
 
 pub mod access;
 pub mod classify;
+pub mod context;
 pub mod core;
 pub mod harness;
 pub mod knowledge;

@@ -53,6 +53,33 @@ pub fn page(
     }
 }
 
+/// Commit terakhir yang menyentuh salah satu `paths` (relatif terhadap root
+/// repository). Dipakai konteks AI: "perubahan terbaru pada file yang memakai
+/// tabel X". Daftar path kosong atau repository tanpa commit menghasilkan
+/// daftar kosong.
+pub fn page_for_paths(
+    repo: &Path,
+    paths: &[String],
+    limit: usize,
+) -> Result<Vec<CommitInfo>, GitError> {
+    if paths.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let n = format!("-n{limit}");
+    let mut args = vec!["log", FORMAT, "--date-order", n.as_str(), "--"];
+    args.extend(paths.iter().map(String::as_str));
+    match cli::run_text(repo, &args) {
+        Ok(out) => Ok(parse(&out)),
+        Err(GitError::Command { detail, .. })
+            if detail.contains("does not have any commits")
+                || detail.contains("bad default revision") =>
+        {
+            Ok(Vec::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub fn parse(raw: &str) -> Vec<CommitInfo> {
     raw.split('\u{1e}')
         .filter_map(|rec| {

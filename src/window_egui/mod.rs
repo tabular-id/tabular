@@ -11,6 +11,7 @@ use crate::{connection, models, query_tools};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub mod agent_access_ui;
 mod ai_cli_settings;
+pub mod ai_context_jobs;
 pub mod ai_fix;
 pub mod ai_history_ui;
 pub mod ai_mcp_ui;
@@ -741,6 +742,15 @@ pub struct Tabular {
     pub ai_chat: Vec<models::structs::AiChatMessage>,
     pub ai_stream_receiver: Option<std::sync::mpsc::Receiver<crate::agent::harness::AgentEvent>>,
     pub ai_cancel: Option<crate::agent::harness::CancelHandle>,
+    /// Perakitan konteks (API, git, history) yang berjalan di thread latar
+    /// sebelum giliran chat dikirim; lihat `ai_context_jobs`.
+    pub ai_context_job: Option<ai_context_jobs::AiContextJob>,
+    /// Sertakan endpoint API / proses bisnis / integration test di prompt.
+    pub ai_context_api: bool,
+    /// Sertakan pemakaian tabel di kode repository dan commit git terbaru.
+    pub ai_context_git: bool,
+    /// Sertakan query history yang mirip.
+    pub ai_context_history: bool,
     /// Tab lain yang dilampirkan sebagai konteks (QueryTab::id); tab aktif selalu ikut
     pub ai_attached_tab_ids: Vec<usize>,
     pub ai_live_edit_parser: Option<crate::agent::live_edit::LiveEditParser>,

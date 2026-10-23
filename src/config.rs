@@ -629,6 +629,17 @@ pub struct AppPreferences {
     /// Izinkan AI menulis catatan baru ke `<vault>/Tabular Memory/`.
     #[serde(default)]
     pub ai_obsidian_allow_write: bool,
+    /// Sertakan endpoint API, proses bisnis dan integration test yang
+    /// menyentuh tabel yang ditanyakan di prompt AI assistant.
+    #[serde(default = "default_true")]
+    pub ai_context_api: bool,
+    /// Sertakan pemakaian tabel di kode repository yang di-link dan commit
+    /// git terbaru pada file-file itu.
+    #[serde(default = "default_true")]
+    pub ai_context_git: bool,
+    /// Sertakan query history yang mirip dengan pertanyaan.
+    #[serde(default = "default_true")]
+    pub ai_context_history: bool,
     /// Saran AI inline (ghost text) di editor SQL; default mati karena mengirim
     /// teks editor ke provider AI.
     #[serde(default)]
@@ -707,6 +718,9 @@ impl Default for AppPreferences {
             ai_obsidian_vault_path: String::new(),
             ai_obsidian_enabled: false,
             ai_obsidian_allow_write: false,
+            ai_context_api: true,
+            ai_context_git: true,
+            ai_context_history: true,
             ai_inline_suggestions: false,
             redis_browser_auto_refresh_seconds: default_redis_browser_auto_refresh_seconds(),
             sync_server_url: Some("https://api.tabular.id".to_string()),
@@ -801,6 +815,9 @@ pub(crate) fn apply_kv_pair(
         "ai_obsidian_vault_path" => prefs.ai_obsidian_vault_path = v.to_string(),
         "ai_obsidian_enabled" => prefs.ai_obsidian_enabled = v == "1",
         "ai_obsidian_allow_write" => prefs.ai_obsidian_allow_write = v == "1",
+        "ai_context_api" => prefs.ai_context_api = v == "1",
+        "ai_context_git" => prefs.ai_context_git = v == "1",
+        "ai_context_history" => prefs.ai_context_history = v == "1",
         "ai_inline_suggestions" => prefs.ai_inline_suggestions = v == "1",
         "redis_browser_auto_refresh_seconds" => {
             prefs.redis_browser_auto_refresh_seconds = v
@@ -974,6 +991,9 @@ impl ConfigStore {
                 ai_obsidian_vault_path: String::new(),
                 ai_obsidian_enabled: false,
                 ai_obsidian_allow_write: false,
+                ai_context_api: true,
+                ai_context_git: true,
+                ai_context_history: true,
                 ai_inline_suggestions: false,
                 redis_browser_auto_refresh_seconds: default_redis_browser_auto_refresh_seconds(),
                 sync_server_url: Some("https://api.tabular.id".to_string()),
@@ -1100,7 +1120,7 @@ impl ConfigStore {
             };
             let ai_panel_width_str = prefs.ai_panel_width.to_string();
             let notify_threshold_secs = prefs.notify_threshold_secs.to_string();
-            let entries: [(&str, &str); 31] = [
+            let entries: [(&str, &str); 34] = [
                 ("theme", prefs.theme.as_str()),
                 ("ui_mode", prefs.ui_mode.as_str()),
                 (
@@ -1160,6 +1180,18 @@ impl ConfigStore {
                     } else {
                         "0"
                     },
+                ),
+                (
+                    "ai_context_api",
+                    if prefs.ai_context_api { "1" } else { "0" },
+                ),
+                (
+                    "ai_context_git",
+                    if prefs.ai_context_git { "1" } else { "0" },
+                ),
+                (
+                    "ai_context_history",
+                    if prefs.ai_context_history { "1" } else { "0" },
                 ),
                 (
                     "ai_inline_suggestions",

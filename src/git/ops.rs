@@ -339,4 +339,33 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn log_for_paths_only_lists_commits_touching_them() {
+        let Some(repo) = temp_repo("log-paths") else {
+            eprintln!("git not installed; skipping");
+            return;
+        };
+        let r = &repo.0;
+        assert!(
+            log::page_for_paths(r, &["a.txt".to_string()], 10)
+                .expect("empty repo")
+                .is_empty()
+        );
+        std::fs::write(r.join("a.txt"), "one\n").expect("write");
+        std::fs::write(r.join("b.txt"), "one\n").expect("write");
+        stage_all(r).expect("stage");
+        commit(r, "first", false).expect("commit");
+        std::fs::write(r.join("b.txt"), "two\n").expect("write");
+        stage_all(r).expect("stage");
+        commit(r, "only b", false).expect("commit");
+
+        let a = log::page_for_paths(r, &["a.txt".to_string()], 10).expect("log a");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].subject, "first");
+        let b = log::page_for_paths(r, &["b.txt".to_string()], 1).expect("log b");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].subject, "only b");
+        assert!(log::page_for_paths(r, &[], 10).expect("no paths").is_empty());
+    }
 }

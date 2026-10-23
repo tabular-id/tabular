@@ -35,6 +35,8 @@ pub struct StoredMessage {
     pub usage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_summary: Option<String>,
 }
 
 impl StoredMessage {
@@ -50,6 +52,7 @@ impl StoredMessage {
             error: m.error.clone(),
             usage: m.usage.clone(),
             tool_calls: m.tool_calls.clone(),
+            context_summary: m.context_summary.clone(),
         }
     }
 
@@ -80,6 +83,7 @@ impl StoredMessage {
             error: self.error,
             usage: self.usage,
             tool_calls,
+            context_summary: self.context_summary,
             ..Default::default()
         }
     }
@@ -360,6 +364,7 @@ mod tests {
             error: None,
             usage: None,
             tool_calls: Vec::new(),
+            context_summary: None,
         }
     }
 
